@@ -186,3 +186,11 @@ However, the important parts that this script relies on are:
 3. The colon-delimited values in the sample columns that correspond to the positions defined in the FORMAT column.
 
 The file may otherwise be a standard VCF file containing header lines preceded by '##'.  Empty lines are OK and will be printed regardless of parameters supplied to this script.  Note, the --header and --no-header flags of this script do not refer to the VCF file's header, but rather the script run info header.  Note that with the script run info header, the output is no longer a standard VCF format file.  Use --no-header and the format of the output will be consistent with a standard VCF file.
+
+## OUTPUT FORMAT: (-o, --outfile-suffix, --outfile-extension, STDOUT)
+
+The output file is essentially the same format as the input VCF files, except 3 columns are added at the beginning of the file:
+
+1. Number of hits and a summary of the filters that were passed passed
+2. A listing of variant support/mapped reads per sample
+3. A listing of samples containing evidence for the variant
