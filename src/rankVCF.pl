@@ -18,7 +18,8 @@ use warnings;
 use strict;
 use CommandLineInterface;
 
-setScriptInfo(VERSION => '1.0',
+our $VERSION = '1.01';
+setScriptInfo(VERSION => $VERSION,
               CREATED => '6/22/2017',
               AUTHOR  => 'Robert William Leach',
               CONTACT => 'rleach@princeton.edu',
@@ -29,6 +30,14 @@ setScriptInfo(VERSION => '1.0',
 This script takes a sequence variant file in VCF format and sorts the records in the file in ranked order, with optional filtering.  If you have multiple samples for a variant on each row, you can define groups of samples, each with criteria to be met to keep each row, or filter it out.  E.g. You can specify that the genotype of a variant in samples 1 & 2 must be different from the genotype of the variant in samples 3 & 4.  Or you can specify that the genotype of the variant in at least N samples (1, 2, and 3) must differ from the genotype of the variant in at least M samples (4, 5, 6, and 7).
 
 END_HELP
+	      ,
+	      DETAILED_HELP => << 'END_AHELP'
+
+Sorting is done by descending number of samples with hits, descending total support/mapped ratio, descending number of total mapped reads, and ascending sample name.
+
+Filtering is done using the minimum number of mapped reads, minimum variant support reads / total reads ratio, fewer than all have the variant, and by the comparison ratios by supplying pairs of sets of sample names required to be "different".  Each group of samples must be accompanied by a number of samples in the group that are required to differ from the other group in the pair of groups.  One of the groups' accompanying number of samples must represent over 50% of the samples.  Note, there must also be a minimum number of reads mapped in a variant location in order to be positively called a non-variant.
+
+END_AHELP
 	     );
 
 setDefaults(HEADER        => 1,
@@ -57,6 +66,21 @@ However, the important parts that this script relies on are:
 3. The colon-delimited values in the sample columns that correspond to the positions defined in the FORMAT column.
 
 The file may otherwise be a standard VCF file containing header lines preceded by '##'.  Empty lines are OK and will be printed regardless of parameters supplied to this script.  Note, the --header and --no-header flags of this script do not refer to the VCF file's header, but rather the script run info header.  Note that with the script run info header, the output is no longer a standard VCF format file.  Use --no-header and the format of the output will be consistent with a standard VCF file.
+
+END_FORMAT
+		 );
+
+addOutfileSuffixOption(GETOPTKEY   => 'o|outfile-suffix|outfile-extension=s',
+		       PRIMARY     => 1,
+		       DEFAULT     => undef,
+		       SMRY_DESC   => 'Outfile extension (appended to -i).',
+		       FORMAT_DESC => << 'END_FORMAT'
+
+The output file is essentially the same format as the input VCF files, except 3 columns are added at the beginning of the file:
+
+1. Number of hits and a summary of the filters that were passed passed
+2. A listing of variant support/mapped reads per sample
+3. A listing of samples containing evidence for the variant
 
 END_FORMAT
 		 );
