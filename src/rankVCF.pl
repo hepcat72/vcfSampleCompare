@@ -18,7 +18,7 @@ use warnings;
 use strict;
 use CommandLineInterface;
 
-our $VERSION = '1.01';
+our $VERSION = '1.02';
 setScriptInfo(VERSION => $VERSION,
               CREATED => '6/22/2017',
               AUTHOR  => 'Robert William Leach',
@@ -113,26 +113,100 @@ my $min_support_ratio = 0.7;
 addOption(GETOPTKEY   => 'm|min-support-ratio=s',
 	  GETOPTVAL   => \$min_support_ratio,
 	  DEFAULT     => $min_support_ratio,
-	  SMRY_DESC   => 'Minimum ratio of variant-supporting reads vs total.',
-	  DETAIL_DESC => ('Minimum ratio of reads supporting a variant ' .
-			  '(over total reads that mapped over the variant) ' .
-			  'in order to keep the row/line/record.  If any ' .
-			  'sample meets this requirement, the entire ' .
+	  SMRY_DESC   => 'Minimum ratio of small variant reads vs total.',
+	  DETAIL_DESC => ('Minimum ratio of reads supporting a small ' .
+			  'variant (over total reads that mapped over the ' .
+			  'variant) in order to keep the row/line/record.  ' .
+			  'If any sample meets this requirement, the entire ' .
 			  'record is kept (potentially including samples ' .
 			  'which failed this filter).  Applies to all ' .
-			  'samples.'));
+			  'samples.  Only used on SNP VCF records, such as ' .
+			  'are produced by freeBayes - otherwise ignored.'));
 
 my $min_read_depth = 2;
 addOption(GETOPTKEY   => 'r|min-read-depth=i',
 	  GETOPTVAL   => \$min_read_depth,
 	  DEFAULT     => $min_read_depth,
-	  SMRY_DESC   => 'Minimum number of reads mapped over a variant.',
+	  SMRY_DESC   => 'Minimum number of reads mapped over small variant.',
 	  DETAIL_DESC => ('Minimum number of reads required to have mapped ' .
-			  'over a variant position in order to make a ' .
-			  'variant call.  If any sample meets this ' .
+			  'over a small variant position in order to make a ' .
+			  'small variant call (e.g. a SNP).  If any sample ' .
+			  'meets this requirement, the entire record is ' .
+			  'kept (potentially including samples which failed ' .
+			  'this filter).  Applies to all samples.  Only ' .
+			  'used on SNP VCF records, such as are produced by ' .
+			  'freeBayes - otherwise ignored.'));
+
+my $min_discords_def = 1;
+my($min_discords);
+addOption(GETOPTKEY   => 'p|min-discordants=i',
+	  GETOPTVAL   => \$min_discords,
+	  DEFAULT     => $min_discords_def,
+	  SMRY_DESC   => ('Min num of discordant read pairs supporting a ' .
+			  'structural variant.'),
+	  DETAIL_DESC => ('Minimum number of discordant read pairs required ' .
+			  'to support a structural variant in order to make ' .
+			  'a call.  This value, plus the value for -c must ' .
+			  'be less than or equal to the value for -v (if -v ' .
+			  'is also supplied).  If any sample meets this ' .
 			  'requirement, the entire record is kept ' .
 			  '(potentially including samples which failed this ' .
-			  'filter).  Applies to all samples.'));
+			  'filter).  A read pair (from a paired-end ' .
+			  'sequencing run) is considered discordant if they ' .
+			  'mapped to unexpected positions.  Pairs are ' .
+			  'expected to map an specified distance from one ' .
+			  'another (i.e. the sequencing insert length) in ' .
+			  'specific orientations.  If the distance between ' .
+			  'them or their orientation is not as expected, ' .
+			  'they are discordant.  Applies to all samples.  ' .
+			  'Only used on SV VCF records, such as are ' .
+			  'produced by lumpy - otherwise ignored.'));
+
+my $min_splits_def = 1;
+my($min_splits);
+addOption(GETOPTKEY   => 'c|min-splits=i',
+	  GETOPTVAL   => \$min_splits,
+	  DEFAULT     => $min_splits_def,
+	  SMRY_DESC   => ('Min num of split reads supporting a structural ' .
+			  'variant.'),
+	  DETAIL_DESC => ('Minimum number of split reads required to ' .
+			  'support a structural variant in order to make a ' .
+			  'call.  This value, plus the value for -p must be ' .
+			  'less than or equal to the value for -v (if -v is ' .
+			  'also supplied).  If any sample meets this ' .
+			  'requirement, the entire record is kept ' .
+			  '(potentially including samples which failed this ' .
+			  'filter).  A split read (a.k.a. a soft-clipped ' .
+			  'read) is a read where roughly half of it maps to ' .
+			  'one position and the other half either does not ' .
+			  'map (or maps to a different position).  Applies ' .
+			  'to all samples.  Only used on SV VCF records, ' .
+			  'such as are produced by lumpy - otherwise ' .
+			  'ignored.'));
+
+my $min_svs_def = 2;
+my($min_svs);
+addOption(GETOPTKEY   => 'v|min-sv-reads=i',
+	  GETOPTVAL   => \$min_svs,
+	  DEFAULT     => "$min_svs_def*",
+	  SMRY_DESC   => ('Min num of split or discordant reads supporting ' .
+			  'a structural variant.'),
+	  DETAIL_DESC => ('Minimum number of split reads or discordant read ' .
+			  'pairs required to support a structural variant ' .
+			  'in order to make a call.  Must be larger than or ' .
+			  'equal to the sum of the values for -p and -c.  ' .
+			  'If any sample meets this requirement, the entire ' .
+			  'record is kept (potentially including samples ' .
+			  'which failed this filter).  A split read (a.k.a. ' .
+			  'a soft-clipped read) is a read where roughly ' .
+			  'half of it maps to one position and the other ' .
+			  'half either does not map (or maps to a different ' .
+			  'position).  Applies to all samples.  Only used ' .
+			  'on SV VCF records, such as are produced by lumpy ' .
+			  '- otherwise ignored.' .
+			  "\n\n* If -c and/or -p are supplied, the default " .
+			  "of this value is the sum of the values for -p " .
+			  "and -c."));
 
 processCommandLine();
 
@@ -216,6 +290,59 @@ if(scalar(@$sample_groups) &&
 	   "samples.  This makes the results more interpretable."});
     quit(3);
   }
+
+if(defined($min_svs))
+  {
+    if(!defined($min_discords))
+      {$min_discords = $min_discords_def}
+    if(!defined($min_splits))
+      {$min_splits = $min_splits_def}
+    my $min_svs = $min_discords + $min_splits;
+  }
+elsif(defined($min_discords) || defined($min_splits))
+  {
+    if(!defined($min_discords))
+      {$min_discords = $min_discords_def}
+    if(!defined($min_splits))
+      {$min_splits = $min_splits_def}
+    $min_svs = $min_discords + $min_splits;
+  }
+else
+  {
+    if(!defined($min_discords))
+      {$min_discords = $min_discords_def}
+    if(!defined($min_splits))
+      {$min_splits = $min_splits_def}
+    if(!defined($min_svs))
+      {$min_svs = $min_svs_def}
+  }
+
+if($min_svs < ($min_discords + $min_splits))
+  {
+    my $sum = $min_discords + $min_splits;
+    error(($min_svs_def < ($min_discords_def + $min_splits_def) ?
+	   'Hard-coded defaults error: ' : ''),"-v [$min_svs] cannot be less ",
+	  "than the sum of -p [$min_discords] and -c [$min_splits]: [$sum].");
+    quit(4);
+  }
+
+if($min_discords < 0)
+  {
+    error("Invalid value for -p: [$min_discords].  Cannot be negative.");
+    quit(5);
+  }
+elsif($min_splits < 0)
+  {
+    error("Invalid value for -c: [$min_splits].  Cannot be negative.");
+    quit(6);
+  }
+elsif($min_svs < 0)
+  {
+    error("Invalid value for -v: [$min_svs].  Cannot be negative.");
+    quit(7);
+  }
+
+my $global_mode = '';
 
 while(nextFileCombo())
   {
@@ -336,30 +463,104 @@ while(nextFileCombo())
 	foreach my $key (split(/:/,$format_str,-1))
 	  {$format_key_tosubindex->{$key} = $format_subindex++}
 
-	if(!exists($format_key_tosubindex->{DP}))
+	my $mode = '';
+	if(exists($format_key_tosubindex->{DP}) ||
+	   exists($format_key_tosubindex->{AO}))
 	  {
-	    error("The index of the read depth key [DP] could not be found ",
-		  "in the FORMAT string in data record [$data_line] on line ",
-		  "[$line_num] in file [$inputFile].  Skipping line.",
-		  {DETAIL => 'The read depth per sample is required by -m ' .
-		   'and -r for filtering and ranking.'});
+	    $mode = 'SNP';
+	    if($global_mode ne 'SNP' && $global_mode ne 'MIXED' &&
+	       $global_mode ne '')
+	      {$global_mode = 'MIXED'}
+	    else
+	      {$global_mode = $mode}
+	  }
+	elsif(scalar(grep {exists($format_key_tosubindex->{$_})}
+		     ('SU','PE','SR')))
+	  {
+	    $mode = 'SV';
+	    if($global_mode ne 'SV' && $global_mode ne 'MIXED' &&
+	       $global_mode ne '')
+	      {$global_mode = 'MIXED'}
+	    else
+	      {$global_mode = $mode}
+	  }
+	else
+	  {
+	    error("Unable to determine variant type for record in line: ",
+		  "[$line_num] of file: [$inputFile].  Skipping line.",
+		  {DETAIL => ("The format string must have at least one of " .
+			      "the following keys: [DP,AO,SU,PE,SR].")});
 	    next;
 	  }
-	elsif(!exists($format_key_tosubindex->{AO}))
+	if($mode eq 'SNP')
 	  {
-	    error("The index of the key for the number of read supporting ",
-		  "the alternate genotype [AO] could not be found in the ",
-		  "FORMAT string in data record [$data_line] on line ",
-		  "[$line_num] in file [$inputFile].  Skipping line.",
-		  {DETAIL => 'The alternate genotype read support per ' .
-		   'sample is required by -m for filtering and ranking.'});
-	    next;
+	    if(!exists($format_key_tosubindex->{DP}))
+	      {
+		error("The index of the read depth key [DP] could not be ",
+		      "found in the FORMAT string in data record ",
+		      "[$data_line] on line [$line_num] in file ",
+		      "[$inputFile].  Skipping line.",
+		      {DETAIL => ('The read depth per sample is required by ' .
+				  '-m and -r for filtering and ranking.')});
+		next;
+	      }
+	    elsif(!exists($format_key_tosubindex->{AO}))
+	      {
+		error("The index of the key for the number of read ",
+		      "supporting the alternate genotype [AO] could not be ",
+		      "found in the FORMAT string in data record ",
+		      "[$data_line] on line [$line_num] in file ",
+		      "[$inputFile].  Skipping line.",
+		      {DETAIL => ('The alternate genotype read support per ' .
+				  'sample is required by -m for filtering ' .
+				  'and ranking.')});
+		next;
+	      }
+	  }
+	elsif($mode eq 'SV')
+	  {
+	    if(!exists($format_key_tosubindex->{SU}))
+	      {
+		error("The index of the supporting evidence key [SU] could ",
+		      "not be found in the FORMAT string in data record ",
+		      "[$data_line] on line [$line_num] in file ",
+		      "[$inputFile].  Skipping line.",
+		      {DETAIL => ('The supporting evidence per sample is ' .
+				  'required by -v for filtering and ' .
+				  'ranking.')});
+		next;
+	      }
+	    elsif(!exists($format_key_tosubindex->{PE}))
+	      {
+		error("The index of the key for the number of discordant ",
+		      "read pairs supporting a structural variant [PE] could ",
+		      "not be found in the FORMAT string in data record ",
+		      "[$data_line] on line [$line_num] in file ",
+		      "[$inputFile].  Skipping line.",
+		      {DETAIL => ('The structural variant read pair support ' .
+				  'per sample is required by -p for ' .
+				  'filtering and ranking.')});
+		next;
+	      }
+	    elsif(!exists($format_key_tosubindex->{SR}))
+	      {
+		error("The index of the key for the number of split reads ",
+		      "supporting a structural variant [SR] could not be ",
+		      "found in the FORMAT string in data record ",
+		      "[$data_line] on line [$line_num] in file ",
+		      "[$inputFile].  Skipping line.",
+		      {DETAIL => ('The structural variant split read ' .
+				  'support per sample is required by -c for ' .
+				  'filtering and ranking.')});
+		next;
+	      }
 	  }
 
 	my $got    = 0;
 	my $depths = {};
 	my @hits   = ();
 	my @rats   = ();
+	my @filts  = ();
 
 	foreach my $format_subindex (0..$#samples)
 	  {
@@ -367,7 +568,8 @@ while(nextFileCombo())
 	    #position of this variant)
 	    if($data[$format_subindex] eq '.')
 	      {
-		#Create a bogus record so that DP and AO can be set to 0
+		#Create a bogus record so that DP and AO (or SU, PE, and SR)
+		#can be set to 0
 		$data[$format_subindex] =
 		  "0:"x(scalar(keys(%$format_key_tosubindex)));
 		chop($data[$format_subindex]);
@@ -379,36 +581,72 @@ while(nextFileCombo())
 	    #Get the data specific to this sample
 	    my @d = split(/:/,$data[$format_subindex],-1);
 
-	    #Sometimes there are multiple alternate variants that are comma
-	    #delimited.  We will consider the one with the most support because
-	    #all we're doing is seeing if anything marks this sample as a hit
-	    my $ao = max(split(/,/,$d[$format_key_tosubindex->{AO}]));
-
 	    debug("Data for sample [$sample]: [",join(':',@d),"].");
 
-	    #Record how many samples had adequate depth of coverage
-	    $depths->{$sample}++
-	      if($d[$format_key_tosubindex->{DP}] >= $min_read_depth);
-
-	    #If the depth is adequate, greater than 0, and support for the
-	    #alternate allele is adequate
-	    if($d[$format_key_tosubindex->{DP}] >= $min_read_depth &&
-	       $d[$format_key_tosubindex->{DP}] > 0 &&
-	       ($ao / $d[$format_key_tosubindex->{DP}]) >= $min_support_ratio)
+	    if($mode eq 'SNP')
 	      {
-		$got++;
+		#Sometimes there are multiple alternate variants that are comma
+		#delimited.  We will consider the one with the most support
+		#because all we're doing is seeing if anything marks this
+		#sample as a hit
+		my $ao = max(split(/,/,$d[$format_key_tosubindex->{AO}]));
 
-		#Record the ratios of alt allele support over total reads
-		push(@rats,"$ao/$d[$format_key_tosubindex->{DP}]");
+		#Record how many samples had adequate depth of coverage
+		$depths->{$sample}++
+		  if($d[$format_key_tosubindex->{DP}] >= $min_read_depth);
 
-		#Record the sample name that was a hit
-		push(@hits,$samples[$format_subindex]);
+		#If the depth is adequate, greater than 0, and support for the
+		#alternate allele is adequate
+		if($d[$format_key_tosubindex->{DP}] >= $min_read_depth &&
+		   $d[$format_key_tosubindex->{DP}] > 0 &&
+		   ($ao / $d[$format_key_tosubindex->{DP}]) >=
+		   $min_support_ratio)
+		  {
+		    $got++;
+
+		    #Record the ratios of alt allele support over total reads
+		    push(@rats,"$ao/$d[$format_key_tosubindex->{DP}]");
+
+		    #Record the sample name that was a hit
+		    push(@hits,$samples[$format_subindex]);
+		  }
+	      }
+	    else
+	      {
+		#Sometimes there are multiple alternate variants that are comma
+		#delimited.  We will consider the one with the most support
+		#because all we're doing is seeing if anything marks this
+		#sample as a hit
+		my $su = max(split(/,/,$d[$format_key_tosubindex->{SU}]));
+		my $sr = max(split(/,/,$d[$format_key_tosubindex->{SR}]));
+		my $pe = max(split(/,/,$d[$format_key_tosubindex->{PE}]));
+
+		if($su >= $min_svs      &&
+		   $pe >= $min_discords &&
+		   $sr >= $min_splits)
+		  {
+		    $got++;
+
+		    #Record the discrete filters that were passed which were >0
+		    push(@filts,'' .
+			 ($min_svs > ($min_discords + $min_splits) ?
+			  'SU' . $su . '/' : '') .
+			 ($min_discords > 0 ? 'PE' . $pe : '') .
+			 ($min_discords > 0 && $min_splits > 0 ? '/' : '') .
+			 ($min_splits   > 0 ? 'SR' . $sr : ''));
+
+		    #Record the sample name that was a hit
+		    push(@hits,$samples[$format_subindex]);
+		  }
 	      }
 	  }
 
 	my $anything_passed = 0;
-	my $pass_str = "$got,HITS>0,HITS<" . scalar(@samples) . ",SNP/DEP>=" .
-	  "$min_support_ratio,DEP>=$min_read_depth";
+	my $pass_str = "$got,HITS>0,HITS<" . scalar(@samples) .
+	  ($global_mode eq 'SV' ?
+	   '' : ",SNP/DEP>=$min_support_ratio,DEP>=$min_read_depth") .
+	     ($global_mode eq 'SNP' ?
+	      '' : ",SE>=$min_svs,PE>=$min_discords,SR>=$min_splits");
 	if(scalar(@$sample_groups))
 	  {
 	    my $group_pair_rule = 0;
@@ -432,19 +670,31 @@ while(nextFileCombo())
 		   ((scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set1)}
 			    @hits) >= $set1_min &&
 		     scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set2)}
-			    grep {exists($depths->{$_})}
+			    grep {$mode eq 'SV' || exists($depths->{$_})}
 			    @hits) < $set2_min &&
-		     scalar(grep {exists($depths->{$_})} @set2) >=
-		     $set2_min) ||
+		     scalar(grep {$mode eq 'SV' || exists($depths->{$_})}
+			    @set2) >= $set2_min) ||
 		    (scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set1)}
-			    grep {exists($depths->{$_})}
+			    grep {$mode eq 'SV' ||exists($depths->{$_})}
 			    @hits) < $set1_min &&
-		     scalar(grep {exists($depths->{$_})} @set1) >=
+		     scalar(grep {$mode eq 'SV' ||
+				    exists($depths->{$_})} @set1) >=
 		     $set1_min &&
 		     scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set2)}
 			    @hits) >= $set2_min)))
 		  {
-		    debug("PASSED POS1/NEG2: [",scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set1)} @hits),'/', scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set2)} grep {exists($depths->{$_})} @hits),"] NEG1/POS2: [",scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set1)} grep {exists($depths->{$_})} @hits),'/',scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set2)} @hits),"]");
+		    debug("PASSED POS1/NEG2: [",
+			  scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set1)}
+				 @hits),'/',
+			  scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set2)}
+				 grep {$mode eq 'SV' || exists($depths->{$_})}
+				 @hits),
+			  "] NEG1/POS2: [",
+			  scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set1)}
+				 grep {$mode eq 'SV' || exists($depths->{$_})}
+				 @hits),'/',
+			  scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set2)}
+				 @hits),"]");
 		    $anything_passed++;
 		    $pass_str .= ",GROUPRULEPAIR$group_pair_rule\[SET(" .
 		      join(',',@set1) . ")>=$set1_min DIFFERS FROM SET(" .
@@ -460,8 +710,9 @@ while(nextFileCombo())
 	if($anything_passed)
 	  {push(@passed,
 		join('',
-		     ("$pass_str\t",join(',',@rats),"\t",join(',',@hits),
-		      "\t$_")))}
+		     ("$pass_str\t",
+		      join(',',($mode eq 'SNP' ? @rats : @filts)),"\t",
+		      join(',',@hits),"\t$_")))}
       }
 
     closeIn(*IN);
@@ -481,38 +732,200 @@ sub rank
 	     #total read ratio, and the sample names that passed the filtering
 	     if($a=~/^(\d+)[^\t]+\t([^\t]+)\t([^\t]+)/)
 	       {
-		 my $ah      = $1; #number of 'a' hits
-		 my $arats   = $2; #Comma delimited 'a' ratios string
-		 my $asamps  = $3; #Comma delimited 'a' sample names
-		 my @anums   = split(/,/,$arats);
-		 my $anumsum = 0;
-		 my $adensum = 0;
-		 foreach my $arat (@anums)
+		 my $ah       = $1; #number of 'a' hits
+		 my $arats    = $2; #Comma delimited 'a' string of either SNP
+                                    #support ratios or SV evidence, depending
+                                    #on record type
+		 my $asamps   = $3; #Comma delimited 'a' sample names
+		 my @anums    = split(/,/,$arats);
+		 my $amode    = ($arats =~ /SU|SR|PE/ ? 'SV' :
+				 ($arats =~ /\d+\/\d+/ ? 'SNP' :
+				  ($arats eq '' ? 'SNP' : 'ERROR')));
+
+		 #SNP metrics
+		 my $anumsum  = 0;  #Support ratio numerator sum
+		 my $adensum  = 0;  #Support ratio denominator sum
+		 my $asup     = 0;
+
+		 #SV metric
+		 my $asusup   = 0;
+		 my $asrsup   = 0;
+		 my $apesup   = 0;
+		 my $abothsup = 0;
+
+		 if($amode eq 'SNP')
 		   {
-		     my($anum,$aden) = split(/\//,$arat);
-		     $anumsum += $anum;
-		     $adensum += $aden;
+		     foreach my $arat (@anums)
+		       {
+			 my($anum,$aden) = split(/\//,$arat);
+			 $anumsum += $anum;
+			 $adensum += $aden;
+		       }
+		     $asup = $anumsum / $adensum;
 		   }
-		 my $asup = $anumsum / $adensum;
+		 elsif($amode eq 'SV')
+		   {
+		     foreach my $arat (@anums)
+		       {
+			 my $asr = 0;
+			 my $ape = 0;
+			 if($arat =~ /SU(\d+)/)
+			   {$asusup += $1}
+			 if($arat =~ /SR(\d+)/)
+			   {$asr = $1}
+			 if($arat =~ /PE(\d+)/)
+			   {$ape += $1}
+			 if($asr && $ape)
+			   {$abothsup += $asr + $ape}
+			 $asrsup += $asr;
+			 $apesup += $ape;
+		       }
+		   }
+		 else
+		   {
+		     error("Unable to parse variant metrics.",
+			   {DETAIL => ('Expecting a comma delimited list of ' .
+				       'numeric fractions or coded read ' .
+				       'counts (e.g. SU1/PE2/SR3) in the ' .
+				       'second column.')});
+		   }
+
 		 if($b =~ /^(\d+)[^\t]+\t([^\t]+)\t([^\t]+)/)
 		   {
-		     my $bh      = $1; #number of 'b' hits
-		     my $brats   = $2; #Comma delimited 'b' ratios string
-		     my $bsamps  = $3; #Comma delimited 'b' sample names
-		     my @bnums   = split(/,/,$brats);
-		     my $bnumsum = 0;
-		     my $bdensum = 0;
-		     foreach my $brat (@bnums)
+		     my $bh       = $1; #number of 'b' hits
+		     my $brats    = $2; #Comma delimited 'b' ratios string
+		     my $bsamps   = $3; #Comma delimited 'b' sample names
+		     my @bnums    = split(/,/,$brats);
+		     my $bmode    = ($brats =~ /SU|SR|PE/ ? 'SV' :
+				     ($brats =~ /\d+\/\d+/ ? 'SNP' :
+				      ($brats eq '' ? 'SNP' : 'ERROR')));
+
+		     #SNP metrics
+		     my $bnumsum  = 0;
+		     my $bdensum  = 0;
+		     my $bsup     = 0;
+
+		     #SV metric
+		     my $bsusup   = 0;
+		     my $bsrsup   = 0;
+		     my $bpesup   = 0;
+		     my $bbothsup = 0;
+
+		     if($bmode eq 'SNP')
 		       {
-			 my($bnum,$bden) = split(/\//,$brat);
-			 $bnumsum += $bnum;
-			 $bdensum += $bden;
+			 foreach my $brat (@bnums)
+			   {
+			     my($bnum,$bden) = split(/\//,$brat);
+			     $bnumsum += $bnum;
+			     $bdensum += $bden;
+			   }
+			 $bsup = $bnumsum / $bdensum;
 		       }
-		     my $bsup = $bnumsum / $bdensum;
+		     elsif($bmode eq 'SV')
+		       {
+			 foreach my $brat (@bnums)
+			   {
+			     my $bsr = 0;
+			     my $bpe = 0;
+			     if($brat =~ /SU(\d+)/)
+			       {$bsusup += $1}
+			     if($brat =~ /SR(\d+)/)
+			       {$bsr = $1}
+			     if($brat =~ /PE(\d+)/)
+			       {$bpe += $1}
+			     if($bsr && $bpe)
+			       {$bbothsup += $bsr + $bpe}
+			     $bsrsup += $bsr;
+			     $bpesup += $bpe;
+			   }
+		       }
+		     else
+		       {
+			 error("Unable to parse variant metrics.",
+			       {DETAIL => ('Expecting a comma delimited ' .
+					   'list of numeric fractions or ' .
+					   'coded read counts (e.g. ' .
+					   'SU1/PE2/SR3) in the second ' .
+					   'column.')});
+		       }
 
 		     #This is the end result - logic for sorting
-		     $bh <=> $ah || $bsup <=> $asup || $bdensum <=> $adensum ||
-		       $asamps cmp $bsamps
+		     if($amode ne $bmode)
+		       {
+			 if($amode eq 'SV') #and bmode is SNP
+			   {
+			     #Sometimes SU isn't shown in the results (if the
+			     #user specified a different value for the other
+			     #cutoffs at the command line), but one or both of
+			     #the splits or discordants will definitely be
+			     #there.
+			     my $bsvsup =
+			       ($bsusup ? $bsusup : $bsrsup + $bpesup);
+
+			     #Number of hits
+			     $bh <=> $ah ||
+
+			       #All support for the SV versus all support for
+			       #the SNP
+			       $bsvsup <=> $anumsum ||
+
+				 #SV support from both discordants and splits
+				 #or support from total, splits, or discordants
+				 $bbothsup <=> $anumsum ||
+				    $bsusup <=> $anumsum ||
+				      $bsrsup <=> $anumsum ||
+					$bpesup <=> $anumsum ||
+
+					  #Or finally - sample name
+					  $asamps cmp $bsamps;
+			   }
+			 else #amode is SNP and bmode is SV
+			   {
+			     #Sometimes SU isn't shown in the results (if the
+			     #user specified a different value for the other
+			     #cutoffs at the command line), but one or both of
+			     #the splits or discordants will definitely be
+			     #there.
+			     my $asvsup =
+			       ($asusup ? $asusup : $asrsup + $apesup);
+
+			     #Number of hits
+			     $bh <=> $ah ||
+
+			       #All support for the SV versus all support for
+			       #the SNP
+			       $bnumsum <=> $asvsup ||
+
+				 #SV support from both discordants and splits
+				 #or support from total, splits, or discordants
+				 $bnumsum <=> $abothsup ||
+				    $bnumsum <=> $asusup ||
+				      $bnumsum <=> $asrsup ||
+					$bnumsum <=> $apesup ||
+
+					  #Or finally - sample name
+					  $asamps cmp $bsamps;
+			   }
+		       }
+		     else
+		       {
+			 #Note - using both SNP and SV metrics here does not
+			 #matter - the other type will be all 0s
+
+			 #Number of hits
+			 $bh <=> $ah ||
+
+			   #SNP support ratios or depth
+			   $bsup <=> $asup || $bdensum <=> $adensum ||
+
+			     #SV support from both discordants and splits
+			     #or support from total, splits, or discordants
+			     $bbothsup <=> $abothsup || $bsusup <=> $asusup ||
+			       $bsrsup <=> $asrsup || $bpesup <=> $apesup ||
+
+				 #Or finally - sample name
+				 $asamps cmp $bsamps;
+		       }
 		   }
 		 else
 		   {-1}
