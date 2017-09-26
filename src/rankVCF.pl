@@ -18,7 +18,7 @@ use warnings;
 use strict;
 use CommandLineInterface;
 
-our $VERSION = '1.04';
+our $VERSION = '1.05';
 setScriptInfo(VERSION => $VERSION,
               CREATED => '6/22/2017',
               AUTHOR  => 'Robert William Leach',
@@ -555,7 +555,7 @@ while(nextFileCombo())
 				  'ranking.')});
 		next;
 	      }
-	    elsif(!exists($format_key_tosubindex->{PE}))
+	    elsif(!exists($format_key_tosubindex->{PE}) && $min_discords)
 	      {
 		error("The index of the key for the number of discordant ",
 		      "read pairs supporting a structural variant [PE] could ",
@@ -617,7 +617,8 @@ while(nextFileCombo())
 		my $ao = max(split(/,/,$d[$format_key_tosubindex->{AO}]));
 		my $su = max(split(/,/,$d[$format_key_tosubindex->{SU}]));
 		my $sr = max(split(/,/,$d[$format_key_tosubindex->{SR}]));
-		my $pe = max(split(/,/,$d[$format_key_tosubindex->{PE}]));
+		my $pe = exists($format_key_tosubindex->{PE}) ?
+		  max(split(/,/,$d[$format_key_tosubindex->{PE}])) : 0;
 
 		#Record how many samples had adequate depth of coverage
 		$depths->{$sample}++
@@ -678,7 +679,8 @@ while(nextFileCombo())
 		#sample as a hit
 		my $su = max(split(/,/,$d[$format_key_tosubindex->{SU}]));
 		my $sr = max(split(/,/,$d[$format_key_tosubindex->{SR}]));
-		my $pe = max(split(/,/,$d[$format_key_tosubindex->{PE}]));
+		my $pe = exists($format_key_tosubindex->{PE}) ?
+		  max(split(/,/,$d[$format_key_tosubindex->{PE}])) : 0;
 
 		if($su >= $min_svs      &&
 		   $pe >= $min_discords &&
