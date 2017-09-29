@@ -18,7 +18,7 @@ use warnings;
 use strict;
 use CommandLineInterface;
 
-our $VERSION = '1.05';
+our $VERSION = '1.06';
 setScriptInfo(VERSION => $VERSION,
               CREATED => '6/22/2017',
               AUTHOR  => 'Robert William Leach',
@@ -705,11 +705,12 @@ while(nextFileCombo())
 	  }
 
 	my $anything_passed = 0;
-	my $pass_str = "$got,HITS>0,HITS<" . scalar(@samples) .
-	  ($global_mode eq 'SV' ?
-	   '' : ",SNP/DEP>=$min_support_ratio,DEP>=$min_read_depth") .
-	     ($global_mode eq 'SNP' ?
-	      '' : ",SE>=$min_svs,PE>=$min_discords,SR>=$min_splits");
+	my $pass_str = "$got,HITS>0" .
+	  (scalar(@samples) > 1 ? ",HITS<" . scalar(@samples) : '') .
+	    ($global_mode eq 'SV' ?
+	     '' : ",SNP/DEP>=$min_support_ratio,DEP>=$min_read_depth") .
+	       ($global_mode eq 'SNP' ?
+		'' : ",SE>=$min_svs,PE>=$min_discords,SR>=$min_splits");
 	if(scalar(@$sample_groups))
 	  {
 	    my $group_pair_rule = 0;
@@ -724,12 +725,14 @@ while(nextFileCombo())
 		debug("$_\nSET1: [@set1] SET1MIN: $set1_min ",
 		      "SET2: [@set2] SET2MIN: $set2_min");
 
-		#If we got something, not all samples were hits, and either:
+		#If we got something, not all samples were hits (or there's
+		#only 1 sample), and either:
 		# - The first sample group was a hit for the alternate allele
 		#   and the second sample group was not OR
 		# - The first sample group was not a hit for the alternate
 		#   allele and the second sample group was
-		if($got > 0 && $got < scalar(@samples) &&
+		if($got > 0 &&
+		   (scalar(@samples) == 1 || $got < scalar(@samples)) &&
 		   ((scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set1)}
 			    @hits) >= $set1_min &&
 		     scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set2)}
@@ -767,7 +770,7 @@ while(nextFileCombo())
 		  {debug("FAILED")}
 	      }
 	  }
-	elsif($got > 0 && $got < scalar(@samples))
+	elsif($got > 0 && (scalar(@samples) == 1 || $got < scalar(@samples)))
 	  {$anything_passed++}
 
 	if($anything_passed)
