@@ -18,7 +18,7 @@ use warnings;
 use strict;
 use CommandLineInterface;
 
-our $VERSION = '1.06';
+our $VERSION = '1.07';
 setScriptInfo(VERSION => $VERSION,
               CREATED => '6/22/2017',
               AUTHOR  => 'Robert William Leach',
@@ -354,6 +354,18 @@ elsif($min_svs < 0)
     quit(7);
   }
 
+if($min_support_ratio <= 0 && scalar(@$sample_groups))
+  {
+    error("The minimum support ratio (-m) cannot be 0 when -s is submitted.",
+	  {DETAIL =>
+	   join('',("Without -s, `-m 0` is OK because any sample with a ",
+		    "support ratio > 0.0 will pass through the filtering, ",
+		    "but when -s is supplied, one group of samples must have ",
+		    "a support ratio *below* the -m threshold, thus a value ",
+		    "of 0 (or less) cannot generate any output."))});
+    quit(8);
+  }
+
 my $global_mode = '';
 
 while(nextFileCombo())
@@ -429,6 +441,10 @@ while(nextFileCombo())
 
 	    @samples = @cols[$sample_name_start_index..$#cols];
 	    s/#//;
+
+	    if(scalar(@$sample_groups))
+	      {unless(validateSampleGroupNames(\@samples,$sample_groups))
+		 {quit(9)}}
 
 	    #Print the new header
 	    print("#NUMHITS,SEARCHCRITERIA\tSNPREAD/DEPTH\tSNPSAMPLES\t$_\n");
@@ -1010,4 +1026,42 @@ sub max
       {if(!defined($max) || $val > $max)
 	 {$max = $val}}
     return($max);
+  }
+
+sub validateSampleGroupNames
+  {
+    my $sample_names  = $_[0];
+    my $sample_groups = $_[1];
+
+    my $status = 1; #1 = success/validated
+    my $unique = {};
+    foreach my $sample (@$sample_names)
+      {$unique->{$sample}++}
+    foreach my $dupe (grep {$unique->{$_} > 1} keys(%$unique))
+      {
+	$status = 0;
+	error("Sample name [$dupe] occurs [$unique->{$dupe}] in the vcf ",
+	      "file.",
+	      {DETAIL => 'Sample names must be unique when -s is supplied'});
+      }
+
+    my $missing = {};
+    foreach my $pair_index ((0..$#{$sample_groups}))
+      {
+	foreach my $sample_name (grep {!exists($unique->{$_})}
+				 @{$sample_groups->[$pair_index]})
+	  {
+	    $status = 0;
+	    error("Sample name submitted with -s [$sample_name] was not ",
+		  "found in the vcf file.",
+		  {DETAIL => join('',('Sample names submitted with -s must ',
+				      'exactly match those present on the ',
+				      'header line in the vcf file (the line ',
+				      'starting with "#CHROM").  The VCF ',
+				      'file contains: [',
+				      join(',',@$sample_names),'].'))});
+	  }
+      }
+
+    return($status);
   }
