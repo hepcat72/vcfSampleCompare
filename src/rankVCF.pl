@@ -18,7 +18,7 @@ use warnings;
 use strict;
 use CommandLineInterface;
 
-our $VERSION = '1.07';
+our $VERSION = '1.08';
 setScriptInfo(VERSION => $VERSION,
               CREATED => '6/22/2017',
               AUTHOR  => 'Robert William Leach',
@@ -78,7 +78,7 @@ addOutfileSuffixOption(GETOPTKEY   => 'o|outfile-suffix|outfile-extension=s',
 
 The output file is essentially the same format as the input VCF files, except 3 columns are added at the beginning of the file:
 
-1. Number of hits and a summary of the filters that were passed passed
+1. Number of hits and a summary of the filters that were passed
 2. A listing of variant support/mapped reads per sample (or a listing of the stuctural variant support values that passed cutoffs (SU, SR, and/or PE).
 3. A listing of samples containing evidence for the variant
 
