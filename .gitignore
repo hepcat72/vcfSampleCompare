@@ -4,3 +4,4 @@ Makefile
 *blib
 t
 galaxy
+.DS_Store
