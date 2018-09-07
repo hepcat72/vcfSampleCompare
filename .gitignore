@@ -5,3 +5,5 @@ Makefile
 t
 galaxy
 .DS_Store
+
+src/#rankVCF.pl#
