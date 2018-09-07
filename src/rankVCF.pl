@@ -14,7 +14,7 @@
 
 #Template version: 1.0
 
-use warnings;ßß
+use warnings;
 use strict;
 use CommandLineInterface;
 
