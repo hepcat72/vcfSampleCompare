@@ -14,11 +14,11 @@
 
 #Template version: 1.0
 
-use warnings;
+use warnings;ßß
 use strict;
 use CommandLineInterface;
 
-our $VERSION = '1.08';
+our $VERSION = '1.09';
 setScriptInfo(VERSION => $VERSION,
               CREATED => '6/22/2017',
               AUTHOR  => 'Robert William Leach',
@@ -106,7 +106,7 @@ addArrayOption(GETOPTKEY   => 'd|group-diff-min=s',
 	       SMRY_DESC   => 'Number of group samples required to differ.',
 	       DETAIL_DESC => << 'END_DETAIL'
 
-Sample groups defined by -s are procssed in pairs.  Each -s group is accompanied by a minimum number of samples in that group that are required to be different from the genotype of its partner group.  "Different" in this case means the genotype state of each sample for the variant defined by the VCF record (a data row/line in the VCF file).
+Sample groups defined by -s are processed in pairs.  Each -s group is accompanied by a minimum number of samples in that group that are required to be different from the genotype of its partner group.  "Different" in this case means the genotype state of each sample for the variant defined by the VCF record (a data row/line in the VCF file).
 
 END_DETAIL
 		);
@@ -122,15 +122,16 @@ addOption(GETOPTKEY   => 'm|min-support-ratio=s',
 			  'sample meets this requirement, the entire record ' .
 			  'is kept (potentially including samples which ' .
 			  'failed this filter).  Applies to all samples.  ' .
-			  'Only used VCF records produced by freeBayes and ' .
-			  'SVTyper, as it requires AO and DP to be present ' .
-			  'in the FORMAT string - otherwise ignored.  In ' .
-			  'the case of structural variants from SVTyper, AO ' .
-			  'is assumed to indicate the number of split, soft-' .
-			  'clipped, or discordant reads that support the ' .
-			  'variant and everything else is attroibuted to RO ' .
-			  'support (reference observations, i.e. number of ' .
-			  'reads that span the breakpoint).'));
+			  'This option is only used for VCF records ' .
+			  'produced by freeBayes or SVTyper, as it requires ' .
+			  'AO and DP to be present in the FORMAT string - ' .
+			  'otherwise ignored.  In the case of structural ' .
+			  'variants from SVTyper, AO is assumed to indicate ' .
+			  'the number of split, soft-clipped, or discordant ' .
+			  'reads that support the variant and everything ' .
+			  'else is attroibuted to RO support (reference ' .
+			  'observations, i.e. number of reads that span the ' .
+			  'breakpoint).'));
 
 my $min_read_depth = 2;
 addOption(GETOPTKEY   => 'r|min-read-depth=i',
