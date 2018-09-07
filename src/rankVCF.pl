@@ -10,7 +10,7 @@
 #Room 137A
 #Princeton, NJ 08544
 #rleach@princeton.edu
-#Copyright 2017
+#Copyright 2018
 
 #Template version: 1.0
 
@@ -18,7 +18,7 @@ use warnings;
 use strict;
 use CommandLineInterface;
 
-our $VERSION = '1.09';
+our $VERSION = '2.000';
 setScriptInfo(VERSION => $VERSION,
               CREATED => '6/22/2017',
               AUTHOR  => 'Robert William Leach',
@@ -27,7 +27,11 @@ setScriptInfo(VERSION => $VERSION,
               LICENSE => 'Copyright 2017',
               HELP    => << 'END_HELP'
 
-This script takes a sequence variant file in VCF format and sorts the records in the file in ranked order, with optional filtering.  If you have multiple samples for a variant on each row, you can define groups of samples, each with criteria to be met to keep each row, or filter it out.  E.g. You can specify that the genotype of a variant in samples 1 & 2 must be different from the genotype of the variant in samples 3 & 4.  Or you can specify that the genotype of the variant in at least N samples (1, 2, and 3) must differ from the genotype of the variant in at least M samples (4, 5, 6, and 7).
+This script takes a sequence variant file with greater than 1 sample in VCF format and outputs variants sorted by how different their samples are.  Degree of difference is based on the ratio of the number of reads supporting a variant state over the total number of observations at that variant position for one sample versus the same variant state's observation ratio in another sample.
+
+By default, the sample pair with the variant state with the greatest difference is what is reported for each row of the input VCF file.  Multiple comparisons are supported however by defining pairs of sample groups.  E.g. You can specify that the genotype of a variant in samples 1 & 2 (which must have the same genotype) must differ from the genotype of the variant in samples 3 & 4.  Or you can specify that the genotype of the variant in at least N samples (1, 2, and 3) must differ from the genotype of the variant in at least M samples (4, 5, 6, and 7).
+
+In cases where you have a single wild-type sample and you want to find a variant from 1 or more other samples in a group of 10 mutants that differ, this script will report all the samples that differ from the wildtype's state using a separation ratio.  The difference in the observation ratios of the wildtype versus each mutant must be larger than the separation ratio in order to be reported.  E.g. If the SNP at position 100 has an 'A' in the wildtype in 9 out of 10 reads and mutant 1 has an 'A' in 1 out of 10 reads, the difference in the ratios is 0.9 - 0.1 = 0.8.  0.8 must be above the separation ratio threshold.  Each mutant whose observations of 'A' meets the separation threshold when compared to the wild type will be reported as different from the wild type.
 
 END_HELP
 	      ,
