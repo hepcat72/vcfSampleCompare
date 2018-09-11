@@ -144,9 +144,10 @@ add2DArrayOption(GETOPTKEY   => 's|sample-group',
 				 'comparisons.'),
 		 DETAIL_DESC => << 'END_DETAIL'
 
-This option must be supplied an even number of times (or once*).  It defines groups of samples between which to rank differences in genotype or allelic frequencies.  For example, if you have 3 wildtype samples and 4 mutant samples, you can define these 2 groups using -s 's1 s2 s3' -s 's4 s5 s6 s7' (where 's1' and other sample names match the sample names in the VCF column headers row).  This defines 2 groups (wild type and mutant) whose differences will be used to sort the variants/rows of the VCF file.  See --extended --help for a description of how degree of difference is calculated.
+This option must be supplied an even number of times (or once* or 0 times**).  Each pair of samples groups, in order, is compared to determine the maximum difference between the groups.  For example, if you have 3 wildtype samples and 4 mutant samples, you can define these 2 groups using -s 's1 s2 s3' -s 's4 s5 s6 s7' (where sample name 's1', 's2', and 's3' are the wildtype samples and 's4', 's5', 's6', and 's7' are mutant samples.  (All sample names must match the sample names in the VCF column headers row.)  The differences in variant states between these groups of samples will be used to sort the variants/rows of the VCF file.  See --extended --help for a description of how degree of difference is calculated.
 
 * If only one group is defined, the second group is assumed to be the remainder of the samples.
+** If no groups are defined, groups are dynamically determined for each variant/row.  See --help --extended for details.
 
 END_DETAIL
 		);
@@ -161,13 +162,7 @@ addArrayOption(GETOPTKEY   => 'd|min-group-size',
 			       'rank).'),
 	       DETAIL_DESC => << 'END_DETAIL'
 
-Sample groups defined by -s are processed in pairs.  Each -s group is accompanied by a (minimum) number of samples in that group with which to compute the maximum difference with the partner group.  The purpose is best shown by example.  If you have 5 mutant samples and 3 replicate wildtype samples, you may want to find variants where 1 or more mutants differ from all 3 wildtype samples, thus -d for the mutant group would be '1' and -d for the wildtype group would be '3'.  In order to produce meaningful results, one group in each pair of groups must get a value that is larger than half the group size.
-
-When looking for differences between sample groups, it's important to note how -d is used.  Variants are sorted by their maximum difference between a pair of groups of samples.  There are 2 maximum differences that can be computed: genotype and allelic frequency, and are used in that order hierarchically.
-
-To determine the maximum allelic frequency difference, two differences for each variant state (e.g. SNP value of 'A') are computed: 1. the top (-d) observation ratios of group 1 versus the bottom (-d) observation ratios of group 2. 2. the bottom (-d) observation ratios of group 1 versus the top (-d) observation ratios of group 2.  The larger of the 2 difference results is kept.  Of all the variant states (e.g. for a SNP, the states are A, T, G, or C), the one producing the largest difference between the sample groups is used to represent the row and is the basis for sorting.  If multiple pairs of sample groups are defined, sorting is based on the largest difference value generated for each pair of groups.
-
-When --genotype is supplied, the the majority call of the first sample group defines group 1 and all samples with a different genotype call define group 2.  Rank is then determined by dividing group 1's size by the larger of: group 1's size or -d and then multiplying that result with the same result for group 2.
+Each sample group defined by -s is accompanied by a (minimum) number of samples in that group with which to compute the maximum difference against its partner group.  Each instance of -s should have a -d value supplied.  The order of the -d values should correspond to the order of the -s sample groups they apply to.  The default for each group is the group size, but a smaller number can bespecified.  The purpose is best shown by example.  If you have 5 mutant samples and 3 replicate wildtype samples, you may want to find variants where 1 or more mutants differ from all 3 wildtype samples, thus -d for the mutant group would be '1' and -d for the wildtype group would be '3'.  In order to produce meaningful results, one group in each pair of groups must get a value that is larger than half the group size.  See --help --extended for details on how this affects variant sorting, sample group growing, and filtering.
 
 END_DETAIL
 		);
@@ -177,15 +172,16 @@ addOption(GETOPTKEY   => 'a|separation-gap',
 	  TYPE        => 'float',
 	  GETOPTVAL   => \$separation_gap,
 	  DEFAULT     => $separation_gap,
-	  SMRY_DESC   => ("Minimum difference in sample groups' observation " .
-			  'ratio averages.'),
-	  DETAIL_DESC => ("Minimum difference in sample groups' observation " .
-			  'ratio averages.  The largest difference between ' .
-			  'groups defined by -s (and -d) must be at least ' .
-			  'this value in order to either be retained (see ' .
-			  '--filter|--nofilter) or grown (--grow|--nogrow).  ' .
-			  'This option is only used when either --filter or ' .
-			  '--grow are true.'));
+	  SMRY_DESC   => ("Allelic frequency difference threshold [0-1]."),
+	  DETAIL_DESC => ('The maximum difference between average ' .
+			  'observation ratios for a given variant state ' .
+			  '(e.g. a SNP value of "A") between groups defined ' .
+			  'by -s (and -d) must be at least this value in ' .
+			  'order to either be retained (see --filter|' .
+			  '--nofilter) or grown (--grow|--nogrow).  This ' .
+			  'option is only used when either --filter or ' .
+			  '--grow are true.  See --help --extended for more ' .
+			  'details.'));
 
 my $use_gt = 1;
 addOption(GETOPTKEY   => 'g|genotype',
@@ -193,10 +189,12 @@ addOption(GETOPTKEY   => 'g|genotype',
 	  GETOPTVAL   => \$use_gt,
 	  DEFAULT     => $use_gt,
 	  SMRY_DESC   => ("Use or don't use genotype calls."),
-	  DETAIL_DESC => ('Use the genotype call (i.e. the "GT" value in the ' .
-			  'FORMAT string) for filtering rows (see --filter) ' .
-			  'and computing the difference between sample ' .
-			  'groups using the minimum group size (-d).'));
+	  DETAIL_DESC => ("Use or don't use the genotype call (i.e. the 'GT' " .
+			  'value in the FORMAT string) for sorting rows, ' .
+			  'growing sample groups, and filtering rows (see ' .
+			  '--filter).  If --nogenotype is supplied, only ' .
+			  'allelic frequencies will be used for these ' .
+			  'functions.  See --help --extended for details.'));
 
 my $filter = 1;
 addOption(GETOPTKEY   => 'f|filter',
@@ -205,10 +203,18 @@ addOption(GETOPTKEY   => 'f|filter',
 	  DEFAULT     => $filter,
 	  SMRY_DESC   => ('Filter variant rows whose sample groups do not ' .
 			  'differ (enough).'),
-	  DETAIL_DESC => ('Filter variant rows whose sample do not differ ' .
-			  'enough to meet the allelic frequency threshold ' .
-			  '(i.e. the separation gap: see -a) or the minimum ' .
-			  'group size (-d) when --genotype is supplied.'));
+	  DETAIL_DESC => ('Filter variant rows whose sample group pairs do ' .
+			  'not meet thresholds defined by either `--genotype ' .
+			  '--min-group-size <int>` or `--nogenotype ' .
+			  '--min-group-size <int> --separation-gap ' .
+			  '<float>`.  When --genotype is supplied, the ' .
+			  'genotype calls in all samples in each minimum ' .
+			  'group must not have any common genotype calls and ' .
+			  'meet the minimum size requirement.  When ' .
+			  '--nogenotype is supplied, the difference in ' .
+			  'average observation ratios must be greater than ' .
+			  'or equal to the --separation-gap.  See --help ' .
+			  '--extended for more details.'));
 
 my $grow = 1;
 addOption(GETOPTKEY   => 'w|grow',
@@ -216,14 +222,17 @@ addOption(GETOPTKEY   => 'w|grow',
 	  GETOPTVAL   => \$grow,
 	  DEFAULT     => $grow,
 	  SMRY_DESC   => ('Add as many samples to sample groups as possible.'),
-	  DETAIL_DESC => ('If -d is less than the sample group size, keep ' .
-			  'adding samples to the reported differing groups ' .
-			  'as long as the difference in average observation ' .
-			  'ratios is greater than -a.  This does not affect ' .
-			  'group size for determining --genotype rank.  ' .
-			  'Note, this may lower the sort order of a variant/' .
-			  'row.  Only samples from within the group defined ' .
-			  'by -s will be added.'));
+	  DETAIL_DESC => ('If the --min-group-size is less than the actual ' .
+			  'sample group size, keep adding samples to the ' .
+			  'minimum groups (from its remaining members) as ' .
+			  'long as (if --nogenotype is supplied) the ' .
+			  'difference in average observation ratios between ' .
+			  'the groups is greater than -a or (if --genotype ' .
+			  'is supplied) the genotype call is the same as ' .
+			  'current members and different from all partner ' .
+			  'group genotypes.  Note, this may lower the sort ' .
+			  'order of a variant/row when --nogenotype is ' .
+			  'supplied.'));
 
 processCommandLine();
 
@@ -259,44 +268,48 @@ if(scalar(@$sample_groups) &&
       }
   }
 
-#If this isn't the special case of 1 group and 2 min diff sizes
-if(scalar(@$group_diff_mins) != 2 && scalar(@$sample_groups) != 1)
+if(scalar(@$group_diff_mins) && scalar(@$sample_groups))
   {
-    #There must be an equal number of group diff mins and their values must be
-    #less than or equal to the group sizes
-    if(scalar(@$group_diff_mins) != scalar(@$sample_groups) ||
-       scalar(grep {$group_diff_mins->[$_] < 1 ||
-		      $group_diff_mins->[$_] > scalar(@{$sample_groups->[$_]})}
-	      (0..$#{$sample_groups})))
+    #There must be an equal number of group diff mins
+    if((scalar(@$sample_groups) > 2 &&
+	scalar(@$group_diff_mins) != scalar(@$sample_groups)) ||
+       (scalar(@$sample_groups) <= 2 && scalar(@$group_diff_mins) > 2))
+      {
+	error("-d must be supplied 0, 1, 2, or the same number of times as ",
+	      "-s.");
+	quit(2);
+      }
+    #The values of the group diff mins must be less than or equal to the
+    #corresponding group sizes
+    elsif(scalar(@$group_diff_mins) <= scalar(@$sample_groups) &&
+	  scalar(grep {$group_diff_mins->[$_] < 1 ||
+			 $group_diff_mins->[$_] >
+			   scalar(@{$sample_groups->[$_]})}
+		 (0..$#{$group_diff_mins})))
       {
 	error("The min group size (-d) [",join(',',@$group_diff_mins),
-	      "] must be a positive value less than or equal to the number of ",
-	      "members in the corresponding sample group [",
-	      join(',',map {scalar(@$_)} @$sample_groups),"].  There must ",
-	      "also be an equal number of -d and -s option flags supplied.  ",
+	      "] must be a positive value greater than 0 and less than or ",
+	      "equal to the number of members in the corresponding sample ",
+	      "group [",join(',',map {scalar(@$_)} @$sample_groups),"].  ",
 	      "Unable to proceed.");
-	quit(2);
+	quit(3);
       }
   }
 
 #If this is the special case of 1 group (and possibly 2 min diff sizes)
-my $check_last_min_diff = 0;
 if(scalar(@$sample_groups) == 1)
   {
     #If there are 2 min diff sizes, the first must represent the majority of its
     #group
-    if(scalar(@$group_diff_mins) == 2 &&
+    if(scalar(@$group_diff_mins) >= 1 &&
        $group_diff_mins->[0] <= (scalar(@{$sample_groups->[0]}) / 2))
       {
 	error("When 1 sample group is supplied (implying that the second ",
-	      "sample group is the remainder of the samples) and 2 min group ",
-	      "sizes are supplied, the first size must represent a majority ",
-	      "of the group size.");
-	quit(3);
+	      "sample group is the remainder of the samples) and a min group ",
+	      "size is supplied, the first size must represent a majority of ",
+	      "the group size.");
+	quit(4);
       }
-
-    if(scalar(@$group_diff_mins) == 2)
-      {$check_last_min_diff = 1}
   }
 #NOTE: One of the group_diff_mins in each pair must represent a majority of the
 #corresponding group
@@ -313,14 +326,14 @@ elsif(scalar(@$sample_groups) &&
 	  {DETAIL => "One group must serve as an unambiguous reference " .
 	   "genotype.  It can be a single sample or a set of replicate " .
 	   "samples.  This makes the results more interpretable."});
-    quit(4);
+    quit(5);
   }
 
 if($separation_gap < 0 || $separation_gap > 1)
   {
     error("Invalid value for -a [$separation_gap].  Must be between 0 and 1 ",
 	  "(inclusive).");
-    quit(5);
+    quit(6);
   }
 
 my $global_mode = '';
@@ -402,7 +415,7 @@ while(nextFileCombo())
 	      {unless(validateSampleGroupNames(\@samples,$sample_groups))
 		 {quit(7)}}
 
-	    #Handle the one special case where auto-group creation is allowed
+	    #Handle a special case where auto-group creation is allowed
 	    if(scalar(@$sample_groups) == 1)
 	      {
 		#Validate that there are enough samples to create a second group
@@ -421,7 +434,7 @@ while(nextFileCombo())
 			    scalar(grep {$_ eq $n} @{$sample_groups->[0]}) == 0}
 		      @samples]);
 
-		#Validate and existing group diff min
+		#Validate any existing group diff min
 		if(scalar(@$group_diff_mins) == scalar(@$sample_groups))
 		  {
 		    if($group_diff_mins->[1] > scalar(@{$sample_groups->[1]}) ||
@@ -436,6 +449,17 @@ while(nextFileCombo())
 		#Add a new group diff min
 		else
 		  {push(@$group_diff_mins,scalar(@{$sample_groups->[1]}))}
+	      }
+
+	    #If there's not at least 2 min group sizes
+	    if(scalar(@$group_diff_mins) < 2)
+	      {
+		#If there's 1 min group size, compute the size of the second one
+		if(scalar(@$group_diff_mins))
+		  {push(@$group_diff_mins,
+			scalar(@samples) - $group_diff_mins->[0])}
+		else
+		  {push(@$group_diff_mins,1,1)}
 	      }
 
 	    #Print the new header
@@ -483,29 +507,33 @@ while(nextFileCombo())
 	foreach my $key (split(/:/,$format_str,-1))
 	  {$format_key_tosubindex->{$key} = $format_subindex++}
 
-	if(scalar(grep {!exists($format_key_tosubindex->{$_})}
-		  ('AO','RO','DP','GT')))
+	if($genotype && !exists($format_key_tosubindex->{GT}))
+	  {
+	    error("Line [$line_num] does not contain the required tag [GT] ",
+		  "(for running in --genotype mode) in the FORMAT column.  ",
+		  "Skipping.");
+	    next;
+	  }
+	elsif(!$genotype && scalar(grep {!exists($format_key_tosubindex->{$_})}
+				   ('AO','RO','DP')))
 	  {
 	    error("Line [$line_num] does not contain the required tags [",
 		  join(',',grep {!exists($format_key_tosubindex->{$_})}
-		       ('AO','RO','DP','GT')),
-		  "] in the FORMAT column.  Skipping.");
+		       ('AO','RO','DP')),
+		  "] (for running in --nogenotype mode) in the FORMAT ",
+		  "column.  Skipping.");
 	    next;
 	  }
 
-	my $got    = 0;
-	my $depths = {};
-	my @hits   = ();
-	my @rats   = ();
-	my @filts  = ();
-
+	#Parse the sample info from all the sample columns
+	my $sample_info = {};
 	foreach my $format_subindex (0..$#samples)
 	  {
 	    #If there is no data for this sample (i.e. no reads mapped over the
 	    #position of this variant)
 	    if($data[$format_subindex] eq '.')
 	      {
-		#Create a bogus record so that DP, RO, and AO can be set to 0
+		#Create a bogus record so GT, DP, RO, & AO can be set to ./0
 		$data[$format_subindex] =
 		  '.:' . '0:'x(scalar(keys(%$format_key_tosubindex)) - 1);
 		chop($data[$format_subindex]);
@@ -519,126 +547,26 @@ while(nextFileCombo())
 
 	    debug("Data for sample [$sample]: [",join(':',@d),"].");
 
-
-
-
-
-
-
-
-
-
-
-
-####################LEFT OFF HERE
-
-
-
-
-
-
-
-
-
-
-
-
-
-	    if($mode eq 'BOTH')
-	      {
-		#Sometimes there are multiple alternate variants that are comma
-		#delimited.  We will consider the one with the most support
-		#because all we're doing is seeing if anything marks this
-		#sample as a hit
-		my $ao = max(split(/,/,$d[$format_key_tosubindex->{AO}]));
-		my $su = max(split(/,/,$d[$format_key_tosubindex->{SU}]));
-		my $sr = max(split(/,/,$d[$format_key_tosubindex->{SR}]));
-		my $pe = exists($format_key_tosubindex->{PE}) ?
-		  max(split(/,/,$d[$format_key_tosubindex->{PE}])) : 0;
-
-		#Record how many samples had adequate depth of coverage
-		$depths->{$sample}++
-		  if($d[$format_key_tosubindex->{DP}] >= $min_read_depth);
-
-		#If the depth is adequate, greater than 0, and support for the
-		#alternate allele is adequate
-		if($su >= $min_svs      &&
-		   $pe >= $min_discords &&
-		   $sr >= $min_splits   &&
-		   $d[$format_key_tosubindex->{DP}] >= $min_read_depth &&
-		   $d[$format_key_tosubindex->{DP}] > 0 &&
-		   ($ao / $d[$format_key_tosubindex->{DP}]) >=
-		   $min_support_ratio)
-		  {
-		    $got++;
-
-		    #Record the ratios of alt allele support over total reads
-		    push(@rats,"$ao/$d[$format_key_tosubindex->{DP}]");
-
-		    #Record the sample name that was a hit
-		    push(@hits,$samples[$format_subindex]);
-		  }
-	      }
-	    elsif($mode eq 'SNP')
-	      {
-		#Sometimes there are multiple alternate variants that are comma
-		#delimited.  We will consider the one with the most support
-		#because all we're doing is seeing if anything marks this
-		#sample as a hit
-		my $ao = max(split(/,/,$d[$format_key_tosubindex->{AO}]));
-
-		#Record how many samples had adequate depth of coverage
-		$depths->{$sample}++
-		  if($d[$format_key_tosubindex->{DP}] >= $min_read_depth);
-
-		#If the depth is adequate, greater than 0, and support for the
-		#alternate allele is adequate
-		if($d[$format_key_tosubindex->{DP}] >= $min_read_depth &&
-		   $d[$format_key_tosubindex->{DP}] > 0 &&
-		   ($ao / $d[$format_key_tosubindex->{DP}]) >=
-		   $min_support_ratio)
-		  {
-		    $got++;
-
-		    #Record the ratios of alt allele support over total reads
-		    push(@rats,"$ao/$d[$format_key_tosubindex->{DP}]");
-
-		    #Record the sample name that was a hit
-		    push(@hits,$samples[$format_subindex]);
-		  }
-	      }
-	    else #Mode is SV
-	      {
-		#Sometimes there are multiple alternate variants that are comma
-		#delimited.  We will consider the one with the most support
-		#because all we're doing is seeing if anything marks this
-		#sample as a hit
-		my $su = max(split(/,/,$d[$format_key_tosubindex->{SU}]));
-		my $sr = max(split(/,/,$d[$format_key_tosubindex->{SR}]));
-		my $pe = exists($format_key_tosubindex->{PE}) ?
-		  max(split(/,/,$d[$format_key_tosubindex->{PE}])) : 0;
-
-		if($su >= $min_svs      &&
-		   $pe >= $min_discords &&
-		   $sr >= $min_splits)
-		  {
-		    $got++;
-
-		    #Record the discrete filters that were passed which were >0
-		    push(@filts,'' .
-			 ($min_svs > ($min_discords + $min_splits) ?
-			  'SU' . $su : '') .
-			 ($min_svs > ($min_discords + $min_splits) &&
-			  ($min_discords > 0 || $min_splits > 0) ? '/' : '') .
-			 ($min_discords > 0 ? 'PE' . $pe : '') .
-			 ($min_discords > 0 && $min_splits > 0 ? '/' : '') .
-			 ($min_splits   > 0 ? 'SR' . $sr : ''));
-
-		    #Record the sample name that was a hit
-		    push(@hits,$samples[$format_subindex]);
-		  }
-	      }
+	    #Create easy access to the sample info by creating a hash like:
+	    #sample_info->{$samplename}->{GT} = value
+	    $sample_info->{$samples[$format_subindex]} =
+	      {map {$_ => $d[$format_key_tosubindex->{$_}]}
+	       keys(%$format_key_tosubindex)};
 	  }
+
+	#
+
+
+
+
+
+
+###############LEFT OFF HERE
+
+
+
+
+
 
 	my $anything_passed = 0;
 	my $pass_str = "$got,HITS>0" .
