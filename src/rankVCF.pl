@@ -120,20 +120,47 @@ The file may otherwise be a standard VCF file containing header lines preceded b
 END_FORMAT
 		 );
 
-addOutfileSuffixOption(GETOPTKEY   => 'o|outfile-suffix',
-		       PRIMARY     => 1,
-		       DEFAULT     => undef,
-		       SMRY_DESC   => 'Outfile suffix (appended to -i).',
-		       FORMAT_DESC => << 'END_FORMAT'
+my $vcf_oid =
+  addOutfileSuffixOption(GETOPTKEY   => 'o|vcf-outfile-suffix',
+			 PRIMARY     => 0,
+			 DEFAULT     => undef,
+			 SMRY_DESC   => 'VCF outfile suffix (appended to -i).',
+			 FORMAT_DESC => ('The output file is the same format ' .
+					 'as the input VCF files, except ' .
+					 'sorted differently and possibly ' .
+					 'filtered.'));
 
-The output file is essentially the same format as the input VCF files, except 3 columns are added at the beginning of the file:
+my $sum_oid =
+  addOutfileSuffixOption(GETOPTKEY   => 'u|summary-outfile-suffix',
+			 PRIMARY     => 1,
+			 DEFAULT     => undef,
+			 SMRY_DESC   => ('Summary outfile suffix (appended ' .
+					 'to -i).'),
+			 DETAIL_DESC => ('Summary outfile suffix (appended ' .
+					 'to -i).  This file will contain a ' .
+					 'row for each variant row in the ' .
+					 'input VCF file, and include the ' .
+					 'sorting value and pairs of sample ' .
+					 'groups that were identified as ' .
+					 'different.'),
+			 FORMAT_DESC => << 'END_FORMAT'
 
-1. Number of hits and a summary of the filters that were passed
-2. A listing of variant support/mapped reads per sample (or a listing of the stuctural variant support values that passed cutoffs (SU, SR, and/or PE).
-3. A listing of samples containing evidence for the variant
+Tab delimited file describing the sorting, filtering, and differing sample groups.  The columns of the file are:
+
+    Chromosome - The chromosome on which the variant is located.
+    Position - The position starting from 1 where the variant is located.
+    Reference Value - The value the reference has in the variant position.
+    Sort Value - The value the sorting of the file is based on, which is the maximum "Pair Sort Value".
+    Pair Number - A colon-delimited list of numbers indicating the pair of sample groups the sort and filtering is based on.
+    Pair Sort Value - This is a colon-delimited list of each pair's maximum difference between sample group 1 & 2.
+    Most Differing Variant State - A colon-delimited list of each pair's most differing variant value (e.g. SNP value 'A') which the sort value is based on (because it differs the most between the 2 sample groups in the corresponding pair).  E.g. One group's samples have 'A' and the other group's samples have something *other than an 'A'*.
+    Sample Group 1 Members - A colon-delimited list of each pair's comma-delimited group 1 sample names that were used to produce the sort value by determining their maximum difference.  E.g. For 2 pairs, the value might be: "s1,s2:s6,s7".
+    Sample Group 1 Values - A colon-delimited list of pairs' group 1 comma-delimited values that were used to compute the corresponding "Pair Sort Value".  These may be a series of 0's and 1's indicating whether the sample's genotype is unique to group 1 or they are the observation ratios (in the form "numerator/denominator") of the selected variant state, chosen to differ most between sample groups.
+    Sample Group 2 Members - A colon-delimited list of each pair's comma-delimited group 2 sample names that were used to produce the sort value by determining their maximum difference.  E.g. For 2 pairs, the value might be: "s3,s4,s5:s8,s9,s10".
+    Sample Group 2 Values - A colon-delimited list of pairs' group 2 comma-delimited values that were used to compute the corresponding "Pair Sort Value".  These may be a series of 0's and 1's indicating whether the sample's genotype is unique to group 1 or they are the observation ratios (in the form "numerator/denominator") of the selected variant state, chosen to differ most between sample groups.
 
 END_FORMAT
-		 );
+			);
 
 my $sample_groups = [];
 add2DArrayOption(GETOPTKEY   => 's|sample-group',
@@ -167,7 +194,7 @@ Each sample group defined by -s is accompanied by a (minimum) number of samples 
 END_DETAIL
 		);
 
-my $separation_gap = 0.3;
+my $separation_gap = 0.6;
 addOption(GETOPTKEY   => 'a|separation-gap',
 	  TYPE        => 'float',
 	  GETOPTVAL   => \$separation_gap,
@@ -183,11 +210,11 @@ addOption(GETOPTKEY   => 'a|separation-gap',
 			  '--grow are true.  See --help --extended for more ' .
 			  'details.'));
 
-my $use_gt = 1;
+my $genotype = 1;
 addOption(GETOPTKEY   => 'g|genotype',
 	  TYPE        => 'negbool',
-	  GETOPTVAL   => \$use_gt,
-	  DEFAULT     => $use_gt,
+	  GETOPTVAL   => \$genotype,
+	  DEFAULT     => $genotype,
 	  SMRY_DESC   => ("Use or don't use genotype calls."),
 	  DETAIL_DESC => ("Use or don't use the genotype call (i.e. the 'GT' " .
 			  'value in the FORMAT string) for sorting rows, ' .
@@ -341,25 +368,37 @@ my $global_mode = '';
 while(nextFileCombo())
   {
     my $inputFile  = getInfile();
-    my $outputFile = getOutfile();
+    my $outputFile = getOutfile($sum_oid);
+    my $vcfoutFile = getOutfile($vcf_oid);
 
-    openIn(*IN,$inputFile);
+    openIn(*IN,$inputFile)     || next;
 
     my $line_num  = 0;
     my @samples   = ();
     my $data_line = 0;
-    my @passed    = ();
+    my $outputs   = {HEADER_LINES  => '',
+		     COMMENT_LINES => '',
+		     ROW_DATA      => []};
 
     while(getLine(*IN))
       {
 	$line_num++;
 
 	#If this is a header line that is not the (first) column header line
-	if(/^##/ || (scalar(@samples) && /^#/) || /^\s*$/)
+	if(/^##/)
 	  {
-	    print;
+	    if(defined($vcfoutFile) && /^#/)
+	      {$outputs->{HEADER_LINES} .= $_}
 	    next;
 	  }
+	elsif(scalar(@samples) && /^#/)
+	  {
+	    if(defined($vcfoutFile) && /^#/)
+	      {$outputs->{COMMENT_LINES} .= $_}
+	    next;
+	  }
+	elsif(/^\s*$/)
+	  {next}
 
 	chomp;
 	my @cols = split(/\t/,$_,-1);
@@ -410,6 +449,27 @@ while(nextFileCombo())
 	    @samples = @cols[$sample_name_start_index..$#cols];
 	    s/#//;
 
+	    if(scalar(@samples) < 2)
+	      {
+		error("A column header line with more than 1 sample name ",
+		      "after the FORMAT column is required.  Skipping file ",
+		      "[$inputFile].",
+		      {DETAIL => ('The purpose of this script is to compare ' .
+				  'samples, which requires more than 1 ' .
+				  'sample be present in the file.')});
+		last;
+	      }
+	    if(scalar(grep {$_ eq ''} @samples))
+	      {
+		error("Empty sample names encountered on column header row ",
+		      "after the FORMAT column.  Skipping file [$inputFile].",
+		      {DETAIL => ('Sample names are used in the output ' .
+				  'format of this script for identification ' .
+				  'of sample groups, thus they must all have ' .
+				  'values.')});
+		last;
+	      }
+
 	    #Validate the sample names in the groups
 	    if(scalar(@$sample_groups))
 	      {unless(validateSampleGroupNames(\@samples,$sample_groups))
@@ -425,7 +485,7 @@ while(nextFileCombo())
 			  "create second sample group (-s), given the first ",
 			  "sample group size of [",
 			  scalar(@{$sample_groups->[0]}),"].");
-		    quit(6);
+		    quit(8);
 		  }
 
 		#Create the second group
@@ -443,7 +503,7 @@ while(nextFileCombo())
 			error("Invalid min group size (-d) [",
 			      $group_diff_mins->[1],"] for sample group of ",
 			      "size [",scalar(@{$sample_groups->[1]}),"].");
-			quit(7);
+			quit(9);
 		      }
 		  }
 		#Add a new group diff min
@@ -463,7 +523,7 @@ while(nextFileCombo())
 	      }
 
 	    #Print the new header
-	    print("#NUMHITS,SEARCHCRITERIA\tSNPREAD/DEPTH\tSNPSAMPLES\t$_\n");
+	    $outputs->{HEADER_LINES} .= "$_\n";
 
 	    next;
 	  }
@@ -545,7 +605,8 @@ while(nextFileCombo())
 	    #Get the data specific to this sample
 	    my @d = split(/:/,$data[$format_subindex],-1);
 
-	    debug("Data for sample [$sample]: [",join(':',@d),"].");
+	    debug("Data for sample [$sample]: [",join(':',@d),"].",
+		  {LEVEL => 3});
 
 	    #Create easy access to the sample info by creating a hash like:
 	    #sample_info->{$samplename}->{GT} = value
@@ -554,104 +615,1194 @@ while(nextFileCombo())
 	       keys(%$format_key_tosubindex)};
 	  }
 
-	#
+	#Quick error check.  There must be either 0 or scalar(@$group_diff_mins)
+	#sample groups
+	if(scalar(@$sample_groups) != 0 &&
+	   scalar(@$sample_groups) != scalar(@$group_diff_mins))
+	  {
+	    error("Invalid number of sample groups: [",scalar(@$sample_groups),
+		  "].  Must be the same as the number of minimum group sizes ",
+		  "(see -d).  Unable to proceed.");
+	    quit(10);
+	  }
 
+	my @tmp_sample_groups = @$sample_groups;
+	#If the sample groups have not been created, initialize them
+	if(scalar(@tmp_sample_groups) == 0)
+	  {@tmp_sample_groups = createSampleGroups($sample_info,
+						   $group_diff_mins)}
 
-
-
-
-
-###############LEFT OFF HERE
-
-
-
-
-
+	if(scalar(@tmp_sample_groups) == 0)
+	  {
+	    error("No sample groups.",{DETAIL => "Line $line_num"});
+	    next;
+	  }
 
 	my $anything_passed = 0;
-	my $pass_str = "$got,HITS>0" .
-	  (scalar(@samples) > 1 ? ",HITS<" . scalar(@samples) : '') .
-	    ($global_mode eq 'SV' ?
-	     '' : ",SNP/DEP>=$min_support_ratio,DEP>=$min_read_depth") .
-	       ($global_mode eq 'SNP' ?
-		'' : ",SE>=$min_svs,PE>=$min_discords,SR>=$min_splits");
-	if(scalar(@$sample_groups))
+	my $group_pair_rule = 0;
+	my $rank_data       = [];
+	my $best_score      = 0;
+	my $best_dp         = 0;
+	my $best_pair       = '';
+	foreach my $pair_index (grep {$_ % 2 == 0} (0..$#tmp_sample_groups))
 	  {
-	    my $group_pair_rule = 0;
-	    foreach my $pair_index (grep {$_ % 2 == 0} (0..$#{$sample_groups}))
+	    $group_pair_rule++;
+	    my $set1     = [@{$tmp_sample_groups[$pair_index]}];
+	    my $set1_min = $group_diff_mins->[$pair_index];
+	    my $set2     = [@{$tmp_sample_groups[$pair_index + 1]}];
+	    my $set2_min = $group_diff_mins->[$pair_index + 1];
+
+	    debug("$_\nSET1: [",join(',',@$set1),"] SET1MIN: $set1_min ",
+		  "SET2: [",join(',',@$set2),"] SET2MIN: $set2_min",
+		  {LEVEL => 2});
+
+	    my($min_group1,$min_group2,$real_remainders1,$real_remainders2,
+	       $leftright_case) =
+	      createMinSampleGroupPair($set1,$set1_min,
+				       $set2,$set2_min,
+				       $sample_info);
+
+	    debug("Testing groups [",
+		  (defined($min_group1) ?
+		   join(',',map {defined($_) ? $_ : 'undef'} @$min_group1) :
+		   'undef array'),"] vs [",
+		  (defined($min_group2) ?
+		   join(',',map {defined($_) ? $_ : 'undef'} @$min_group2) :
+		   'undef array'),"] with remainders [@$real_remainders1] and ",
+		  "[@$real_remainders2] and left/right case: [$leftright_case",
+		  "].");
+
+	    if(!$filter || sampleGroupPairPasses($min_group1,$min_group2,
+						 $sample_info))
 	      {
-		$group_pair_rule++;
-		my @set1     = @{$sample_groups->[$pair_index]};
-		my $set1_min = $group_diff_mins->[$pair_index];
-		my @set2     = @{$sample_groups->[$pair_index + 1]};
-		my $set2_min = $group_diff_mins->[$pair_index + 1];
-
-		debug("$_\nSET1: [@set1] SET1MIN: $set1_min ",
-		      "SET2: [@set2] SET2MIN: $set2_min");
-
-		#If we got something, not all samples were hits (or there's
-		#only 1 sample), and either:
-		# - The first sample group was a hit for the alternate allele
-		#   and the second sample group was not OR
-		# - The first sample group was not a hit for the alternate
-		#   allele and the second sample group was
-		if($got > 0 &&
-		   (scalar(@samples) == 1 || $got < scalar(@samples)) &&
-		   ((scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set1)}
-			    @hits) >= $set1_min &&
-		     scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set2)}
-			    grep {$mode eq 'SV' || exists($depths->{$_})}
-			    @hits) < $set2_min &&
-		     scalar(grep {$mode eq 'SV' || exists($depths->{$_})}
-			    @set2) >= $set2_min) ||
-		    (scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set1)}
-			    grep {$mode eq 'SV' ||exists($depths->{$_})}
-			    @hits) < $set1_min &&
-		     scalar(grep {$mode eq 'SV' ||
-				    exists($depths->{$_})} @set1) >=
-		     $set1_min &&
-		     scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set2)}
-			    @hits) >= $set2_min)))
+		$anything_passed++;
+		if($grow && (scalar(@$min_group1) < scalar(@$set1) ||
+			     scalar(@$min_group2) < scalar(@$set2)))
+		  {growAPair($min_group1,$min_group2,
+			     $real_remainders1,$real_remainders2,
+			     $leftright_case,$sample_info)}
+		my $scoring_data = getBestScoringData($min_group1,
+						      $min_group2,
+						      $sample_info);
+		if($scoring_data->{RANK} > $best_score)
 		  {
-		    debug("PASSED POS1/NEG2: [",
-			  scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set1)}
-				 @hits),'/',
-			  scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set2)}
-				 grep {$mode eq 'SV' || exists($depths->{$_})}
-				 @hits),
-			  "] NEG1/POS2: [",
-			  scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set1)}
-				 grep {$mode eq 'SV' || exists($depths->{$_})}
-				 @hits),'/',
-			  scalar(grep {my $u=$_;scalar(grep {$_ eq $u} @set2)}
-				 @hits),"]");
-		    $anything_passed++;
-		    $pass_str .= ",GROUPRULEPAIR$group_pair_rule\[SET(" .
-		      join(',',@set1) . ")>=$set1_min DIFFERS FROM SET(" .
-		      join(',',@set2) . ")>=$set2_min]";
+		    $best_score = $scoring_data->{RANK};
+		    $best_dp    = $scoring_data->{AVEDP};
+		    $best_pair  = $group_pair_rule;
 		  }
-		else
-		  {debug("FAILED")}
+		push(@$rank_data,
+		     {RULE_NUM => $group_pair_rule,            #int
+		      SAMPLES1 => $min_group1,                 #array ref
+		      SAMPLES2 => $min_group2,                 #array ref
+		      SCORE    => $scoring_data->{RANK},       #dec
+		      SUBSCORE => $scoring_data->{AVEDP},      #num
+		      STATE    => $scoring_data->{STATE},      #str
+		      SCORES1  => $scoring_data->{SCORES1},    #array ref
+		      SCORES2  => $scoring_data->{SCORES2}});  #array ref
 	      }
 	  }
-	elsif($got > 0 && (scalar(@samples) == 1 || $got < scalar(@samples)))
-	  {$anything_passed++}
 
 	if($anything_passed)
-	  {push(@passed,
-		join('',
-		     ("$pass_str\t",
-		      join(',',($mode ne 'SV' ? @rats : @filts)),"\t",
-		      join(',',@hits),"\t$_")))}
+	  {
+	    push(@{$outputs->{ROW_DATA}},
+		 {VCF_LINE  => "$_\n",
+		  CHROM     => $cols[0],
+		  POS       => $cols[1],
+		  ID        => $cols[2],
+		  REF       => $cols[3],
+		  ALT       => $cols[4],
+		  BEST_PAIR => $best_pair,
+		  RANK      => $best_score,
+		  AVEDP     => $best_dp,
+		  RANK_DATA => $rank_data});
+	  }
       }
 
     closeIn(*IN);
 
-    openOut(*OUT,$outputFile);
-    print(join("\n",rank(\@passed)),"\n");
-    closeOut(*OUT);
+    if(scalar(@{$outputs->{ROW_DATA}}))
+      {
+	openOut(*OUT,$outputFile);
+	openOut(*VCFO,$vcfoutFile);
+
+	if(defined($vcfoutFile))
+	  {print VCFO ($outputs->{HEADER_LINES})}
+
+	print OUT ("#CHROM\tPOS\tID\tREF\tALT\tBEST_PAIR\tBEST_SEP_SCORE\t",
+		   "BEST_AVEDP\tPAIR_NUM\tPAIR_SEP_SCORE\tPAIR_AVEDP\t",
+		   "STATE(S)_USED\tPAIR1_MEMBERS\tPAIR1_SCORE_DATA\t",
+		   "PAIR2_MEMBERS\tPAIR2_SCORE_DATA\n");
+
+	foreach my $ordered_rec (sort {$b->{RANK} <=> $a->{RANK} ||
+					 $b->{AVEDP} <=> $a->{AVEDP}}
+				 @{$outputs->{ROW_DATA}})
+	  {
+	    #Print the VCF output
+	    if(defined($vcfoutFile))
+	      {print VCFO ($ordered_rec->{VCF_LINE})}
+
+	    #Print the rank info
+	    print OUT (join("\t",($ordered_rec->{CHROM},$ordered_rec->{POS},
+				  $ordered_rec->{ID},$ordered_rec->{REF},
+				  $ordered_rec->{ALT},$ordered_rec->{BEST_PAIR},
+				  sigdec($ordered_rec->{RANK},4),
+				  intRound($ordered_rec->{AVEDP}))),"\t",
+		       #Next column's a colon-delimited list of passing rule 
+		       #numbers
+		       join(':',map {$_->{RULE_NUM}}
+			    @{$ordered_rec->{RANK_DATA}}),"\t",
+		       #Next column is a colon-delimited list of each rule's
+		       #score
+		       join(':',map {sigdec($_->{SCORE},4)}
+			    @{$ordered_rec->{RANK_DATA}}),"\t",
+		       #Next column is a colon-delimited list of each rule's
+		       #sub-score (which is the average DP (read depth))
+		       join(':',map {intRound($_->{SUBSCORE},4)}
+			    @{$ordered_rec->{RANK_DATA}}),"\t",
+		       #Next column's a colon-delimited list of each rule's
+		       #state(s).  For 'nogenotype', states are a single
+		       #nucleotide character.  For genotype, states are 2 lists
+		       #of unique genotype calls in sample groups 1 & 2.  Calls
+		       #are delimited by "+" and groups are delimited by ";"
+		       join(':',map {$_->{STATE}} @{$ordered_rec->{RANK_DATA}}),
+		       "\t",
+		       #Next column is a colon-delimited list of each rule's
+		       #comma-delimited list of samples in group 1
+		       join(':',(map {join(',',@{$_->{SAMPLES1}})}
+				 @{$ordered_rec->{RANK_DATA}})),"\t",
+		       #Next column is a colon-delimited list of each rule's
+		       #comma-delimited list of scores in group 1
+		       join(':',(map {join(',',@{$_->{SCORES1}})}
+				 @{$ordered_rec->{RANK_DATA}})),"\t",
+		       #Next column is a colon-delimited list of each rule's
+		       #comma-delimited list of samples in group 2
+		       join(':',(map {join(',',@{$_->{SAMPLES2}})}
+				 @{$ordered_rec->{RANK_DATA}})),"\t",
+		       #Next column is a colon-delimited list of each rule's
+		       #comma-delimited list of scores in group 2
+		       join(':',(map {join(',',@{$_->{SCORES2}})}
+				 @{$ordered_rec->{RANK_DATA}})),"\n");
+	  }
+
+	if(defined($vcfoutFile))
+	  {print VCFO ($outputs->{COMMENT_LINES})}
+
+	closeOut(*VCFO);
+	closeOut(*OUT);
+      }
   }
 
+
+sub growAPair
+  {
+    my $min_group1       = $_[0];
+    my $min_group2       = $_[1];
+    my $real_remainders1 = $_[2];
+    my $real_remainders2 = $_[3];
+    my $leftright_case   = $_[4]; #Whether group 1 should grow from the left and
+                                  #2 from the right or vice versa
+    my $sample_info      = $_[5];
+
+    my($something_added);
+
+    $something_added = 1;
+    while($something_added && scalar(@$real_remainders1))
+      {
+	$something_added = 0;
+	my $next_sample = ($leftright_case ?
+			   shift(@$real_remainders1) :
+			   pop(@$real_remainders1));
+	if(sampleGroupPairPasses([@$min_group1,$next_sample],
+				 $min_group2,
+				 $sample_info))
+	  {
+	    push(@$min_group1,$next_sample);
+	    $something_added = 1;
+	  }
+      }
+    $something_added = 1;
+    while($something_added && scalar(@$real_remainders2))
+      {
+	$something_added = 0;
+	my $next_sample = ($leftright_case ?
+			   pop(@$real_remainders2) :
+			   shift(@$real_remainders2));
+	if(sampleGroupPairPasses($min_group1,
+				 [@$min_group2,$next_sample],
+				 $sample_info))
+	  {
+	    push(@$min_group2,$next_sample);
+	    $something_added = 1;
+	  }
+      }
+  }
+
+
+sub createMinSampleGroupPair
+  {
+    my $max_group1  = $_[0];
+    my $min_size1   = $_[1];
+    my $max_group2  = $_[2];
+    my $min_size2   = $_[3];
+    my $sample_info = $_[4];
+
+    my $min_group1      = [];
+    my $min_group2      = [];
+    my $real_remainder1 = []; #Holds remaining samples that have observations
+    my $real_remainder2 = [];
+    my $case_leftright  = 1;  #Whether we added to 1 from the left and 2 / right
+
+    ##
+    ## The following code differs from that in createSampleGroups because this
+    ## version takes a single pair of sample groups and creates a minimum group
+    ## out of each whereas createSampleGroups takes a list of pair sizes and
+    ## builds maximum sample groups from a single sample list
+    ##
+
+    if($genotype)
+      {
+	##
+	## Figure out which min group of 2 possibilities is better
+	##
+
+	#Determine the overall genotype counts
+	my $genotype_counts = {};
+	foreach my $sample (keys(%$sample_info))
+	  {$genotype_counts->{$sample_info->{$sample}->{GT}}++}
+
+	#Establish the ordering of the samples of max group 1 by genotype
+	#abundance
+	my @ordered_samples_real1 =
+	  sort {$genotype_counts->{$sample_info->{$b}->{GT}} <=>
+		  $genotype_counts->{$sample_info->{$a}->{GT}} ||
+		    $sample_info->{$a}->{GT} <=> $sample_info->{$b}->{GT}}
+	    grep {$sample_info->{$_}->{GT} !~ /\./} @$max_group1;
+	my @nocalls1 = grep {$sample_info->{$_}->{GT} =~ /\./} @$max_group1;
+
+	#Establish the ordering of the samples of max group 2 by genotype
+	#abundance
+	my @ordered_samples_real2 =
+	  sort {$genotype_counts->{$sample_info->{$b}->{GT}} <=>
+		  $genotype_counts->{$sample_info->{$a}->{GT}} ||
+		    $sample_info->{$a}->{GT} <=> $sample_info->{$b}->{GT}}
+	    grep {$sample_info->{$_}->{GT} !~ /\./} @$max_group2;
+	my @nocalls2 = grep {$sample_info->{$_}->{GT} =~ /\./} @$max_group2;
+
+	#Case 1: left of group 1 versus right of group 2
+	my @ordered_samples_real1_tmp = @ordered_samples_real1;
+	my @nocalls1_tmp              = @nocalls1;
+	my @ordered_samples_real2_tmp = @ordered_samples_real2;
+	my @nocalls2_tmp              = @nocalls2;
+	my $min_group1_case1          = [];
+	push(@$min_group1_case1,shift(@ordered_samples_real1_tmp))
+	  while(scalar(@$min_group1_case1) < $min_size1 &&
+		scalar(@ordered_samples_real1_tmp));
+	my $real_remainder1_case1 = [];
+	if(scalar(@$min_group1_case1) >= $min_size1)
+	  {@$real_remainder1_case1 = @ordered_samples_real1_tmp}
+	push(@$min_group1_case1,shift(@nocalls1_tmp))
+	  while(scalar(@$min_group1_case1) < $min_size1 &&
+		scalar(@nocalls1_tmp));
+	my $min_group2_case1 = [];
+	push(@$min_group2_case1,pop(@ordered_samples_real2_tmp))
+	  while(scalar(@$min_group2_case1) < $min_size2 &&
+		scalar(@ordered_samples_real2_tmp));
+	my $real_remainder2_case1 = [];
+	if(scalar(@$min_group2_case1) >= $min_size2)
+	  {@$real_remainder2_case1 = @ordered_samples_real2_tmp}
+	push(@$min_group2_case1,shift(@nocalls2_tmp))
+	  while(scalar(@$min_group2_case1) < $min_size2 &&
+		scalar(@nocalls2_tmp));
+
+	#Case 2: right of group 1 versus left of group 2
+	@ordered_samples_real1_tmp = @ordered_samples_real1;
+	@nocalls1_tmp              = @nocalls1;
+	@ordered_samples_real2_tmp = @ordered_samples_real2;
+	@nocalls2_tmp              = @nocalls2;
+	my $min_group1_case2       = [];
+	push(@$min_group1_case2,pop(@ordered_samples_real1_tmp))
+	  while(scalar(@$min_group1_case2) < $min_size1 &&
+		scalar(@ordered_samples_real1_tmp));
+	my $real_remainder1_case2 = [];
+	if(scalar(@$min_group1_case1) >= $min_size1)
+	  {@$real_remainder1_case2 = @ordered_samples_real1_tmp}
+	push(@$min_group1_case2,shift(@nocalls1_tmp))
+	  while(scalar(@$min_group1_case2) < $min_size1 &&
+		scalar(@nocalls1_tmp));
+	my $min_group2_case2 = [];
+	push(@$min_group2_case2,shift(@ordered_samples_real2_tmp))
+	  while(scalar(@$min_group2_case2) < $min_size2 &&
+		scalar(@ordered_samples_real2_tmp));
+	my $real_remainder2_case2 = [];
+	if(scalar(@$min_group2_case2) >= $min_size2)
+	  {@$real_remainder2_case2 = @ordered_samples_real2_tmp}
+	push(@$min_group2_case2,shift(@nocalls2_tmp))
+	  while(scalar(@$min_group2_case2) < $min_size2 &&
+		scalar(@nocalls2_tmp));
+
+	#Determine which case is better (the one with more samples with a real
+	#and unique genotype)
+	my $g1_gts = {map {$sample_info->{$_}->{GT} => 1}
+		      grep {$sample_info->{$_}->{GT} !~ /\./}
+		      @$min_group1_case1};
+	my $g2_gts = {map {$sample_info->{$_}->{GT} => 1}
+		      grep {$sample_info->{$_}->{GT} !~ /\./}
+		      @$min_group2_case1};
+	my $common_nocall_gts =
+	  {map {$_ => 1} grep {/\./ || exists($g2_gts->{$_})} keys(%$g1_gts)};
+	my $unique_call_count_case1 = 0;
+	foreach my $sample (grep {defined($_)}
+			    (@$min_group1_case1,@$min_group2_case1))
+	  {$unique_call_count_case1++
+	     unless(exists($common_nocall_gts
+			   ->{$sample_info->{$sample}->{GT}}))}
+
+	$g1_gts = {map {$sample_info->{$_}->{GT} => 1}
+		   grep {$sample_info->{$_}->{GT} !~ /\./}
+		   @$min_group1_case2};
+	$g2_gts = {map {$sample_info->{$_}->{GT} => 1}
+		   grep {$sample_info->{$_}->{GT} !~ /\./}
+		   @$min_group2_case2};
+	$common_nocall_gts =
+	  {map {$_ => 1} grep {/\./ || exists($g2_gts->{$_})} keys(%$g1_gts)};
+	my $unique_call_count_case2 = 0;
+	foreach my $sample (grep {defined($_)}
+			    (@$min_group1_case2,@$min_group2_case2))
+	  {$unique_call_count_case2++
+	     unless(exists($common_nocall_gts
+			   ->{$sample_info->{$sample}->{GT}}))}
+
+	if($unique_call_count_case1 >= $unique_call_count_case2)
+	  {
+	    @$min_group1      = @$min_group1_case1;
+	    @$min_group2      = @$min_group2_case1;
+	    @$real_remainder1 = @$real_remainder1_case1;
+	    @$real_remainder2 = @$real_remainder2_case1;
+	    $case_leftright   = 1;
+	  }
+	else
+	  {
+	    @$min_group1      = @$min_group1_case2;
+	    @$min_group2      = @$min_group2_case2;
+	    @$real_remainder1 = @$real_remainder1_case2;
+	    @$real_remainder2 = @$real_remainder2_case2;
+	    $case_leftright   = 0;
+	  }
+
+	debug("Min group 1: [@$min_group1] Remainder 1: [@$real_remainder1]\n",
+	      "Min group 2: [@$min_group2] Remainder 2: [@$real_remainder2].\n",
+	      "Case: ",($case_leftright ? "left/right" : "right/left"),".",
+	      {LEVEL => 2});
+      }
+    else #nogenotype mode
+      {
+	my($best_state,$best_leftright);
+	my($expanded_sample_info,$ao_keys) = expandSampleInfo($sample_info);
+	my @variant_states  = ('RO',@$ao_keys);
+	my $remainder       = [];
+	my $best_group1     = [];
+	my $best_group2     = [];
+	my $best_remainder1 = [];
+	my $best_remainder2 = [];
+	my $best_gap        = 0;
+
+	foreach my $state (@variant_states)
+	  {
+	    my $tmp_group1_1    = [];#Case1: bottom of group 1 vs top of group 2
+	    my $tmp_group2_1    = [];
+	    my $tmp_group1_2    = [];#Case2: top of group 1 vs bottom of group 2
+	    my $tmp_group2_2    = [];
+	    my $remainder1_1    = [];
+	    my $remainder2_1    = [];
+	    my $remainder1_2    = [];
+	    my $remainder2_2    = [];
+
+	    my @ordered_observation_ratios1 =
+	      sort {compareSampleObservationRatios($a,$b,$state,
+						   $expanded_sample_info)}
+		grep {$expanded_sample_info->{$_}->{DP}} @$max_group1;
+	    my @no_observations1 = grep {!$expanded_sample_info->{$_}->{DP}}
+	      @$max_group1;
+
+	    my @ordered_observation_ratios2 =
+	      sort {compareSampleObservationRatios($a,$b,$state,
+						   $expanded_sample_info)}
+		grep {$expanded_sample_info->{$_}->{DP}} @$max_group2;
+	    my @no_observations2 = grep {!$expanded_sample_info->{$_}->{DP}}
+	      @$max_group2;
+
+	    my @ordered_observation_ratios1_tmp =
+	      @ordered_observation_ratios1;
+	    my @ordered_observation_ratios2_tmp =
+	      @ordered_observation_ratios2;
+
+	    #Try creating group 1 from the left and 2 from the right
+	    push(@$tmp_group1_1,shift(@ordered_observation_ratios1_tmp))
+	      while(scalar(@$tmp_group1_1) < $min_size1 &&
+		    scalar(@ordered_observation_ratios1_tmp));
+	    @$remainder1_1 = @ordered_observation_ratios1_tmp;
+	    push(@$tmp_group1_1,shift(@no_observations1))
+	      while(scalar(@$tmp_group1_1) < $min_size1 &&
+		    scalar(@no_observations1));
+
+	    push(@$tmp_group2_1,pop(@ordered_observation_ratios2_tmp))
+	      while(scalar(@$tmp_group2_1) < $min_size2 &&
+		    scalar(@ordered_observation_ratios2_tmp));
+	    @$remainder2_1 = @ordered_observation_ratios2_tmp;
+	    push(@$tmp_group2_1,shift(@no_observations2))
+	      while(scalar(@$tmp_group2_1) < $min_size2 &&
+		    scalar(@no_observations2));
+
+	    my $ave1 = mean([map {$expanded_sample_info->{$_}->{$state} /
+				    ($expanded_sample_info->{$_}->{DP} ?
+				     $expanded_sample_info->{$_}->{DP} : 1)}
+			     @$tmp_group1_1]);
+	    my $ave2 = mean([map {$expanded_sample_info->{$_}->{$state} /
+				    ($expanded_sample_info->{$_}->{DP} ?
+				     $expanded_sample_info->{$_}->{DP} : 1)}
+			     @$tmp_group2_1]);
+	    my $gap1 = abs($ave1 - $ave2);
+	    my $leftright = 1;
+
+
+	    #Now try creating group 1 from the right and 2 from the left (if
+	    #necessary)
+	    if($min_size1 != scalar(@$max_group1) ||
+	       $min_size2 != scalar(@$max_group2))
+	      {
+		#Try creating group 1 from the right and 2 from the left
+		@ordered_observation_ratios1_tmp =
+		  @ordered_observation_ratios1;
+		@no_observations1 = grep {!$expanded_sample_info->{$_}->{DP}}
+		  @$max_group1;
+
+		@ordered_observation_ratios2_tmp =
+		  @ordered_observation_ratios2;
+		@no_observations2 = grep {!$expanded_sample_info->{$_}->{DP}}
+		  @$max_group2;
+
+		push(@$tmp_group1_2,pop(@ordered_observation_ratios1_tmp))
+		  while(scalar(@$tmp_group1_2) < $min_size1 &&
+		        scalar(@ordered_observation_ratios1_tmp));
+		@$remainder1_2 = @ordered_observation_ratios1_tmp;
+		push(@$tmp_group1_2,shift(@no_observations1))
+		  while(scalar(@$tmp_group1_2) < $min_size1 &&
+			scalar(@no_observations1));
+
+		push(@$tmp_group2_2,shift(@ordered_observation_ratios2_tmp))
+		  while(scalar(@$tmp_group2_2) < $min_size2 &&
+		        scalar(@ordered_observation_ratios2_tmp));
+		@$remainder2_2 = @ordered_observation_ratios2_tmp;
+		push(@$tmp_group2_2,shift(@no_observations2))
+		  while(scalar(@$tmp_group2_2) < $min_size2 &&
+			scalar(@no_observations2));
+
+		$ave1 = mean([map {$expanded_sample_info->{$_}->{$state} /
+				     ($expanded_sample_info->{$_}->{DP} ?
+				      $expanded_sample_info->{$_}->{DP} :
+				      1)} @$tmp_group1_2]);
+		$ave2 = mean([map {$expanded_sample_info->{$_}->{$state} /
+				     ($expanded_sample_info->{$_}->{DP} ?
+				      $expanded_sample_info->{$_}->{DP} :
+				      1)} @$tmp_group2_2]);
+		my $gap2 = abs($ave1 - $ave2);
+
+		#The version of the groups with the larger gap is better
+		if($gap2 > $gap1)
+		  {
+		    $gap1           = $gap2;
+		    @$tmp_group1_1  = @$tmp_group1_2;
+		    @$tmp_group2_1  = @$tmp_group2_2;
+		    @$remainder1_1  = @$remainder1_2;
+		    @$remainder2_1  = @$remainder2_2;
+		    $leftright = 0;
+		  }
+	      }
+
+	    #Now that we have the best group for this state, let's compare
+	    #with previous states
+	    if($gap1 > $best_gap || !defined($best_state))
+	      {
+		$best_gap         = $gap1;
+		$best_state       = $state;
+		@$best_group1     = @$tmp_group1_1;
+		@$best_group2     = @$tmp_group2_1;
+		@$best_remainder1 = @$remainder1_1;
+		@$best_remainder2 = @$remainder2_1;
+		$best_leftright   = $leftright;
+	      }
+	  }
+
+	@$min_group1      = @$best_group1;
+	@$min_group2      = @$best_group2;
+	@$real_remainder1 = @$best_remainder1;
+	@$real_remainder2 = @$best_remainder2;
+	$case_leftright   = $best_leftright;
+      }
+
+    if(scalar(@$min_group1) < $min_size1 || scalar(@$min_group1) == 0)
+      {error("Min sample group 1 size: [",scalar(@$min_group1),
+	     "] less than minimum: [",(defined($min_size1) ?
+				       $min_size1 : 'undef'),"].")}
+    if(scalar(@$min_group2) < $min_size2 || scalar(@$min_group2) == 0)
+      {error("Min sample group 2 size: [",scalar(@$min_group2),
+	     "] less than minimum: [",(defined($min_size2) ?
+				       $min_size2 : 'undef'),"].")}
+
+    return($min_group1,$min_group2,
+	   $real_remainder1,$real_remainder2,
+	   $case_leftright);
+  }
+
+
+#This sorts via observation ratios.  Assumes 0 depth is 0 observations, so
+#filter supplied samples for a depth greater than 0.
+sub compareSampleObservationRatios
+  {
+    my $left_sample   = $_[0];
+    my $right_sample  = $_[1];
+    my $variant_state = $_[2];
+    my $sample_info   = $_[3];
+
+    return(($sample_info->{$left_sample}->{$variant_state} /
+	    ($sample_info->{$left_sample}->{DP} ?
+	     $sample_info->{$left_sample}->{DP} : 1)) <=>
+	   ($sample_info->{$right_sample}->{$variant_state} /
+	    ($sample_info->{$right_sample}->{DP} ?
+	     $sample_info->{$right_sample}->{DP} : 1)));
+  }
+
+
+#Returns a number that has been rounded to a number of significant digits.  Only
+#rounds decimal values between 0 and 1 and no scientific notation.  Otherwise,
+#it returns the number as-is.
+sub sigdec
+  {
+    my $dec = $_[0];
+    my $digs = defined($_[1]) ? $_[1] : 4;
+
+    if($dec !~ /^0*\.\d+$/)
+      {return($dec)}
+
+    if($digs == 0)
+      {return($dec < 0.5 ? 0 : 1)}
+    elsif($digs < 0)
+      {
+	error("Invalid number of significant digits: [$digs].");
+	return($dec);
+      }
+
+    $digs--;
+
+    if($dec =~ /(0*\.(0*[1-9]\d{$digs}))(\d)/)
+      {
+	my $trunc = $1;
+	my $dp    = length($2);
+	my $next  = $3;
+	if($next >= 5)
+	  {
+	    my $inc = '0.' . ('0' x ($dp - 1)) . '1';
+	    return($trunc + $inc);
+	  }
+	else
+	  {return($trunc)}
+      }
+
+    return($dec);
+  }
+
+sub intRound
+  {
+    my $num = $_[0];
+    if($num =~ /^\d*\.(\d)\d*$/)
+      {
+	my $d = $1;
+	$num = int($num) + ($d < 5 ? 0 : 1);
+      }
+    return($num);
+  }
+
+sub sampleGroupPairPasses
+  {
+    my $group1      = $_[0];
+    my $group2      = $_[1];
+    my $sample_info = $_[2];
+
+    my $pass = 0;
+
+    if($genotype)
+      {
+	my $g1_gts = {map {$sample_info->{$_}->{GT} => 1}
+		      grep {$sample_info->{$_}->{GT} !~ /\./} @$group1};
+	my $g2_gts = {map {$sample_info->{$_}->{GT} => 1}
+		      grep {$sample_info->{$_}->{GT} !~ /\./} @$group2};
+	my $common_gts = [grep {exists($g2_gts->{$_})} keys(%$g1_gts)];
+	$pass = (scalar(grep {$sample_info->{$_}->{GT} !~ /\./} @$group1) ==
+		 scalar(@$group1) &&
+		 scalar(grep {$sample_info->{$_}->{GT} !~ /\./} @$group2) ==
+		 scalar(@$group2) &&
+		 scalar(@$common_gts) == 0) ? 1 : 0;
+      }
+    else
+      {
+	my($expanded_sample_info,$ao_keys) = expandSampleInfo($sample_info);
+	my @variant_states = ('RO',@$ao_keys);
+	foreach my $state (@variant_states)
+	  {
+	    my $ave1 = mean([map {$expanded_sample_info->{$_}->{$state} /
+				    ($expanded_sample_info->{$_}->{DP} ?
+				     $expanded_sample_info->{$_}->{DP} : 1)}
+			     @$group1]);
+	    my $ave2 = mean([map {$expanded_sample_info->{$_}->{$state} /
+				    ($expanded_sample_info->{$_}->{DP} ?
+				     $expanded_sample_info->{$_}->{DP} : 1)}
+			     @$group2]);
+	    my $any_real1 =
+	      scalar(grep {$sample_info->{$_}->{GT} !~ /\./} @$group1);
+	    my $any_real2 =
+	      scalar(grep {$sample_info->{$_}->{GT} !~ /\./} @$group2);
+
+	    if($any_real1 && $any_real2 &&
+	       abs($ave1 - $ave2) >= $separation_gap)
+	      {
+		$pass = 1;
+		last;
+	      }
+	  }
+      }
+
+    debug("Group 1: [@$group1] values: [",join(',',map {$sample_info->{$_}->{GT}} @$group1),"]\nGroup 2: [@$group2] values: [",join(',',map {$sample_info->{$_}->{GT}} @$group2),"]\nPass: $pass");
+
+    return($pass);
+  }
+
+
+sub getBestScoringData
+  {
+    my $group1      = $_[0];
+    my $group2      = $_[1];
+    my $sample_info = $_[2];
+
+    my $score   = 0;
+    my $state   = '';
+    my $data1   = [];
+    my $data2   = [];
+
+    my $dpsum = 0;
+    foreach my $sample (@$group1,@$group2)
+      {$dpsum += $sample_info->{$sample}->{DP}}
+    my $avedp = $dpsum / (scalar(@$group1) + scalar(@$group2));
+
+    if($genotype)
+      {
+	my $g1_gts = {map {$sample_info->{$_}->{GT} => 1}
+		      grep {$sample_info->{$_}->{GT} !~ /\./} @$group1};
+	my $g2_gts = {map {$sample_info->{$_}->{GT} => 1}
+		      grep {$sample_info->{$_}->{GT} !~ /\./} @$group2};
+	my $common_gts = [grep {exists($g2_gts->{$_})} keys(%$g1_gts)];
+
+	if(scalar(@$common_gts))
+	  {$score = 0}
+	else
+	  {$score = (scalar(grep {$sample_info->{$_}->{GT} !~ /\./} @$group1) /
+		     scalar(@$group1)) *
+		       (scalar(grep {$sample_info->{$_}->{GT} !~ /\./}
+			       @$group2) / scalar(@$group2))}
+
+	#The state is the combo of unique genotypes present in each group
+	$state  = join('+',keys(%$g1_gts)) . ';' . join('+',keys(%$g2_gts));
+
+	#The data is the raw genotype calls
+	@$data1 = map {$sample_info->{$_}->{GT}} @$group1;
+	@$data2 = map {$sample_info->{$_}->{GT}} @$group2;
+      }
+    else
+      {
+	my($expanded_sample_info,$ao_keys) = expandSampleInfo($sample_info);
+	my @variant_states = ('RO',@$ao_keys);
+	my $cur_score = 0;
+	foreach my $cur_state (@variant_states)
+	  {
+	    my $ave1 = mean([map {$expanded_sample_info->{$_}->{$cur_state} /
+				    ($expanded_sample_info->{$_}->{DP} ?
+				     $expanded_sample_info->{$_}->{DP} : 1)}
+			     @$group1]);
+	    my $ave2 = mean([map {$expanded_sample_info->{$_}->{$cur_state} /
+				    ($expanded_sample_info->{$_}->{DP} ?
+				     $expanded_sample_info->{$_}->{DP} : 1)}
+			     @$group2]);
+	    $cur_score = abs($ave1 - $ave2);
+
+	    #Base the best score on the variant state with the best separation
+	    #gap.  If there are multiple variant states that produce the same
+	    #best score, go with the one that's not the same as the reference.
+	    if($cur_score > $score ||
+	       (#The decimal values are the same and the cur state is not 'RO'
+		($cur_score == $score || $cur_score eq $score) &&
+		$cur_state ne 'RO'))
+	      {
+		$score = $cur_score;
+		my $tmp_state = $cur_state;
+		$tmp_state =~ s/AO(\d)/$1/;
+		$tmp_state = 0 if($tmp_state eq 'RO');
+		$tmp_state = 1 if($tmp_state eq 'AO');
+		$state = $tmp_state;
+		#The data is the list of observation ratios
+		@$data1 = (map {$expanded_sample_info->{$_}->{DP} ?
+				  "$expanded_sample_info->{$_}->{$cur_state}" .
+				    "/$expanded_sample_info->{$_}->{DP}" : '.'}
+			   @$group1);
+		@$data2 = (map {$expanded_sample_info->{$_}->{DP} ?
+				  "$expanded_sample_info->{$_}->{$cur_state}" .
+				    "/$expanded_sample_info->{$_}->{DP}" : '.'}
+			   @$group2);
+	      }
+	  }
+      }
+
+    return({RANK    => $score,
+	    AVEDP   => $avedp,
+	    STATE   => $state,
+	    SCORES1 => $data1,
+	    SCORES2 => $data2});
+  }
+
+
+#Call this to create sample groups dynamically (when no sample groups have been
+#defined).  It starts by creating the best groups it can using the minimum group
+#sizes.  When in genotype mode, that means the groups gave no common genotype
+#(or as few common genotypes as possible.  When in nogenotype mode, it selects
+#the variant state that results in the largest observation ratio gap when
+#drawing from opposite ends of a sample list ordered by observation ratios of
+#the selected variant state.  In each case, the best minimum groups are grown
+#until just before they cross the threshold making the groups a non-hit, meaning
+#in genotype mode, it grows the sample groups up until they would end up with a
+#common genotype, or in nogenotype mode, it grows them until just before the
+#average observation ratios of the groups dips below the separation gap
+#threshold.
+#Known issue: When selecting between 2 minimum group sizes that have the same
+#"score" (i.e. the same gap size or assortment of unique genotypes), the
+#selection is made arbitrarily.  It doesn't look ahead to see which selection
+#would result in the largest group sizes at the grow step.
+sub createSampleGroups
+  {
+    my $sample_info     = $_[0];
+    my $min_group_sizes = $_[1];
+
+    my $groups = []; #A 2D array
+
+    if(scalar(@$min_group_sizes) % 2)
+      {
+	error("Odd number of minimum grouyp sizes encountered: [",
+	      scalar(@$min_group_sizes),"].  Must be even.  Unable to ",
+	      "proceed.");
+	quit(9);
+      }
+    elsif(scalar(@$min_group_sizes) == 0)
+      {
+	error("Empty minimum group sizes array.  Unable to proceed.");
+	quit(10);
+      }
+
+    if(scalar(keys(%$sample_info)) == 0)
+      {
+	error("Empty sample info hash.  Unable to proceed.");
+	quit(11);
+      }
+
+    for(my $mi = 0;$mi < scalar(@$min_group_sizes);$mi += 2)
+      {
+	#Make sure the first size is the lerger size
+	my($min_size1,$min_size2) = sort {$b <=> $a}
+	  ($min_group_sizes->[$mi],$min_group_sizes->[$mi + 1]);
+	my $group1 = [];
+	my $group2 = [];
+
+	if(($min_size1 + $min_size2) > scalar(keys(%$sample_info)))
+	  {
+	    error("Invalid minimum sample group sizes.  Pair [",($mi + 1),
+		  "] of minimum group sizes [$min_size1,$min_size2] must not ",
+		  "sum [",($min_size1 + $min_size2),"] to more than the ",
+		  "number of samples: [",scalar(keys(%$sample_info)),
+		  "].  Unable to proceed.");
+	    quit(12);
+	  }
+
+	##
+	## The following code differs from that in createMinSampleGroupPair
+	## because this version creates the pair of groups using a single sample
+	## list and an empty list of sample groups whereas the code in
+	## createMinSampleGroupPair uses 2 populated full sample groups and
+	## creates a minimum group out of each
+	##
+
+	#If we're in genotype mode
+	if($genotype)
+	  {
+	    #Establish the ordering of the samples by genotype abundance
+	    my $genotype_counts = {};
+	    foreach my $sample (keys(%$sample_info))
+	      {$genotype_counts->{$sample_info->{$sample}->{GT}}++}
+	    my @ordered_gts_real =
+	      sort {$genotype_counts->{$sample_info->{$b}->{GT}} <=>
+		      $genotype_counts->{$sample_info->{$a}->{GT}}}
+		grep {$sample_info->{$_}->{GT} !~ /\./} keys(%$sample_info);
+	    my @nocalls = grep {/\./} keys(%$sample_info);
+	    my @samples_remaining = (@ordered_gts_real,@nocalls);
+	    my $call = '';
+	    while(scalar(@samples_remaining) &&
+		  scalar(@$group1) < $min_size1 &&
+		  scalar(@$group2) < $min_size2)
+	      {
+		#Start by populating the larger sample group using the more
+		#abundant genotype call
+		if(scalar(@$group1) < $min_size1)
+		  {
+		    if(scalar(@ordered_gts_real))
+		      {$call = $sample_info->{shift(@ordered_gts_real)}->{GT}}
+		    elsif(scalar(@nocalls))
+		      {$call = $sample_info->{shift(@nocalls)}->{GT}}
+		    else
+		      {
+			$call = $sample_info->{$samples_remaining[0]}->{GT};
+			warning("Ran out of calls in dynamic sample group ",
+				"creation.");
+			last;
+		      }
+
+		    #Add a new call to group 1 (the larger group)
+		    if($call eq '')
+		      {
+			push(@$group1,shift(@samples_remaining))
+			  while(scalar(@$group1) < $min_size1 &&
+				scalar(@samples_remaining));
+		      }
+		    else
+		      {
+			push(@$group1,
+			     grep {$sample_info->{$_}->{GT} eq $call}
+			     @samples_remaining);
+		      }
+
+		    #Trim back the group if it ended up too large
+		    if(scalar(@$group1) > $min_size1)
+		      {pop(@$group1) while(scalar(@$group1) > $min_size1)}
+
+		    #Remove samples from those remaining
+		    @samples_remaining =
+		      grep {my $s=$_;scalar(grep {$_ eq $s} @$group1) == 0}
+			@samples_remaining;
+		  }
+
+		#Now try to populate the smaller sample group using the less
+		#abundant genotype call (if one exists)
+		if(scalar(@$group2) < $min_size2)
+		  {
+		    if(scalar(@ordered_gts_real))
+		      {$call = $sample_info->{pop(@ordered_gts_real)}->{GT}}
+		    elsif(scalar(@nocalls))
+		      {$call = $sample_info->{shift(@nocalls)}->{GT}}
+		    else
+		      {
+			my @tmp = grep {$sample_info->{$_}->{GT} !~ /\./}
+			  @samples_remaining;
+			if(scalar(@tmp))
+			  {$call = $sample_info->{$tmp[-1]}->{GT}}
+			else
+			  {$call = ''}
+			warning("Ran out of calls in dynamic sample group ",
+				"creation.");
+			last;
+		      }
+
+		    #Add a new call to group 2 (the smaller group)
+		    if($call eq '')
+		      {
+			push(@$group2,shift(@samples_remaining))
+			  while(scalar(@$group2) < $min_size2 &&
+				scalar(@samples_remaining));
+		      }
+		    else
+		      {
+			push(@$group2,
+			     grep {$sample_info->{$_}->{GT} eq $call}
+			     @samples_remaining);
+		      }
+
+		    #Trim back the group if it ended up too large
+		    if(scalar(@$group2) > $min_size2)
+		      {pop(@$group2) while(scalar(@$group2) > $min_size2)}
+
+		    #Remove samples from those remaining
+		    @samples_remaining =
+		      grep {my $s=$_;scalar(grep {$_ eq $s} @$group2) == 0}
+			@samples_remaining;
+		  }
+	      }
+
+	    #Grow the groups to the max size without adding to inconsistencies
+	    my $g1_gts = {map {$sample_info->{$_}->{GT} => 1}
+			  grep {$sample_info->{$_}->{GT} !~ /\./} @$group1};
+	    my $g2_gts = {map {$sample_info->{$_}->{GT} => 1}
+			  grep {$sample_info->{$_}->{GT} !~ /\./} @$group2};
+	    foreach my $sample (@samples_remaining)
+	      {
+		my $gt = $sample_info->{$sample}->{GT};
+		if(exists($g1_gts->{$gt}) && !exists($g2_gts->{$gt}))
+		  {push(@$group1,$sample)}
+		elsif(!exists($g1_gts->{$gt}) && exists($g2_gts->{$gt}))
+		  {push(@$group2,$sample)}
+	      }
+
+	    #Make the groups match the original order of the minimum sizes
+	    push(@$groups,($min_group_sizes->[$mi] == $min_size1 ?
+			   ($group1,$group2) : ($group2,$group1)));
+	  }
+	else #nogenotype - use observation ratios - easier than above
+	  {
+	    my($expanded_sample_info,$ao_keys) = expandSampleInfo($sample_info);
+	    my @variant_states = ('RO',@$ao_keys);
+	    my $remainder    = [];
+	    my $best_group1  = [];
+	    my $best_group2  = [];
+	    my($best_state);
+	    my $best_gap     = 0;
+	    foreach my $state (@variant_states)
+	      {
+		my $tmp_group1_1 = [];
+		my $tmp_group2_1 = [];
+		my $tmp_group1_2 = [];
+		my $tmp_group2_2 = [];
+
+		my @ordered_observation_ratios =
+		  sort {compareSampleObservationRatios($a,$b,$state,
+						       $expanded_sample_info)}
+		    grep {$expanded_sample_info->{$_}->{DP}}
+		      keys(%$sample_info);
+		my @no_observations = grep {!$expanded_sample_info->{$_}->{DP}}
+		  keys(%$sample_info);
+
+		#Try creating group 1 from the left and 2 from the right
+		my @ordered_observation_ratios_tmp =
+		  @ordered_observation_ratios;
+		while((scalar(@$tmp_group1_1) < $min_size1 ||
+		       scalar(@$tmp_group2_1) < $min_size2) &&
+		      scalar(@ordered_observation_ratios_tmp))
+		  {
+		    push(@$tmp_group1_1,shift(@ordered_observation_ratios_tmp))
+		      if(scalar(@$tmp_group1_1) < $min_size1);
+		    push(@$tmp_group2_1,pop(@ordered_observation_ratios_tmp))
+		      if(scalar(@$tmp_group2_1) < $min_size2 &&
+			 scalar(@ordered_observation_ratios_tmp));
+		  }
+		while((scalar(@$tmp_group1_1) < $min_size1 ||
+		       scalar(@$tmp_group2_1) < $min_size2) &&
+		      scalar(@no_observations))
+		  {
+		    push(@$tmp_group1_1,shift(@no_observations))
+		      if(scalar(@$tmp_group1_1) < $min_size1);
+		    push(@$tmp_group2_1,shift(@no_observations))
+		      if(scalar(@$tmp_group2_1) < $min_size2 &&
+			 scalar(@no_observations));
+		  }
+		my $remainder_tmp    = [@ordered_observation_ratios_tmp];
+		my $no_obs_remainder = [@no_observations];
+
+		my $ave1 = mean([map {$expanded_sample_info->{$_}->{$state} /
+					($expanded_sample_info->{$_}->{DP} ?
+					 $expanded_sample_info->{$_}->{DP} : 1)}
+				 @$tmp_group1_1]);
+		my $ave2 = mean([map {$expanded_sample_info->{$_}->{$state} /
+					($expanded_sample_info->{$_}->{DP} ?
+				         $expanded_sample_info->{$_}->{DP} : 1)}
+				 @$tmp_group2_1]);
+		my $gap1 = abs($ave1 - $ave2);
+
+		#Now try the opposite (if the sizes are different)
+		if($min_size1 != $min_size2)
+		  {
+		    #Try creating group 1 from the right and 2 from the left
+		    @ordered_observation_ratios_tmp =
+		      @ordered_observation_ratios;
+		    @no_observations = grep {!$expanded_sample_info->{$_}->{DP}}
+		      keys(%$sample_info);
+		    while((scalar(@$tmp_group1_2) < $min_size1 ||
+			   scalar(@$tmp_group2_2) < $min_size2) &&
+			  scalar(@ordered_observation_ratios_tmp))
+		      {
+			push(@$tmp_group1_2,
+			     pop(@ordered_observation_ratios_tmp))
+			  if(scalar(@$tmp_group1_2) < $min_size1);
+			push(@$tmp_group2_2,
+			     shift(@ordered_observation_ratios_tmp))
+			  if(scalar(@$tmp_group2_2) < $min_size2 &&
+			     scalar(@ordered_observation_ratios_tmp));
+		      }
+		    while((scalar(@$tmp_group1_2) < $min_size1 ||
+			   scalar(@$tmp_group2_2) < $min_size2) &&
+			  scalar(@no_observations))
+		      {
+			push(@$tmp_group1_2,shift(@no_observations))
+			  if(scalar(@$tmp_group1_2) < $min_size1);
+			push(@$tmp_group2_2,shift(@no_observations))
+			  if(scalar(@$tmp_group2_2) < $min_size2 &&
+			     scalar(@no_observations));
+		      }
+
+		    $ave1 = mean([map {$expanded_sample_info->{$_}->{$state} /
+					 ($expanded_sample_info->{$_}->{DP} ?
+					  $expanded_sample_info->{$_}->{DP} :
+					  1)} @$tmp_group1_1]);
+		    $ave2 = mean([map {$expanded_sample_info->{$_}->{$state} /
+					 ($expanded_sample_info->{$_}->{DP} ?
+					  $expanded_sample_info->{$_}->{DP} :
+					  1)} @$tmp_group2_1]);
+		    my $gap2 = abs($ave1 - $ave2);
+
+		    #The version of the groups with the larger gap is better
+		    if($gap2 > $gap1)
+		      {
+			$gap1 = $gap2;
+			@$tmp_group1_1 = @$tmp_group1_2;
+			@$tmp_group2_1 = @$tmp_group2_2;
+			@$remainder_tmp =
+			  reverse(@ordered_observation_ratios_tmp);
+			@$no_obs_remainder = @no_observations;
+		      }
+		  }
+
+		#Now that we have the best group for this state, let's compare
+		#with previous states
+		if($gap1 > $best_gap || !defined($best_state))
+		  {
+		    $best_gap     = $gap1;
+		    $best_state   = $state;
+		    @$best_group1 = @$tmp_group1_1;
+		    @$best_group2 = @$tmp_group2_1;
+		    @$remainder   = @$remainder_tmp;
+		  }
+	      }
+
+	    #Grow the groups to max size without exceeding the separation gap
+	    #We're going to ignore samples with no observations in the grow step
+	    while(scalar(@$remainder))
+	      {
+		my $first_sample = $remainder->[0];
+		my $last_sample  = $remainder->[-1];
+
+		#Determine the existing averages
+		my $group1_ave =
+		  mean([map {$expanded_sample_info->{$_}->{$best_state} /
+			       ($expanded_sample_info->{$_}->{DP} ?
+				$expanded_sample_info->{$_}->{DP} :
+				1)} @$best_group1]);
+		my $group2_ave =
+		  mean([map {$expanded_sample_info->{$_} ->{$best_state} /
+			       ($expanded_sample_info->{$_}->{DP} ?
+				$expanded_sample_info->{$_}->{DP} :
+				1)} @$best_group2]);
+
+		last if(abs($group1_ave - $group2_ave) < $separation_gap);
+
+		my $new_ave1 =
+		  mean([map {$expanded_sample_info->{$_}->{$best_state} /
+			       ($expanded_sample_info->{$_}->{DP} ?
+				$expanded_sample_info->{$_}->{DP} :
+				1)} (@$best_group1,$first_sample)]);
+
+		#Whether or not @$remainder has more than 1 member, the result
+		#will be the same
+		my $new_ave2 =
+		  mean([map {$expanded_sample_info->{$_}->{$best_state} /
+			       ($expanded_sample_info->{$_}->{DP} ?
+				$expanded_sample_info->{$_}->{DP} :
+				1)} (@$best_group2,$last_sample)]);
+
+		#Determine which will result in a smaller gap change
+		my $better = 1;
+		if(abs($group1_ave - $new_ave1) > abs($group2_ave - $new_ave2))
+		  {$better = 2}
+
+		#If the better gap change also results in a gap that's larger
+		#than the separation gap threshold, add it to the best group
+		if($better == 1 &&
+		   abs($new_ave1 - $group2_ave) >= $separation_gap)
+		  {
+		    push(@$best_group1,$first_sample);
+		    shift(@$remainder);
+		  }
+		elsif($better == 2 &&
+		      abs($new_ave2 - $group1_ave) >= $separation_gap)
+		  {
+		    push(@$best_group2,$last_sample);
+		    pop(@$remainder);
+		  }
+		else
+		  {last}
+	      }
+
+	    #Make the groups match the original order of the minimum sizes
+	    push(@$groups,($min_group_sizes->[$mi] == $min_size1 ?
+			   ($best_group1,$best_group2) :
+			   ($best_group2,$best_group1)));
+	  }
+      }
+
+    debug("Returning groups of sizes: [",join(',',map {scalar(@$_)} @$groups),
+	  "].",{LEVEL => 2});
+
+    return(wantarray ? @$groups : $groups);
+  }
+
+sub mean
+  {
+    my $array = $_[0];
+    return(0) unless(scalar(@$array));
+    my $sum = 0;
+    foreach my $val (@$array)
+      {$sum += $val}
+    return($sum / scalar(@$array));
+  }
+
+sub expandSampleInfo
+  {
+    my $sample_info = $_[0];
+    my $expanded_sample_info = {};
+    my $ao_keys = [];
+
+    foreach my $sample (keys(%$sample_info))
+      {
+	foreach my $key (keys(%{$sample_info->{$sample}}))
+	  {
+	    my $val = $sample_info->{$sample}->{$key};
+	    my @alts = split(/,/,$val,-1);
+	    if(scalar(@alts) == 1)
+	      {
+		$expanded_sample_info->{$sample}->{$key} = $val;
+		if($key eq 'AO' && scalar(@$ao_keys) == 0)
+		  {push(@$ao_keys,'AO')}
+	      }
+	    else
+	      {
+		if($key eq 'RO' || $key eq 'DP')
+		  {
+		    error("Multiple values found in $key key [$val].",
+			  {DETAIL => 'This script assumes that the FORMAT ' .
+			   'keys "DP" and "RO" each have a single (comma-' .
+			   'delimited) value, but found more than 1.'});
+		  }
+
+		if($key eq 'AO' && scalar(@$ao_keys) == 0)
+		  {push(@$ao_keys,map {"AO$_"} (1..scalar(@alts)))}
+
+		for(my $i = 0;$i <= $#alts;$i++)
+		  {$expanded_sample_info->{$sample}->{$key .($i+1)} = $alts[$i]}
+	      }
+	  }
+      }
+
+    return($expanded_sample_info,$ao_keys);
+  }
 
 sub rank
   {
