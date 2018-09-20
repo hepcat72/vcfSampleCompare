@@ -25,7 +25,7 @@ setScriptInfo(VERSION => $VERSION,
               LICENSE => 'Copyright 2017',
               HELP    => << 'END_HELP'
 
-This script sorts (and optionally filters) the rows/variants of a VCF file (containing data for 2 or more samples) based on the differences in the variant data between pairs of samples or user-defined sample groups.  "Difference" is determined by either the genotype call or allelic frequency.  The the pair of samples or sample groups used to represent the difference for a variant row is the one leading to the greatest difference in consistent genotype or average allelic frequencies (i.e. observation ratios) of the same variant state.
+This script sorts and (optionally) filters the rows/variants of a VCF file (containing data for 2 or more samples) based on the differences in the variant data between samples or sample groups.  "Difference" is determined by either the genotype call or allelic frequency (with a gap size threshold).  The the pair of samples or sample groups used to represent the difference for a variant row is the one leading to the greatest difference in consistent genotype or average allelic frequencies (i.e. observation ratios, e.g. AO/DP) of the same variant state.
 
 See --help --extended for more details.
 
@@ -123,7 +123,7 @@ END_FORMAT
 my $vcf_oid =
   addOutfileSuffixOption(GETOPTKEY   => 'o|vcf-outfile-suffix',
 			 PRIMARY     => 0,
-			 DEFAULT     => undef,
+			 DEFAULT     => 'no output',
 			 SMRY_DESC   => 'VCF outfile suffix (appended to -i).',
 			 FORMAT_DESC => ('The output file is the same format ' .
 					 'as the input VCF files, except ' .
@@ -166,13 +166,14 @@ my $sample_groups = [];
 add2DArrayOption(GETOPTKEY   => 's|sample-group',
 		 TYPE        => 'string',
 		 GETOPTVAL   => $sample_groups,
-		 DEFAULT     => 'none',
+		 DEFAULT     => 'any^',
 		 SMRY_DESC   => ('A group of sample names for difference ' .
-				 'comparisons.'),
+				 'comparisons.  ^ See --extended usage.'),
 		 DETAIL_DESC => << 'END_DETAIL'
 
 This option must be supplied an even number of times (or once* or 0 times**).  Each pair of samples groups, in order, is compared to determine the maximum difference between the groups.  For example, if you have 3 wildtype samples and 4 mutant samples, you can define these 2 groups using -s 's1 s2 s3' -s 's4 s5 s6 s7' (where sample name 's1', 's2', and 's3' are the wildtype samples and 's4', 's5', 's6', and 's7' are mutant samples.  (All sample names must match the sample names in the VCF column headers row.)  The differences in variant states between these groups of samples will be used to sort the variants/rows of the VCF file.  See --extended --help for a description of how degree of difference is calculated.
 
+^ If no sample groups are supplied, a default pair of samples that are the most different on any particular row will be chosen.
 * If only one group is defined, the second group is assumed to be the remainder of the samples.
 ** If no groups are defined, groups are dynamically determined for each variant/row.  See --help --extended for details.
 
@@ -183,7 +184,7 @@ my $group_diff_mins = [];
 addArrayOption(GETOPTKEY   => 'd|min-group-size',
 	       TYPE        => 'integer',
 	       GETOPTVAL   => $group_diff_mins,
-	       DEFAULT     => 'group-size',
+	       DEFAULT     => 'all',
 	       SMRY_DESC   => ('The minimum number of samples required to ' .
 			       'differ from the partner group (to get a high ' .
 			       'rank).'),
