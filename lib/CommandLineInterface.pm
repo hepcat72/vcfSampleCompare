@@ -19,14 +19,15 @@ package CommandLineInterface;
 #Bioinformatics Group
 #Princeton, NJ 08544
 #rleach@princeton.edu
-#Copyright 2017
+#Copyright 2018
 
 use warnings;
 use strict;
 use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev);
 use File::Glob ':glob';
 
-our($VERSION,$compile_err);
+our $VERSION = '4.133';
+our($compile_err);
 
 #Basic script info
 my($script_version_number,
@@ -49,15 +50,21 @@ my($header,
    $error_limit,
    $help,
    $extended,
+   $extended_def,
    $version,
    $overwrite,
+   $overwrite_def,
    $skip_existing,
    $append,
    $dry_run,
    $verbose,
+   $verbose_def,
    $quiet,
    $DEBUG,
+   $DEBUG_def,
    $force,
+   $force_def,
+   $pipeline_mode_def,
    $pipeline_mode,
    $use_as_default);
 
@@ -66,7 +73,8 @@ my($outfile_suffix_array,
    $input_files_array,
    $default_infiles_array,
    $outdirs_array,
-   $default_outdirs_array);
+   $default_outdirs_array,
+   $array_defaults_hash);
 
 #Variables for tracking the command line params, input files, and output_files
 my($GetOptHash,
@@ -105,15 +113,19 @@ my($required_infile_types,
    $outdirs_added,
    $accepts_hash,
    $primary_infile_type,       #Index into input_files_array
+   $exp_nonprimary_inf_types,  #Explicitly-set non-primary infile types hash
    $flagless_multival_type,    #Index into usage_array
    $usage_array,
+   $usage_lookup,
    $infile_flag_array,
-   $outfile_flag_array,
+   $suffix_flag_array,
    $outdir_flag_array,
    $general_flag_hash,
    $suffix_id_lookup,
    $suffix_primary_vals,
    $file_set_num,
+   $max_set_num,
+   $unproc_file_warn,
    $file_returned_before,
    $auto_file_iterate,
    $command_line_processed,    #Whether GetOptions has run
@@ -133,7 +145,6 @@ my($required_infile_types,
    $default_outdir_added,
    $default_tagteam_added,
    $default_infile_opt,
-   $default_stub_opt_addendum,
    $default_outfile_suffix_opt,
    $default_outfile_opt,
    $default_outdir_opt,
@@ -141,6 +152,7 @@ my($required_infile_types,
    $default_outfile_suffix_id,
    $file_group_num,
    $explicit_quit,
+   $cleanup_mode,
    $run,
    $usage,
    $explicit_run,
@@ -150,7 +162,11 @@ my($required_infile_types,
    $flag_check_hash,
    $default_run_mode,
    $inf_to_usage_hash,
-   $outf_to_usage_hash);
+   $outf_to_usage_hash,
+   $genopt_types,
+   $fileopt_types,
+   $window_width,
+   $window_width_def);
 
 sub _init
   {
@@ -187,6 +203,7 @@ sub _init
     $default_infiles_array = [];
     $outdirs_array         = [];
     $default_outdirs_array = [];
+    $array_defaults_hash   = {};
     $GetOptHash            = {};
     $input_file_sets       = [];
     $output_file_sets      = [];
@@ -197,16 +214,22 @@ sub _init
     $error_limit           = undef;
     $help                  = undef;
     $extended              = undef;
+    $extended_def          = undef;
     $version               = undef;
     $overwrite             = undef;
+    $overwrite_def         = undef;
     $skip_existing         = undef;
     $append                = undef;
     $run                   = undef;
     $dry_run               = undef;
     $verbose               = undef;
+    $verbose_def           = undef;
     $quiet                 = undef;
     $DEBUG                 = undef;
+    $DEBUG_def             = undef;
     $force                 = undef;
+    $force_def             = undef;
+    $pipeline_mode_def     = undef;
     $pipeline_mode         = undef;
     $use_as_default        = undef;
 
@@ -214,7 +237,7 @@ sub _init
     $GetOptHash =
       {
        'overwrite:+'          => \$overwrite,                #OPTIONAL [Off]
-       'skip-existing'        => \$skip_existing,            #OPTIONAL [Off]
+       'skip'                 => \$skip_existing,            #OPTIONAL [Off]
        'append'               => \$append,                   #OPTIONAL [Off]
        'force:+'              => \$force,                    #OPTIONAL [Off]
        'verbose:+'            => \$verbose,                  #OPTIONAL [Off]
@@ -223,20 +246,21 @@ sub _init
        'extended:+'           => \$extended,                 #OPTIONAL [Off]
        'version'              => \$version,                  #OPTIONAL [Off]
        'header!'              => \$header,                   #OPTIONAL [On]
-       'error-type-limit=i'   => \$error_limit,              #OPTIONAL [5]
-       'save-as-default'      => \$use_as_default,           #OPTIONAL [Off]
+       'error-limit=i'        => \$error_limit,              #OPTIONAL [5]
+       'save-args'            => \$use_as_default,           #OPTIONAL [Off]
        'collision-mode=s'     => \$user_collide_mode,        #OPTIONAL [error]
-       'pipeline-mode!'       => \$pipeline_mode,            #OPTIONAL [auto]
+       'pipeline!'            => \$pipeline_mode,            #OPTIONAL [auto]
 
        #The presentation of these options varies, but they're always recognized
-       #so that the user can set an alternative default run mode:
+       #so that the user can set an alternative default run mode.  Thus they
+       #are set here, but also get added by addRunModeOptions along with case-
+       #specific settings.  Detection of duplicate options is suppressed for
+       #these options.  * Default values are determined at run-time.
 
        'help'                 => \$explicit_help,            #OPTIONAL [*]
        'usage'                => \$explicit_usage,           #OPTIONAL [*]
        'run'                  => \$explicit_run,             #OPTIONAL [*]
        'dry-run'              => \$explicit_dry_run,         #OPTIONAL [*]
-
-       # * See the addRunModeOptions method for details...
       };
 
     $required_infile_types        = [];
@@ -247,10 +271,12 @@ sub _init
     $required_relationships       = []; #Array of arrays: [[id1,id2,'1:M'],...]
     $accepts_hash                 = {}; #A hash of array of scalars
     $primary_infile_type          = undef;
+    $exp_nonprimary_inf_types     = {};
     $flagless_multival_type       = undef;
     $usage_array                  = [];
+    $usage_lookup                 = {};
     $infile_flag_array            = []; #[file type index] = primary flag
-    $outfile_flag_array           = []; #[suffix id] = primary flag
+    $suffix_flag_array            = []; #[suffix id] = primary flag
     $outdir_flag_array            = []; #[dir type index] = primary flag
     $general_flag_hash            = {}; #{variable reference} = primary flag
     $suffix_id_lookup             = []; #[suffix_id] = [file_type_index,
@@ -259,6 +285,8 @@ sub _init
                                         #primary values for suffixes. Internal
                                         #use only
     $file_set_num                 = undef;
+    $max_set_num                  = undef;
+    $unproc_file_warn             = 1;
     $file_returned_before         = {};
     $auto_file_iterate            = 1;  #0=false,non-0=true. See nextFileCombo
     $command_line_processed       = 0;
@@ -274,20 +302,40 @@ sub _init
     $default_outfile_suffix_added = 0;
     $default_outdir_added         = 0;
     $default_tagteam_added        = 0;
-    $default_infile_opt           = 'i|infile|input-file=s';
-    $default_stub_opt_addendum    = 'stub|stdin-stub';
-    $default_outfile_suffix_opt   = 'o|outfile-extension|outfile-suffix=s';
-    $default_outfile_opt          = 'outfile|output-file=s';
-    $default_outdir_opt           = 'outdir|output-directory=s';
+    $default_infile_opt           = 'i|infile=s';
+    $default_outfile_suffix_opt   = 'o|suffix=s';
+    $default_outfile_opt          = 'out|outfile=s';
+    $default_outdir_opt           = 'outdir|directory=s';
     $default_outfile_id           = undef;
     $default_outfile_suffix_id    = undef;
     $file_group_num               = [];
     $explicit_quit                = 0;
+    $cleanup_mode                 = 0;
     $flag_check_hash              = {};
     $default_run_mode             = 'usage'; #usage,run,help,dry-run
     $outdirs_added                = 0;
     $inf_to_usage_hash            = {};
     $outf_to_usage_hash           = {};
+    $genopt_types                 = {'bool'    => '',   #val is appended to key
+				     'negbool' => '!',
+				     'count'   => ':+',
+				     'string'  => '=s',
+				     'integer' => '=i',
+				     'float'   => '=f',
+				     'enum'    => '=s',
+				     'string_array'    => '=s',
+				     'integer_array'   => '=s',
+				     'float_array'     => '=s',
+				     'enum_array'      => '=s',
+				     'string_array2d'  => '=s',
+				     'integer_array2d' => '=s',
+				     'float_array2d'   => '=s',
+				     'enum_array2d'    => '=s'};
+    $fileopt_types                = {'infile'  => '=s',
+				     'outfile' => '=s',
+				     'stub'    => '=s',
+				     'outdir'  => '=s',
+				     'suffix'  => '=s'};
 
     $def_collide_mode_suff = 'error';  #Use these 2 defaults for mode for
     $def_collide_mode_outf = 'merge';  #outfile option types' collide mode
@@ -313,12 +361,14 @@ sub _init
     $explicit_run          = undef;
     $explicit_help         = undef;
     $explicit_usage        = undef;
+    $window_width          = undef;
+    $window_width_def      = 80;
   }
 
 sub setScriptInfo
   {
     my @params   = qw(VERSION HELP CREATED AUTHOR CONTACT COMPANY LICENSE
-		      DETAILED_HELP);
+		      DETAIL|DETAILED_HELP);
     my $check    = {map {$_ => 1} @params};
     my @in       = getSubParams([@params],[],[@_],1);
     my %infohash = map {$params[$_] => $in[$_]} 0..$#in;
@@ -355,7 +405,7 @@ sub setScriptInfo
     $script_contact        = $infohash{CONTACT};
     $script_company        = $infohash{COMPANY};
     $script_license        = $infohash{LICENSE};
-    $advanced_help         = $infohash{DETAILED_HELP};
+    $advanced_help         = $infohash{'DETAIL|DETAILED_HELP'};
   }
 
 sub getRelationStr
@@ -416,12 +466,13 @@ sub getRelationStr
 #Globals used: $inf_to_usage_hash (and others)
 sub addInfileOption
   {
-    my @in = getSubParams([qw(GETOPTKEY REQUIRED DEFAULT PRIMARY HIDDEN
-			      SMRY_DESC DETAIL_DESC FORMAT_DESC PAIR_WITH
-                              PAIR_RELAT FLAGLESS)],
-			  [scalar(@_) ? qw(GETOPTKEY) : ()],
+    my @in = getSubParams([qw(FLAG|GETOPTKEY REQUIRED DEFAULT PRIMARY HIDDEN
+			      SMRY|SMRY_DESC|SHORT_DESC
+			      DETAIL|DETAIL_DESC|LONG_DESC FORMAT|FORMAT_DESC
+			      PAIR_WITH PAIR_RELAT FLAGLESS ADVANCED)],
+			  [scalar(@_) ? qw(FLAG|GETOPTKEY) : ()],
 			  [@_]);
-    my $get_opt_str = $in[0]; #e.g. 'i|input-file=s'
+    my $get_opt_str = $in[0]; #e.g. 'i|infile=s'
     my $required    = $in[1]; #Is file required?: 0 (false) or non-zero (true)
     my $default     = $in[2]; #String, ref to a 1D or 2D array of strings/globs
     my $primary     = $in[3]; #0 or non-0: true = flag optional & accepts pipe
@@ -435,6 +486,7 @@ sub addInfileOption
     my $req_with    = $in[8]; #File type ID (as returned by this sub)
     my $req_rel_str = getRelationStr($in[9]); #e.g. 1,1:1,1:M,1:1orM
     my $flagless    = $in[10];#Whether the option can be supplied sans flag
+    my $advanced    = $in[11];#Advanced options print when extended >= 2
 
     #Trim leading & trailing hard returns and white space characters (from
     #using '<<')
@@ -483,7 +535,12 @@ sub addInfileOption
 	#The descriptions are added below
       }
 
-    $get_opt_str = fixStringOpt($get_opt_str);
+    #Allow the flag to be an array of scalars and turn it into a get opt str
+    my $save_getoptstr = $get_opt_str;
+    $get_opt_str = makeGetOptKey($get_opt_str,'infile',1,'addInfileOption');
+
+    if(defined($get_opt_str))
+      {$get_opt_str = fixStringOpt($get_opt_str)}
 
     if(!isGetOptStrValid($get_opt_str,'infile'))
       {
@@ -491,8 +548,8 @@ sub addInfileOption
 	  {warning("Unable to add default input file option.")}
 	else
 	  {
-	    error("Invalid GetOpt parameter flag definition: [$get_opt_str] ",
-		  "for infile type.");
+	    error("Invalid GetOpt parameter flag definition: ",
+		  "[$save_getoptstr] for infile type.");
 	    quit(-5);
 	  }
 	return(undef);
@@ -515,26 +572,50 @@ sub addInfileOption
 		 "type: [$uhash->{OPTTYPE}].")}
       }
 
+    my $flags = [getOptStrFlags($get_opt_str)];
+    my $flag  = getDefaultFlag($flags);
+
     #If hidden is not defined and there is a linked file, default to the hidden
     #state of the file type this is linked to, otherwise 0.
     if(!defined($hidden) && defined($req_with))
       {
-	if(isFileTypeHidden($req_with))
+	if(defined($req_with) && isFileTypeHidden($req_with))
 	  {$hidden = 1}
 	else
 	  {$hidden = 0}
       }
     elsif(!defined($hidden))
       {$hidden = 0}
+    elsif(!$hidden && defined($req_with))
+      {
+	#Error if this option is set to be visible and it is linked to a hidden
+	#file that has no default and is not primary
+	if(isFileTypeHidden($req_with) && !isFileTypeDefaulted($req_with) &&
+	   !isFileTypePrimary($req_with))
+	  {
+	    error("Input file option [$flag] cannot be visible when its ",
+		  "PAIR_WITH linked file [",getInfileFlag($req_with,2),"] is ",
+		  "hidden, has no default value, and is not primary.",
+		  {DETAIL =>
+		   join('',("A linked file (e.g. [",getInfileFlag($req_with,2),
+			    "]) is required to be supplied if [$flag] is ",
+			    "supplied, but since the linked file type is ",
+			    "hidden, there's no way to tell the user of the ",
+			    "required file type that may be missing, thus if ",
+			    "a file type is hidden, any file type linked to ",
+			    "it must also be hidden and thereby revealed ",
+			    "together when viewing hidden options."))});
+	    $hidden = 1;
+	  }
+      }
+
+    my $file_type_index = scalar(@$input_files_array);
+    push(@$input_files_array,[]);
 
     if(!defined($primary))
       {$primary = 0}
-
-    if(!defined($flagless))
-      {$flagless = 0}
-
-    my $flags = join(',',getOptStrFlags($get_opt_str));
-    my $flag  = getDefaultFlag($flags,',');
+    elsif(!$primary)
+      {$exp_nonprimary_inf_types->{$file_type_index} = 0}
 
     if($hidden && !defined($default) && !$primary &&
        defined($required) && $required)
@@ -559,9 +640,6 @@ sub addInfileOption
 	$hidden = 0;
       }
 
-    my $file_type_index = scalar(@$input_files_array);
-    push(@$input_files_array,[]);
-
     my $default_str = '';
 
     #Add the default(s) to the default infiles array, to be globbed when the
@@ -581,18 +659,19 @@ sub addInfileOption
     #Only set default if not defined and (detail desc not defined or required)
     if((!defined($smry_desc) || $smry_desc eq '') &&
        (!defined($detail_desc) || $required))
-      {$smry_desc = 'Input file(s).' .
-	 (defined($format_desc) && $format_desc ne '' ?
-	  '  See --help for file format.' : '')}
+      {$smry_desc = 'Input file(s).'}
 
     if(!defined($detail_desc) || $detail_desc eq '')
       {$detail_desc =
 	 join('',('Input file(s)',
 		  ($file_type_index ? " type " . ($file_type_index + 1) : ''),
-		  '.  Space separated, globs OK (e.g. $flag "*.input ',
-		  '[A-Z].{?,??}.inp").',
-		  (defined($format_desc) && $format_desc ne '' ?
-		   '  See --help for file format.' : '')))}
+		  ".",(defined($format_desc) && $format_desc ne '' ?
+		       '  See --help for file format.' : '')))}
+    #If the description doesn't reference the help flag for the file format and
+    #a file format was provided, add a reference to it
+    elsif($detail_desc !~ /--help/ && defined($format_desc) &&
+	  $format_desc ne '')
+      {$detail_desc .= "\n\nSee --help for file format."}
 
     my $getoptsub = 'sub {push(@{$input_files_array->[' . $file_type_index .
       ']},[sglob($_[1])])}';
@@ -618,20 +697,9 @@ sub addInfileOption
 	  }
 
 	$primary_infile_type = $file_type_index;
-
-	my($flagsadd,$detailsadd,$defaultadd) = getPrimaryUsageAddendums();
-
-	$flags .= $flagsadd;
-
-	$detail_desc .= $detailsadd;
-
-	if($default_str ne '')
-	  {$default_str .= " or $defaultadd"}
-	else
-	  {$default_str = $defaultadd}
       }
 
-    if($flagless)
+    if(defined($flagless) && $flagless)
       {
 	if(defined($flagless_multival_type) && $flagless_multival_type > -1)
 	  {
@@ -639,7 +707,8 @@ sub addInfileOption
 		  "'flagless': [$get_opt_str]: [$flagless].  Only 1 is ",
 		  "allowed.",
 		  {DETAIL => "First flagless option was: [" .
-		   $usage_array->[$flagless_multival_type]->{OPTFLAG} . "]."});
+		   getDefaultFlag($usage_array->[$flagless_multival_type]
+				  ->{OPTFLAG}) . "]."});
 	    return(undef);
 	  }
 
@@ -650,12 +719,6 @@ sub addInfileOption
 	#This assumes that the call to addToUsage a few lines below is the
 	#immediate next call to addToUsage
 	$flagless_multival_type = getNextUsageIndex();
-
-	my($flagsadd,$detailsadd) = getFlaglessUsageAddendums();
-
-	$flags .= $flagsadd;
-
-	$detail_desc .= $detailsadd;
       }
 
     if($required)
@@ -665,8 +728,8 @@ sub addInfileOption
 
     push(@$usage_file_indexes,
 	 addToUsage($get_opt_str,$flags,$smry_desc,$detail_desc,$required,
-		    $default_str,undef,$hidden,'infile',$flagless,$primary,
-		    $format_desc,$file_type_index));
+		    $default_str,undef,$hidden,'infile',$flagless,$advanced,
+		    undef,undef,$primary,$format_desc,$file_type_index));
 
     debug({LEVEL => -1},"Adding input file type [$file_type_index] as a key ",
 	  "to inf_to_usage_hash, value: [$#{$usage_array}].");
@@ -726,27 +789,234 @@ sub getOutfileUsageHash
     return(undef);
   }
 
+sub getOutdirUsageHash
+  {
+    ##TODO: The outdir options need to be fixed. See requirement 178
+    my $oduh = undef;
+    foreach my $uh (@$usage_array)
+      {
+	if($uh->{OPTTYPE} eq 'outdir')
+	  {
+	    if(defined($oduh))
+	      {outdirLimitation(0)}
+	    $oduh = $uh;
+	  }
+      }
+    return($oduh);
+  }
+
 sub fixStringOpt
   {
     my $get_opt_str = $_[0];
     my $force_fix   = defined($_[1]) ? $_[1] : 0;
 
-    #If the option specification is just missing the string type, add it
-    if(defined($get_opt_str) && $get_opt_str ne '' &&
-       $get_opt_str !~ /[=+:\@\%!]/)
-      {$get_opt_str .= '=s'}
-    elsif(defined($get_opt_str) && $get_opt_str ne '' && $force_fix &&
-	  $get_opt_str !~ /=s$/)
-      {
-	$get_opt_str =~ s/[=+:\@\%!].*//;
-	$get_opt_str .= '=s';
-      }
-    elsif(!defined($get_opt_str) || $get_opt_str eq '' ||
-	  $get_opt_str !~ /=s$/)
+    if(!defined($get_opt_str) || $get_opt_str eq '')
       {debug({LEVEL => -1},"Unable to fix option string: [",
 	     (defined($get_opt_str) ? $get_opt_str : 'undef'),"].")}
+    else
+      {
+	#Remove any leading dashes
+	$get_opt_str =~ s/^-+//;
+
+	#If the option specification is just missing the string type, add it
+	if(defined($get_opt_str) && $get_opt_str ne '' &&
+	   $get_opt_str !~ /[=+:\@\%!]/)
+	  {$get_opt_str .= '=s'}
+	elsif(defined($get_opt_str) && $get_opt_str ne '' && $force_fix &&
+	      $get_opt_str !~ /=s$/)
+	  {
+	    $get_opt_str =~ s/[=+:\@\%!].*//;
+	    $get_opt_str .= '=s';
+	  }
+      }
 
     return($get_opt_str);
+  }
+
+#Globals used: $genopt_types, $fileopt_types
+sub makeGetOptKey
+  {
+    my $get_opt_str = $_[0];
+    my $type        = $_[1]; #Does not remove trailing flag type str if undef
+    my $local_quiet = defined($_[2]) ? $_[2] : 0;
+    my $calling_sub = $_[3];
+
+    my %types = %$genopt_types;
+    if(defined($type) && scalar(grep {$type eq $_} %$fileopt_types))
+      {%types = %$fileopt_types}
+
+    if(defined($get_opt_str))
+      {
+	if(ref($get_opt_str) eq 'ARRAY')
+	  {
+	    if(scalar(grep {ref($_) ne ''} @$get_opt_str))
+	      {
+		error("FLAG supplied to $calling_sub must be either a scalar ",
+		      "or a reference to an array of scalars, but an array ",
+		      "containing [",join("','",map {ref($_)}
+					  grep {ref($_) ne ''} @$get_opt_str),
+		      "] was supplied.")
+		  unless($local_quiet > 1);
+		quit(-100);
+	      }
+	    if(scalar(grep {defined($_) && /[=+:\@\%!].*/} @$get_opt_str))
+	      {
+		error("FLAG array supplied to $calling_sub [",
+		      join(',',grep {defined($_)} @$get_opt_str),
+		      "] must not contain type information.",
+		      {DETAIL => ('Must not contain the following ' .
+				  'characters: [=+:\@\%!].')})
+		  unless($local_quiet > 1);
+		return(undef);
+	      }
+	    elsif(scalar(grep {!defined($_)} @$get_opt_str))
+	      {
+		error("FLAG array supplied to $calling_sub [",
+		      join(',',map {defined($_) ? $_ : 'undef'} @$get_opt_str),
+		      "] must not contain undefined values.",
+		      {DETAIL => ('Must not contain the following ' .
+				  'characters: [=+:\@\%!].')})
+		  unless($local_quiet > 1);
+		quit(-101);
+	      }
+	    $get_opt_str = join('|',@$get_opt_str);
+	  }
+	elsif(ref($get_opt_str) eq '')
+	  {
+	    #Assume flags are to be separated by "invalid characters, like
+	    #commas, spaces, etc. if the flags contain unacceptable characters
+	    if($get_opt_str !~ /\|/ &&
+	       $get_opt_str =~ /[^a-zA-Z0-9\-_\?=+:\@\%!]/)
+	      {$get_opt_str = join('|',split(/[^a-zA-Z0-9\-_\?=+:\@\%!]+/,
+					     $get_opt_str))}
+	  }
+	else
+	  {
+	    error("FLAG supplied to $calling_sub must be either a scalar ",
+		  "or a reference to an array of scalars, but [",
+		  ref($get_opt_str),"] was supplied.")
+	      unless($local_quiet > 1);
+	    return(undef);
+	  }
+      }
+
+    if(defined($type) && scalar(grep {$type eq $_} keys(%types)) == 0)
+      {
+	error("Invalid type: [$type] for [$calling_sub].",
+	      {DETAIL => 'Must be one of [' . join(',',keys(%types)) . '].'})
+	  unless($local_quiet > 1);
+	return(undef);
+      }
+
+    if(!defined($get_opt_str) || $get_opt_str eq '')
+      {
+	debug({LEVEL => -1},"Unable to fix option string: [",
+	      (defined($get_opt_str) ? $get_opt_str : 'undef'),"].");
+	return(undef);
+      }
+
+    if(defined($type))
+      {
+	if(!$local_quiet && $get_opt_str =~ /([=+:\@\%!].*)/)
+	  {warning("FLAG string [$get_opt_str] contains type information ",
+		   "[$1], but a TYPE [$type] was also supplied.  Setting ",
+		   "type information to [$types{$type}].")}
+
+	if($get_opt_str =~ /[=+:\@\%!]/)
+	  {
+	    if(($type eq 'suffix'          && $get_opt_str !~ /=s$/ ) ||
+	       ($type eq 'infile'          && $get_opt_str !~ /=s$/ ) ||
+	       ($type eq 'outfile'         && $get_opt_str !~ /=s$/ ) ||
+	       ($type eq 'outdir'          && $get_opt_str !~ /=s$/ ) ||
+	       ($type eq 'stub'            && $get_opt_str !~ /=s$/ ) ||
+	       ($type eq 'bool'                                     ) ||
+	       ($type eq 'negbool'         && $get_opt_str !~ /!$/  ) ||
+	       ($type eq 'string'          && $get_opt_str !~ /=s$/ ) ||
+	       ($type eq 'float'           && $get_opt_str !~ /=f$/ ) ||
+	       ($type eq 'enum'            && $get_opt_str !~ /=s$/ ) ||
+	       ($type eq 'count'           && $get_opt_str !~ /:\+$/) ||
+	       ($type eq 'integer'         && $get_opt_str !~ /=i$/ ) ||
+	       ($type eq 'float'           && $get_opt_str !~ /=f$/ ) ||
+	       ($type eq 'string_array'    && $get_opt_str !~ /=s$/ ) ||
+	       ($type eq 'float_array'     && $get_opt_str !~ /=s$/ ) ||
+	       ($type eq 'enum_array'      && $get_opt_str !~ /=s$/ ) ||
+	       ($type eq 'integer_array'   && $get_opt_str !~ /=s$/ ) ||
+	       ($type eq 'string_array2d'  && $get_opt_str !~ /=s$/ ) ||
+	       ($type eq 'float_array2d'   && $get_opt_str !~ /=s$/ ) ||
+	       ($type eq 'enum_array2d'    && $get_opt_str !~ /=s$/ ) ||
+	       ($type eq 'integer_array2d' && $get_opt_str !~ /=s$/ )    )
+	      {warning("Invalid flag definition: [$get_opt_str] for type ",
+		       "[$type] in [$calling_sub].")}
+	  }
+
+	#Remove anything following the flags
+	$get_opt_str =~ s/[=+:\@\%!].*//;
+
+	$get_opt_str .= $types{$type};
+      }
+
+    #Remove any leading dashes
+    $get_opt_str =~ s/^-+//;
+
+    return($get_opt_str);
+  }
+
+#Globals used: $genopt_types, $fileopt_types
+#If undef is returned, the type is assumed to be set in the FLAG string
+sub getOptType
+  {
+    my $type_str    = $_[0];
+    my $get_opt_str = $_[1];
+    my $accepts     = $_[2]; #Only used for assuming enum type
+    my $get_opt_ref = $_[3]; #Only used to change bool to negbool if true
+    my %types       = (%$genopt_types,%$fileopt_types);
+
+    if(defined($type_str) && scalar(grep {$type_str eq $_} keys(%types)) == 0)
+      {error("Invalid type: [$type_str].")}
+    elsif(defined($type_str) && scalar(grep {$type_str eq $_} keys(%types)))
+      {
+	if($type_str eq 'enum' &&
+	   (!defined($accepts) || ref($accepts) ne 'ARRAY' ||
+	    scalar(@$accepts) == 0 || scalar(grep {ref($_) ne ''} @$accepts)))
+	  {
+	    error("TYPE enum requires a valid ACCEPTS value.",
+		  {DETAIL => ('ACCEPTS must be a reference to an array of ' .
+			      "scalars.  [" .
+			      (!defined($accepts) ? 'nothing' :
+			       (ref($accepts) ne 'ARRAY' ?
+				(ref($accepts) eq '' ?
+				 'a SCALAR' : 'a reference to (' .
+				 ref($accepts) . ')') :
+				(scalar(@$accepts) ?
+				 'a reference to an array of (' .
+				 join(',',map {ref($_) eq '' ?
+						 'SCALAR' : ref($_)}
+				      @$accepts) . ')' :
+				 'a reference to an empty array'))) .
+			      "] was passed in.")});
+	    quit(-95);
+	  }
+
+	#If the user defined this as a bool, but set the default value to true,
+	#assume they actually want a negbool
+	if($type_str eq 'bool' && ref($get_opt_ref) eq 'SCALAR' &&
+	   defined($$get_opt_ref) && $$get_opt_ref)
+	  {
+	    warning("Initial value of a [bool] should evaluate to false.  ",
+		    "Changing type of [",
+		    getDefaultFlag(scalar(getOptStrFlags($get_opt_str))),
+		    "] to [negbool].");
+	    $type_str = 'negbool';
+	  }
+
+	return($type_str);
+      }
+
+    #If the type is not defined in the get opt key, default to 'string'
+    if($get_opt_str !~ /[=+:\@\%!].*/)
+      {return('string')}
+
+    return(undef);
   }
 
 #This sub is a helper to addInfileOption specifically.  The error wordings are
@@ -853,10 +1123,11 @@ sub addRequiredRelationship
       {return()}
     elsif(!defined($file_type2) || $file_type2 eq '')
       {
+	my $def_prim_inf_type = getDefaultPrimaryInfileID();
 	#If the paired file type doesn't matter, set it to the first file type,
 	#even if it is with itself
-	if($relationship =~ /^\d+$/)
-	  {$file_type2 = getDefaultPrimaryInfileID()}
+	if($relationship =~ /^\d+$/ && defined($def_prim_inf_type))
+	  {$file_type2 = $def_prim_inf_type}
 	elsif(!defined($primary_infile_type))
 	  {
 	    error("No PAIR_WITH file type was provided and no primary input ",
@@ -931,40 +1202,6 @@ sub addRequiredRelationship
     push(@$required_relationships,[$file_type1,$file_type2,$relationship]);
   }
 
-#This returns a list of things to add to a usage hash when it is an infile type
-#that accepts input on stdin. [flags,detail_desc,default]
-sub getPrimaryUsageAddendums
-  {
-    return(',STDIN',
-	   join('',("  May be supplied on standard in.")),
-	   'stdin if present');
-  }
-
-#Returns a list of 3 strings: [flags,detail_desc,get_opt_str]
-sub getPrimaryStubUsageAddendums
-  {
-    my $opt_str = removeDupeFlags($default_stub_opt_addendum);
-    if(!defined($opt_str) || $opt_str eq '')
-      {
-	warning("Unable to add stub features to the primary input file type.");
-	return('','','');
-      }
-    my $flags  = join(',',getOptStrFlags($opt_str));
-    my $detail = join('',("  When standard input detected and ",
-			  getFileFlag($primary_infile_type)," is given only ",
-			  "1 argument, it will be used as a file name stub ",
-			  "for appending outfile suffixes.  See --extended ",
-			  "--help for advanced usage examples."));
-    return($flags,$detail,$opt_str);
-  }
-
-sub getFlaglessUsageAddendums
-  {
-    if(!defined($flagless_multival_type) || $flagless_multival_type < 0)
-      {return('','')}
-    return(',*',"\n*No flag required.");
-  }
-
 #Checks strings for 7 types of params: infile, outfile, suffix, outdir,
 #general, 1darray, and 2darray
 sub isGetOptStrValid
@@ -974,12 +1211,18 @@ sub isGetOptStrValid
     my $allow_dupes = defined($_[2]) ? $_[2] : 0;
     my $answer      = 1;
 
+    if(!defined($get_opt_str))
+      {
+	error("Invalid option flag definition: [undef].");
+	return(0);
+      }
+
     my @existing = getDupeFlags($get_opt_str);
     if(scalar(@existing))
       {
 	if(!$allow_dupes)
 	  {
-	    warning("Duplicate flags detected: [",join(',',@existing),"].");
+	    error("Duplicate flags detected: [",join(',',@existing),"].");
 	    debug({LEVEL => -1},"Existing flags: [",
 		  join(',',keys(%$GetOptHash)),
 		  "]. Adding Flag: [$get_opt_str]");
@@ -996,10 +1239,10 @@ sub isGetOptStrValid
     if($get_opt_str !~ /[a-zA-Z0-9!+\@\}\@\%]$/)
       {
 	error("Invalid option flag definition: [$get_opt_str].  The flag ",
-	      "specification must end in a letter, number, or one of: ",
-	      "[!+\@\}\%].  See the Summary of Option Specifications section ",
-	      "of `perldoc Getopt::Long` for how to specify the command line ",
-	      "option.");
+	      "specification [$get_opt_str] must not be an empty string and ",
+	      "end in a letter, number, or one of: [!+\@\}\%].  See the ",
+	      "Summary of Option Specifications section of `perldoc Getopt::",
+	      "Long` for how to specify the command line option.");
 	$answer = 0;
       }
 
@@ -1013,8 +1256,8 @@ sub isGetOptStrValid
       {
 	if(!$ok)
 	  {
-	    error("In order to shell-interpolate the values the user passes ",
-		  "in, the option flag specification must end with '=s'.  ",
+	    error("In order to split the values the user passes in, the ",
+		  "option flag specification must end with '=s'.  ",
 		  "[$get_opt_str] was passed in.");
 	    $answer = 0;
 	  }
@@ -1027,7 +1270,7 @@ sub isGetOptStrValid
 		  "'=s'.",
 		  {DETAIL =>
 		   join('',
-			("In order to shell-interpolate the values, ",
+			("In order to split the values, ",
 			 "CommandLineInterface requires array options to ",
 			 "have the string type passed to GetOpt::Long ",
 			 "because it replaces option string with a reference ",
@@ -1061,7 +1304,8 @@ sub getDupeFlags
 
     push(@opt_strs,$get_opt_str);
 
-    debug({LEVEL => -2},"Looking for dupes in: [",join(',',@opt_strs),"].");
+    debug({LEVEL => -2},"Looking for dupes in: [",
+	  join(',',map {defined($_) ? $_ : 'undef'} @opt_strs),"].");
 
     foreach my $opt_str (@opt_strs)
       {
@@ -1164,10 +1408,11 @@ sub removeDupeFlags
 #Globals used: $outf_to_usage_hash
 sub addOutfileOption
   {
-    my @in = getSubParams([qw(GETOPTKEY COLLISIONMODE REQUIRED PRIMARY DEFAULT
-			      SMRY_DESC DETAIL_DESC FORMAT_DESC HIDDEN
-			      PAIR_WITH PAIR_RELAT FLAGLESS)],
-			  [scalar(@_) ? qw(GETOPTKEY) : ()],
+    my @in = getSubParams([qw(FLAG|GETOPTKEY COLLISIONMODE REQUIRED PRIMARY
+			      DEFAULT SMRY|SMRY_DESC|SHORT_DESC
+			      DETAIL|DETAIL_DESC|LONG_DESC FORMAT|FORMAT_DESC
+			      HIDDEN PAIR_WITH PAIR_RELAT FLAGLESS ADVANCED)],
+			  [scalar(@_) ? qw(FLAG|GETOPTKEY) : ()],
 			  [@_]);
     my $get_opt_str = $in[0]; #e.g. 'o|outfile=s'
     my $collid_mode = getCollisionMode(undef,'outfile',$in[1]);
@@ -1183,6 +1428,7 @@ sub addOutfileOption
     my $req_with    = $in[9]; #File type ID (as returned by this sub)
     my $req_rel_str = getRelationStr($in[10]); #e.g. 1,1:1,1:M,1:1orM
     my $flagless    = $in[11];#Whether the option can be supplied sans flag
+    my $advanced    = $in[12];#Advanced options print when extended >= 2
 
     #Trim leading & trailing hard returns and white space characters (from
     #using '<<')
@@ -1241,7 +1487,12 @@ sub addOutfileOption
 	  {$req_rel_str = getRelationStr('1:1orM')}
       }
 
-    $get_opt_str = fixStringOpt($get_opt_str);
+    #Allow the flag to be an array of scalars and turn it into a get opt str
+    my $save_getoptstr = $get_opt_str;
+    $get_opt_str = makeGetOptKey($get_opt_str,'outfile',1,'addOutfileOption');
+
+    if(defined($get_opt_str))
+      {$get_opt_str = fixStringOpt($get_opt_str)}
 
     if(!isGetOptStrValid($get_opt_str,'outfile'))
       {
@@ -1249,8 +1500,8 @@ sub addOutfileOption
 	  {warning("Unable to add default output file option.")}
 	else
 	  {
-	    error("Invalid GetOpt parameter flag definition: [$get_opt_str] ",
-		  "for outfile type.");
+	    error("Invalid GetOpt parameter flag definition: ",
+		  "[$save_getoptstr] for outfile type.");
 	    quit(-73);
 	  }
 	return(undef);
@@ -1268,7 +1519,12 @@ sub addOutfileOption
     if(defined($req_with))
       {
 	my $uhash = getInfileUsageHash($req_with);
-	if(!defined($uhash) || !exists($uhash->{OPTTYPE}))
+	if(!defined($uhash))
+	  {
+	    #getInfileUsageHash should have already issued an error
+	    quit(-68);
+	  }
+	elsif(!exists($uhash->{OPTTYPE}))
 	  {error("Invalid PAIR_WITH input file ID: [$req_with].  Must be an ",
 		 "ID returned by addInfileOption.")}
 	#TODO: Requirement 280 will allow linking to either input or output
@@ -1291,11 +1547,8 @@ sub addOutfileOption
     elsif(!defined($hidden))
       {$hidden = 0}
 
-    if(!defined($flagless))
-      {$flagless = 0}
-
-    my $flags = join(',',getOptStrFlags($get_opt_str));
-    my $flag  = getDefaultFlag($flags,',');
+    my $flags = [getOptStrFlags($get_opt_str)];
+    my $flag  = getDefaultFlag($flags);
 
     if(defined($required) && defined($hidden) && $required && $hidden)
       {
@@ -1328,7 +1581,7 @@ sub addOutfileOption
     if(!defined($smry_desc) || $smry_desc eq '')
       {
 	if($required)
-	  {$smry_desc = 'Output file(s)'}
+	  {$smry_desc = 'Output file(s).'}
 	elsif(!defined($smry_desc))
 	  {$smry_desc = ''}
       }
@@ -1336,21 +1589,22 @@ sub addOutfileOption
     if(!defined($detail_desc) || $detail_desc eq '')
       {$detail_desc =
 	 join('',('Output file(s)',
-		  ($default_outfile_added &&
-		   $get_opt_str eq 'outfile|output-file=s' ?
-		   ' - a named outfile that is a mutually exclusive ' .
-		   'alternative to supplying an outfile suffix' :
-		   ($file_type_index ?
-		    " " . (defined($req_with) &&
-			   !exists($outfile_types_hash->{$req_with}) ?
-			   "associated with " . getFileFlag($req_with) .
-			   " input files" .
-			   (defined($req_rel_str) ?
-			    " in a $req_rel_str relationship" : '') :
-			   "type " . ($file_type_index + 1)) : '')),
-		  '.  Space separated.',
-		  (defined($format_desc) && $format_desc ne '' ?
-		   '  See --help for file format.' : '')))}
+		  ($file_type_index ?
+		   " " . (defined($req_with) &&
+			  !exists($outfile_types_hash->{$req_with}) ?
+			  "associated with [" . getInfileFlag($req_with) .
+			  "] input file(s)" .
+			  (defined($req_rel_str) ?
+			   " in a " . getDispRelStr($req_rel_str) .
+			   " relationship" : '') :
+			  "type " . ($file_type_index + 1)) : ''),
+		  '.',(defined($format_desc) && $format_desc ne '' ?
+		       '  See --help for file format.' : '')))}
+    #If the description doesn't reference the help flag for the file format and
+    #a file format was provided, add a reference to it
+    elsif($detail_desc !~ /--help/ && defined($format_desc) &&
+	  $format_desc ne '')
+      {$detail_desc .= "\n\nSee --help for file format."}
 
     my $getoptsub = 'sub {push(@{$input_files_array->[' . $file_type_index .
       ']},[sglob($_[1])])}';
@@ -1359,7 +1613,7 @@ sub addOutfileOption
     if($required)
       {push(@$required_outfile_types,$file_type_index)}
 
-    if($flagless)
+    if(defined($flagless) && $flagless)
       {
 	if(defined($flagless_multival_type) && $flagless_multival_type > -1)
 	  {
@@ -1367,7 +1621,8 @@ sub addOutfileOption
 		  "'flagless': [$get_opt_str]: [$flagless].  Only 1 is ",
 		  "allowed.",
 		  {DETAIL => "First flagless option was: [" .
-		   $usage_array->[$flagless_multival_type]->{OPTFLAG} . "]."});
+		   getDefaultFlag($usage_array->[$flagless_multival_type]
+				  ->{OPTFLAG}) . "]."});
 	    return(undef);
 	  }
 
@@ -1378,21 +1633,13 @@ sub addOutfileOption
 	#This assumes that the call to addToUsage a few lines below is the
 	#immediate next call to addToUsage
 	$flagless_multival_type = getNextUsageIndex();
-
-	my($flagsadd,$detailsadd) = getFlaglessUsageAddendums();
-
-	$flags .= $flagsadd;
-
-	$detail_desc .= $detailsadd;
       }
 
     #If req_with is not defined, this call just returns without doing anything
     addRequiredRelationship($file_type_index,$req_with,$req_rel_str);
 
     if($default_str eq '' && $primary && !$required)
-      {$default_str = 'stdout'}
-    elsif($default_str eq '' && !$primary && !$required)
-      {$default_str = 'no output'}
+      {$default_str = 'STDOUT'}
     elsif($default_str ne '')
       {
 	#If the default value is simple, clean up its display
@@ -1405,8 +1652,8 @@ sub addOutfileOption
 
     push(@$usage_file_indexes,
 	 addToUsage($get_opt_str,$flags,$smry_desc,$detail_desc,$required,
-		    $default_str,undef,$hidden,'outfile',$flagless,$primary,
-		    $format_desc,$file_type_index));
+		    $default_str,undef,$hidden,'outfile',$flagless,$advanced,
+		    undef,undef,$primary,$format_desc,$file_type_index));
 
     my $usage_index = $#{$usage_array};
 
@@ -1441,6 +1688,25 @@ sub addOutfileOption
     $outf_to_usage_hash->{$suffix_id} = $usage_index;
 
     return($suffix_id);
+  }
+
+#Makes relationship strings such as '1','1:1','1:M','1:1orM' human-readable
+sub getDispRelStr
+  {
+    my $str = $_[0];
+    if(defined($str))
+      {
+	if($str eq '1')
+	  {return('one to all')}
+	elsif($str eq '1:1')
+	  {return('one to one')}
+	elsif($str eq '1:M')
+	  {return('one to many')}
+	elsif($str eq '1:1orM')
+	  {return('one to (one or many)')}
+      }
+
+    return('ERROR');
   }
 
 #This method checks whether a file type (infile or outfile) is required.
@@ -1483,7 +1749,10 @@ sub isFileTypeHidden
 
     my $uhash = {};
     if(exists($outfile_types_hash->{$file_type_id}))
-      {$uhash = getOutfileUsageHash($file_type_id)}
+      {
+	#This assumes there's only 1 (hidden) suffix when the type is outfile
+	$uhash = getOutfileUsageHash((getSuffixIDs($file_type_id))[0]);
+      }
     else
       {$uhash = getInfileUsageHash($file_type_id)}
 
@@ -1498,9 +1767,136 @@ sub isFileTypeHidden
     return($uhash->{HIDDEN})
   }
 
+sub isFileTypePrimary
+  {
+    my $file_type_id = $_[0];
+
+    if(!defined($file_type_id) || $file_type_id >= scalar(@$input_files_array))
+      {
+	error("Invalid file type ID: [",
+	      (defined($file_type_id) ? $file_type_id : 'undef'),"].");
+	return(0);
+      }
+
+    my $uhash = {};
+    if(exists($outfile_types_hash->{$file_type_id}))
+      {
+	#This assumes there's only 1 (hidden) suffix when the type is outfile
+	$uhash = getOutfileUsageHash((getSuffixIDs($file_type_id))[0]);
+      }
+    else
+      {$uhash = getInfileUsageHash($file_type_id)}
+
+    if(!defined($uhash) || !exists($uhash->{PRIMARY}) ||
+       !defined($uhash->{PRIMARY}))
+      {
+	warning("Usage hash for file type ID [$file_type_id] invalid/not ",
+		"found.");
+	return(0);
+      }
+
+    return($uhash->{PRIMARY})
+  }
+
+#Determines whether a file type (infile or outfile) has an actual default
+#value.  This does not count the display default in the usage hash - only the
+#actual default set.
+#Globals used: $default_infiles_array
+sub isFileTypeDefaulted
+  {
+    my $file_type_id = $_[0];
+
+    if(!defined($file_type_id) || $file_type_id >= scalar(@$input_files_array))
+      {
+	error("Invalid file type ID: [",
+	      (defined($file_type_id) ? $file_type_id : 'undef'),"].");
+	return(0);
+      }
+
+    #If the default infile array is defined, is large enough for this file
+    #type, there's a sub-array defined for this file type, it has a sub array
+    #in it, and at least 1 of the sub-sub-arrays has something in it
+    #(regardless of whether it's valid or not), we will return true
+    if(defined($default_infiles_array) &&
+       scalar(@$default_infiles_array) > $file_type_id &&
+       defined($default_infiles_array->[$file_type_id]) &&
+       scalar(@{$default_infiles_array->[$file_type_id]}) &&
+       scalar(grep {scalar(@$_)} @{$default_infiles_array->[$file_type_id]}))
+      {return(1)}
+
+    return(0);
+  }
+
+#This returns a file flag and/or 'stdin' or the default file name(s) depending
+#on whether the file option is hidden, primary, or has a default.  Supplying
+#--extended 2+ will always show the flag, hidden or not.
+#Globals used: $extended
 sub getFileFlag
   {
     my $file_type_index = $_[0];
+    #Always use --extended if supplied and non-0, else use the supplied param
+    #Special case: force flag only when extended == -1
+    my $local_extended  = (defined($_[1]) ?
+			   (defined($extended) && $extended ?
+			    $extended : $_[1]) :
+			   (defined($extended) ? $extended : 0));
+
+    if(!defined($file_type_index) || $file_type_index < 0 ||
+       $file_type_index >= scalar(@$infile_flag_array))
+      {
+	error("Invalid file type ID: [",
+	      (defined($file_type_index) ? $file_type_index : 'undef'),
+	      "].  Index is ",(defined($file_type_index) ?
+			       "out of range." : 'undefined.'));
+	return('');
+      }
+
+    if($local_extended != -1)
+      {
+	#If primary and (visible or extended > 1)
+	if(isFileTypePrimary($file_type_index) &&
+	   (!isFileTypeHidden($file_type_index) || $local_extended > 1))
+	  {return($infile_flag_array->[$file_type_index] .
+		  ($local_extended > 1 ? ' (or "STD' .
+		   (exists($outfile_types_hash->{$file_type_index}) ?
+		    'OUT' : 'IN') . '")' : ''))}
+	#If primary and hidden
+	elsif(isFileTypePrimary($file_type_index) &&
+	      isFileTypeHidden($file_type_index))
+	  {return('"STD' . (exists($outfile_types_hash->{$file_type_index}) ?
+			   'OUT"' : 'IN"'))}
+	#Guaranteed not primary, so if defaulted and hidden and extended < 2
+	elsif(isFileTypeDefaulted($file_type_index) &&
+	      isFileTypeHidden($file_type_index) && $local_extended < 2)
+	  {
+	    if(scalar(@{$default_infiles_array->[$file_type_index]}) == 1)
+	      {return(join(',',map {defined($_) ? $_ : 'undef'}
+			   @{$default_infiles_array->[$file_type_index]
+			       ->[0]}))}
+	    else
+	      {return('(' .
+		      join('),(',
+			   map {my $a = $_;
+				join(',',map {defined($_) ? $_ : 'undef'} @$a)}
+			   @{$default_infiles_array->[$file_type_index]}) .
+		      ')')}
+	  }
+	elsif(isFileTypeHidden($file_type_index) && $local_extended < 2)
+	  {return('[HIDDEN - use `--extended --extended` to reveal]')}
+      }
+
+    return($infile_flag_array->[$file_type_index]);
+  }
+
+sub getInfileFlag
+  {
+    my $file_type_index = $_[0];
+    #Always use --extended if supplied and non-0, else use the supplied param
+    #Special case: force flag only when extended == -1
+    my $local_extended  = (defined($_[1]) ?
+			   (defined($extended) && $extended ?
+			    $extended : $_[1]) :
+			   (defined($extended) ? $extended : 0));
 
     if(!defined($file_type_index) || $file_type_index < 0 ||
        $file_type_index >= scalar(@$infile_flag_array) ||
@@ -1516,12 +1912,18 @@ sub getFileFlag
 	return('');
       }
 
-    return($infile_flag_array->[$file_type_index]);
+    return(getFileFlag($file_type_index,$local_extended));
   }
 
 sub getOutfileFlag
   {
     my $file_type_index = $_[0];
+    #Always use --extended if supplied and non-0, else use the supplied param
+    #Special case: force flag only when extended == -1
+    my $local_extended  = (defined($_[1]) ?
+			   (defined($extended) && $extended ?
+			    $extended : $_[1]) :
+			   (defined($extended) ? $extended : 0));
 
     if(!defined($file_type_index) || $file_type_index < 0 ||
        $file_type_index >= scalar(@$infile_flag_array) ||
@@ -1532,29 +1934,84 @@ sub getOutfileFlag
 	return('');
       }
 
-    return($infile_flag_array->[$file_type_index]);
+    return(getFileFlag($file_type_index,$local_extended));
   }
 
 sub getOutfileSuffixFlag
   {
     my $suffix_id = $_[0];
+    #Always use --extended if supplied and non-0, else use the supplied param
+    #Special case: force flag only when extended == -1
+    my $local_extended  = (defined($_[1]) ?
+			   (defined($extended) && $extended ?
+			    $extended : $_[1]) :
+			   (defined($extended) ? $extended : 0));
 
     if(!defined($suffix_id) || $suffix_id < 0 ||
-       $suffix_id >= scalar(@$outfile_flag_array))
+       $suffix_id >= scalar(@$suffix_flag_array))
       {
 	error("Invalid output file suffix ID: [",
 	      (defined($suffix_id) ? $suffix_id : 'undef'),"].");
 	return('');
       }
 
-    return($outfile_flag_array->[$suffix_id]);
+    my $flag = $suffix_flag_array->[$suffix_id];
+    my $uhash = getFileUsageHash($suffix_id,'suffix');
+
+    if($local_extended != -1)
+      {
+	#If primary and (visible or extended > 1)
+	if($uhash->{PRIMARY} && (!$uhash->{HIDDEN} || $local_extended > 1))
+	  {return($flag . ($local_extended > 1 ? ' (or "STDOUT")' : ''))}
+	#If primary and hidden
+	elsif($uhash->{PRIMARY} && $uhash->{HIDDEN})
+	  {return('"STDOUT"')}
+	#Guaranteed not primary, so if defaulted and hidden and extended < 2
+	elsif(defined($uhash->{DEFAULT}) && $uhash->{HIDDEN} &&
+	      $local_extended < 2)
+	  {return($uhash->{DEFAULT})}
+	elsif($uhash->{HIDDEN} && $local_extended < 2)
+	  {return('[HIDDEN - use `--extended --extended` to reveal]')}
+      }
+
+    return($flag);
   }
 
+#Globals used: usage_array
 sub getOutdirFlag
   {
+    my $local_extended  = (defined($_[0]) ?
+			   (defined($extended) && $extended ?
+			    $extended : $_[0]) :
+			   (defined($extended) ? $extended : 0));
+
     ##TODO: The outdir options need to be fixed. See requirement 178
-    return(defined($outdir_flag_array->[0]) ?
-	   $outdir_flag_array->[0] : (getOptStrFlags($default_outdir_opt))[0]);
+    my $flag = (defined($outdir_flag_array->[0]) ? $outdir_flag_array->[0] :
+		getDefaultFlag(getOptStrFlags($default_outdir_opt)));
+
+    if(defined($outdir_flag_array->[0]))
+      {
+	##TODO: The outdir options need to be fixed. See requirement 178
+	my $oduhashes = [grep {$_->{OPTTYPE} eq 'outdir'} @$usage_array];
+	my $uhash = {};
+	if(scalar(@$oduhashes))
+	  {$uhash = $oduhashes->[0]}
+
+	if($local_extended != -1)
+	  {
+	    #If visible or extended > 1
+	    if(!$uhash->{HIDDEN} || $local_extended > 1)
+	      {return($flag)}
+	    #If defaulted and hidden and extended < 2
+	    elsif(defined($uhash->{DEFAULT}) && $uhash->{HIDDEN} &&
+		  $local_extended < 2)
+	      {return($uhash->{DEFAULT})}
+	    elsif($uhash->{HIDDEN} && $local_extended < 2)
+	      {return('[HIDDEN - use `--extended --extended` to reveal]')}
+	  }
+      }
+
+    return($flag);
   }
 
 #Returns the suffix sub-index in the array indexed the same as the file type
@@ -1564,9 +2021,11 @@ sub addOutfileSuffixOption
   {
     debug({LEVEL => -1},"Params sent in BEFORE: [",
 	  join(',',map {defined($_) ? $_ : 'undef'} @_),"].");
-    my @in = getSubParams([qw(GETOPTKEY FILETYPEID GETOPTVAL REQUIRED PRIMARY
-			      DEFAULT HIDDEN SMRY_DESC DETAIL_DESC FORMAT_DESC
-			      COLLISIONMODE)],
+    my @in = getSubParams([qw(FLAG|GETOPTKEY FILETYPEID VARREF|GETOPTVAL
+			      REQUIRED PRIMARY DEFAULT HIDDEN
+			      SMRY|SMRY_DESC|SHORT_DESC
+			      DETAIL|DETAIL_DESC|LONG_DESC FORMAT|FORMAT_DESC
+			      COLLISIONMODE ADVANCED)],
 			  #If there are any params sent in, require the first
 			  [scalar(@_) ?
 			   #If there are at least 2 input file types, also
@@ -1576,9 +2035,8 @@ sub addOutfileSuffixOption
 			  [@_]);
     debug({LEVEL => -1},"Params sent in AFTER: [",
 	  join(',',map {defined($_) ? $_ : 'undef'} @in),"].");
-    my $get_opt_str     = $in[0]; #e.g. 'o|outfile-suffix=s'
+    my $get_opt_str     = $in[0]; #e.g. 'o|suffix=s'
     my $file_type_index = $in[1]; #Val returned from addInfileOption
-                                  ##TODO: The default index definitely must be selected more intelligently. See requirement 179
     my $get_opt_val     = $in[2]; #A reference to a scalar
     my $required        = $in[3]; #Is suff required?: 0 (false) or non-0 (true)
     my $primary         = defined($in[4]) ? $in[4] : 1; #non-0=STDOUT if no suf
@@ -1590,6 +2048,7 @@ sub addOutfileSuffixOption
     my $detail_desc     = $in[8]; #e.g. 'Input file(s).  Space separated,...'
     my $format_desc     = $in[9]; #e.g. 'Tab delimited text w/ cols: 1.Name...'
     my $loc_collid_mode = getCollisionMode(undef,'suffix',$in[10]);
+    my $advanced        = $in[11];#Advanced options print when extended >= 2
     ##TODO: Don't use the generic/global collide_mode here - implement an
     #output mode that the user can control per outfile type.  See requirement
     #114
@@ -1673,47 +2132,53 @@ sub addOutfileSuffixOption
     if(!defined($get_opt_str) || $get_opt_str eq '')
       {
 	error("The first parameter (Getopt::Long key string) is required.");
-	return(undef);
+	quit(-91);
       }
 
+    #If the file type ID is not an integer
     if(defined($file_type_index) && $file_type_index !~ /^\d+$/)
-      {error("Invalid FILETYPEID parameter: [$file_type_index].")}
+      {
+	error("Invalid FILETYPEID parameter: [$file_type_index].  Must be an ",
+	      "unsigned integer.");
+	quit(-92);
+      }
+    #If the integer is defined, was supplied by the programmer, and references
+    #an output file type
+    elsif(defined($file_type_index) && !isCaller('addOutfileOption') &&
+	  exists($outfile_types_hash->{$file_type_index}))
+      {
+	error("Invalid FILETYPEID parameter: [$file_type_index].  Must refer ",
+	      "to an input file type, not an output file type.");
+	quit(-93);
+      }
+    #If the file type is not defined
     elsif(!defined($file_type_index))
       {
-	#The outfile_types_hash only contains indexes into the
-	#input_files_array for files added by addOutfileOption.  This was to
-	#simplify suffix-based and whole-name based output files by handling
-	#them the same way.
-	my $num_infile_types = (scalar(@$input_files_array) -
-				scalar(keys(%$outfile_types_hash)));
+	$file_type_index = getDefaultPrimaryInfileID();
 
-	#If there's only 1 real input file type, use its index
-	if($num_infile_types == 1)
-	  {$file_type_index = (grep {!exists($outfile_types_hash->{$_})}
-			       (0..$#{$input_files_array}))[0]}
-	elsif(defined($primary_infile_type))
-	  {$file_type_index = $primary_infile_type}
-	elsif($num_infile_types > 1)
+	if(!defined($file_type_index))
 	  {
-	    warning("Unable to determine default FILETYPEID.  Setting to ",
-		    "default.") unless($adding_default);
-	    $file_type_index = getDefaultPrimaryInfileID();
-	  }
-	else
-	  {
-	    error("Unable to determine default FILETYPEID.  No input file ",
-		  "types have been added.");
-	    return(undef);
+	    error("No input file types have been added.  Unable to determine ",
+		  "default FILETYPEID.");
+	    quit(-94);
 	  }
       }
+    #If the valid file type ID was added as a part of creating a default
     elsif($adding_default)
       {debug({LEVEL => -1},"Input file type is: [",
-	     getFileFlag($file_type_index),"].")}
+	     getInfileFlag($file_type_index,-1),"].")}
 
+    #If the file type looked right, but was supplied by the programmer, double-
+    #check they actually got the file type ID from addInfileOption
     if(defined($file_type_index) && !$called_implicitly)
       {
 	my $uhash = getInfileUsageHash($file_type_index);
-	if(!defined($uhash) || !exists($uhash->{OPTTYPE}))
+	if(!defined($uhash))
+	  {
+	    #getInfileUsageHash should have already issued an error
+	    quit(-69);
+	  }
+	elsif(!exists($uhash->{OPTTYPE}))
 	  {error("Invalid FILETYPEID: [$file_type_index].  Must be an ID ",
 		 "returned by addInfileOption.")}
 	#TODO: Requirement 280 will allow linking to either input or output
@@ -1738,8 +2203,27 @@ sub addOutfileSuffixOption
     elsif(!defined($hidden))
       {$hidden = 0}
 
-    my $flags = join(',',getOptStrFlags($get_opt_str));
-    my $flag  = getDefaultFlag($flags,',');
+    #Allow the flag to be an array of scalars and turn it into a get opt str
+    my $save_getoptstr = $get_opt_str;
+    $get_opt_str = makeGetOptKey($get_opt_str,'suffix',1,
+				 'addOutfileSuffixOption');
+
+    if(!defined($get_opt_str) || !isGetOptStrValid($get_opt_str,'suffix'))
+      {
+	if($adding_default)
+	  {warning("Unable to add default output file suffix option.")}
+	else
+	  {
+	    error("Invalid flag definition: [$save_getoptstr] for outfile-",
+		  "suffix type.");
+	    quit(-74);
+	  }
+      }
+
+    $get_opt_str = fixStringOpt($get_opt_str);
+
+    my $flags = [getOptStrFlags($get_opt_str)];
+    my $flag  = getDefaultFlag($flags);
 
     if($hidden && !defined($default) && (defined($required) && $required))
       {
@@ -1750,21 +2234,6 @@ sub addOutfileSuffixOption
 		(defined($required) && $required ? ' it is required' : ''),
 		".  Setting as not hidden.");
 	$hidden = 0;
-      }
-
-    $get_opt_str = fixStringOpt($get_opt_str);
-
-    if(!isGetOptStrValid($get_opt_str,'suffix'))
-      {
-	if($adding_default)
-	  {warning("Unable to add default output file suffix option.")}
-	else
-	  {
-	    error("Invalid GetOpt parameter flag definition: [$get_opt_str] ",
-		  "for outfile-suffix type.");
-	    quit(-74);
-	  }
-	return(undef);
       }
 
     if($file_type_index < 0 || $file_type_index =~ /\D/)
@@ -1802,7 +2271,7 @@ sub addOutfileSuffixOption
 	push(@{$outfile_suffix_array->[$file_type_index]},$default);
       }
     debug({LEVEL => -1},"Default suffix for input file type [",
-	  getFileFlag($file_type_index),"] added is [",
+	  getInfileFlag($file_type_index,-1),"] added is [",
 	  (defined($default) ? $default : 'undef'),"].")
       if(!exists($outfile_types_hash->{$file_type_index}));
     push(@$suffix_id_lookup,[$file_type_index,$suffix_index]);
@@ -1839,7 +2308,7 @@ sub addOutfileSuffixOption
       {push(@$required_suffix_types,
 	    [$file_type_index,$suffix_index,$suffix_id])}
 
-    $outfile_flag_array->[$suffix_id] = $flag;
+    $suffix_flag_array->[$suffix_id] = $flag;
 
     #If smry_desc is not defined or is an empty string
     if(!defined($smry_desc) || $smry_desc eq '')
@@ -1853,10 +2322,8 @@ sub addOutfileSuffixOption
 	if((!defined($hidden) || !$hidden) &&
 	   ($required || (!exists($outfile_types_hash->{$file_type_index}) &&
 			  !defined($detail_desc))))
-	  {
-	    $smry_desc = 'Outfile extension (appended to ' .
-	      getFileFlag($file_type_index) . ').';
-	  }
+	  {$smry_desc = 'Outfile suffix appended to file names supplied to [' .
+	     getInfileFlag($file_type_index) . '].'}
 	else
 	  {$smry_desc = ''}
       }
@@ -1864,26 +2331,20 @@ sub addOutfileSuffixOption
     if((!defined($detail_desc) || $detail_desc eq '') &&
        !exists($outfile_types_hash->{$file_type_index}))
       {$detail_desc =
-	 join('',('Outfile extension appended to ',
-		  getFileFlag($file_type_index),'.  Will not ',
-		  'overwrite without --overwrite.  Supplying an empty ',
-		  'string will effectively treat the input file name (',
-		  getFileFlag($file_type_index),
-		  ') as a stub (may be used with ',getOutdirFlag(),' as ',
-		  'well).  When standard input is detected and no stub is ',
-		  'provided via ',
-		  getFileFlag($file_type_index),
-		  ', appends to the string "STDIN".  Does ',
-		  'not replace existing input file extensions.  Default ',
-		  'behavior prints output to standard out.  ',
-		  (!$default_outfile_suffix_added ? '' :
-		   'This option is a mutually exclusive alternative to the ' .
-		   'named outfile option.  '),'See ',
-		  '--extended --help for output file format and advanced ',
-		  'usage examples.'))}
+	 join('',
+	      ('Outfile suffix appended to file names supplied to [',
+	       getInfileFlag($file_type_index),
+	       '].  See --help for file format.'))}
+    #If the description doesn't reference the help flag for the file format and
+    #a file format was provided, add a reference to it
+    elsif($detail_desc !~ /--help/ && defined($format_desc) &&
+	  $format_desc ne '')
+      {$detail_desc .= "\n\nSee --help for file format."}
 
-    if(!defined($default))
-      {$default = 'none'}
+    if((!defined($default) || $default eq '') && $primary && !$required)
+      {$default = 'STDOUT'}
+    elsif(!defined($default))
+      {$default = ''}
 
     addToUsage($get_opt_str,
 	       $flags,
@@ -1895,6 +2356,9 @@ sub addOutfileSuffixOption
 	       $hidden,
 	       'suffix',
 	       0,
+	       $advanced,
+	       undef,
+	       undef,
 	       $primary,
 	       $format_desc,
 	       $suffix_id);
@@ -1907,21 +2371,27 @@ sub addOutfileSuffixOption
 
 sub addOutfileTagteamOption
   {
-    my @in = getSubParams([qw(GETOPTKEY_SUFF GETOPTKEY_FILE FILETYPEID
-			      PAIR_RELAT GETOPTVAL REQUIRED PRIMARY FORMAT_DESC
-			      DEFAULT DEFAULT_IS_FILE HIDDEN_SUFF HIDDEN_FILE
-			      SMRY_DESC_SUFF SMRY_DESC_FILE DETAIL_DESC_SUFF
-			      DETAIL_DESC_FILE COLLISIONMODE_SUFF
-			      COLLISIONMODE_FILE)],
-			  #If there are any params sent in, require the first
-			  [scalar(@_) == 0 ? () :
-			   #If there are at least 2 input file types, also
-			   #require the FILETYPEID
-			   (scalar(@$input_files_array) < 2 ?
-			    qw(GETOPTKEY_SUFF GETOPTKEY_FILE) :
-			    qw(GETOPTKEY_SUFF GETOPTKEY_FILE FILETYPEID))],
-			  [@_]);
-    my $get_opt_str_suff = $in[0];  #e.g. 'o|outfile-suffix=s'
+    my @in =
+      getSubParams([qw(FLAG_SUFF|GETOPTKEY_SUFF FLAG_FILE|GETOPTKEY_FILE
+		       FILETYPEID|PAIR_WITH PAIR_RELAT VARREF_SUFF|GETOPTVAL
+		       REQUIRED PRIMARY FORMAT|FORMAT_DESC DEFAULT
+		       DEFAULT_IS_FILE HIDDEN_SUFF HIDDEN_FILE
+		       SMRY_SUFF|SMRY_DESC_SUFF|SHORT_DESC_SUFF
+		       SMRY_FILE|SMRY_DESC_FILE|SHORT_DESC_FILE
+		       DETAIL_SUFF|DETAIL_DESC_SUFF|LONG_DESC_SUFF
+		       DETAIL_FILE|DETAIL_DESC_FILE|LONG_DESC_FILE
+		       COLLISIONMODE_SUFF COLLISIONMODE_FILE ADVANCED_SUFF
+		       ADVANCED_FILE)],
+		   #If there are any params sent in, require the first
+		   [scalar(@_) == 0 ? () :
+		    #If there are at least 2 input file types, also require the
+		    # FILETYPEID
+		    (scalar(@$input_files_array) < 2 ?
+		     qw(FLAG_SUFF|GETOPTKEY_SUFF FLAG_FILE|GETOPTKEY_FILE) :
+		     qw(FLAG_SUFF|GETOPTKEY_SUFF FLAG_FILE|GETOPTKEY_FILE
+			FILETYPEID|PAIR_WITH))],
+		   [@_]);
+    my $get_opt_str_suff = $in[0];  #e.g. 'o|suffix=s'
     my $get_opt_str_file = $in[1];  #e.g. 'outfile=s'
     my $file_type_index  = $in[2];  #Val returned from addInfileOption
     my $relationship     = $in[3];  #e.g. 1,1:1,1:M,1:1orM
@@ -1935,16 +2405,18 @@ sub addOutfileTagteamOption
                                     #Excludes from usage
     my $hidden_file      = $in[11]; #0 or non-0. Non-0 requires a default.
                                     #Excludes from usage
-    my $smry_desc_suff   = $in[12]; #e.g. Outfile extension.
+    my $smry_desc_suff   = $in[12]; #e.g. Outfile suffix.
                                     #Empty/undefined = exclude from short usage
     my $smry_desc_file   = $in[13]; #e.g. Output file.
                                     #Empty/undefined = exclude from short usage
-    my $detail_desc_suff = $in[14]; #e.g. Outfile extension.  See --help for...
+    my $detail_desc_suff = $in[14]; #e.g. Outfile suffix.  See --help for...
     my $detail_desc_file = $in[15]; #e.g. Output file.  See --help for...
     my $loc_collide_suff = $in[16]; #Adds to collid_modes_array
 			            #1 of: merge,rename,error
     my $loc_collide_file = $in[17]; #Adds to collid_modes_array
 			            #1 of: merge,rename,error
+    my $advanced_suff    = $in[18];#Advanced options print when extended >= 2
+    my $advanced_file    = $in[19];#Advanced options print when extended >= 2
     my($suffix_id,$outfile_id);
 
     #If no parameters were submitted, add the default options
@@ -2089,8 +2561,9 @@ sub createSuffixOutfileTagteam
 	my $already_outf_index =
 	  $suffix_id_lookup->[(grep {$_->{SUFFID} eq $suffix_id}
 			       values(%$outfile_tagteams))[0]->{OUTFID}]->[0];
-	error("The outfile suffix type [",getOutfileSuffixFlag($suffix_id),
-	      "] already belongs to an outfile tagteam with outfile type [",
+	error("The outfile suffix supplied as [",
+	      getOutfileSuffixFlag($suffix_id),"] already belongs to an ",
+	      "outfile tagteam with outfiles supplied as [",
 	      getOutfileFlag($already_outf_index),"].  Unable to add to ",
 	      "another tagteam.") unless($skip_existing);
 	$dupe = 1;
@@ -2099,8 +2572,9 @@ sub createSuffixOutfileTagteam
       {
 	my $already_suff_id = (grep {$_->{OUTFID} eq $outfile_id}
 			       values(%$outfile_tagteams))[0]->{SUFFID};
-	error("The outfile type [",getOutfileFlag($outfile_index),"] already ",
-	      "belongs to an outfile tagteam with outfile suffix type [",
+	error("Outfiles supplied as [",getOutfileFlag($outfile_index),
+	      "] already belong to an outfile tagteam with outfiles created ",
+	      "with suffixes supplied as [",
 	      getOutfileSuffixFlag($already_suff_id),"].  Unable to add ",
 	      "to another tagteam.") unless($skip_existing);
 	$dupe = 1;
@@ -2113,17 +2587,16 @@ sub createSuffixOutfileTagteam
       {
 	error("The outfile suffix ID submitted: [$suffix_id] does not appear ",
 	      "to be an outfile suffix ID, as the file option it is linked ",
-	      "to is an output file, possibly: [",
-	      getOutfileFlag($infile_index),
-	      "]?, and not an input file as expected.");
+	      "to is an output file: [",getOutfileFlag($infile_index),
+	      "], and not an input file as expected.");
 	return(undef);
       }
     if(!exists($outfile_types_hash->{$outfile_index}))
       {
 	error("The outfile ID submitted: [$outfile_id] does not appear to be ",
 	      "an outfile ID, as the file option it is linked to is an ",
-	      "input file, possibly: [",getFileFlag($outfile_index),
-	      "]?, and not an output file as expected.");
+	      "input file, [",getInfileFlag($outfile_index),"], and not an ",
+	      "output file as expected.");
 	return(undef);
       }
 
@@ -2144,10 +2617,10 @@ sub createSuffixOutfileTagteam
 			   @$required_relationships)[0];
 	if(defined($relat_index))
 	  {error('Outfile tagteam error: suffix [',
-		 getOutfileSuffixFlag($suffix_id),'] and outfile [',
-		 getOutfileFlag($outfile_index),'] types are not associated ',
-		 'with the same input file type: [',getFileFlag($infile_index),
-		 '] versus [',getFileFlag($relat_index),'] respectively.',
+		 getOutfileSuffixFlag($suffix_id),'] and outfile(s) [',
+		 getOutfileFlag($outfile_index),'] are not associated with ',
+		 'the same input file(s): [',getInfileFlag($infile_index),
+		 '] and [',getInfileFlag($relat_index),'], respectively.',
 		 {DETAIL => ('An outfile tagteam must be between an outfile ' .
 			     "suffix type [ID: $suffix_id] and an outfile " .
 			     "type [ID: $outfile_id OUTFILE INDEX: " .
@@ -2156,9 +2629,9 @@ sub createSuffixOutfileTagteam
 			     "$infile_index != PAIR_RELAT $relat_index].")})}
 	else
 	  {error('Outfile tagteam error: suffix [',
-		 getOutfileSuffixFlag($suffix_id),'] and outfile [',
-		 getOutfileFlag($outfile_index),'] types are not associated ',
-		 'with the same input file type: [',getFileFlag($infile_index),
+		 getOutfileSuffixFlag($suffix_id),'] and outfile(s) [',
+		 getOutfileFlag($outfile_index),'] are not associated with ',
+		 'the same input file(s): [',getInfileFlag($infile_index),
 		 '] versus [no input file type relationship defined] ',
 		 'respectively.',
 		 {DETAIL => ('An outfile tagteam must be between an outfile ' .
@@ -2195,17 +2668,20 @@ sub createSuffixOutfileTagteam
     if($of_usage->{PRIMARY} != $primary)
       {
 	warning("Tagteam outfile conflict for PRIMARY output settings.  ",
-		"The tagteam output is set as ",($primary ? '' : 'NOT '),
-		"PRIMARY, but ",getOutfileFlag($outfile_index)," is set ",
-		"as ",($of_usage->{PRIMARY} ? '' : 'NOT '),"PRIMARY.")
+		"An outfile tagteam is set as ",($primary ? '' : 'NOT '),
+		"PRIMARY, but outfiles supplied as [",
+		getOutfileFlag($outfile_index),"] were explicitly and ",
+		"independently set as ",($of_usage->{PRIMARY} ? '' : 'NOT '),
+		"PRIMARY.")
 	  if($outf_explicit);
 
 	$of_usage->{PRIMARY} = $primary;
 
-	#If the default was automatically set based on $primary
-	if($of_usage->{DEFAULT} eq 'stdout' ||
-	   $of_usage->{DEFAULT} eq 'no output')
-	  {$of_usage->{DEFAULT} = ($primary ? 'stdout' : 'no output')}
+	#If the default was automatically set based on its own primary value,
+	#reset it based on the value supplied here
+	if($of_usage->{DEFAULT} eq 'STDOUT' ||
+	   $of_usage->{DEFAULT} eq '')
+	  {$of_usage->{DEFAULT} = ($primary ? 'STDOUT' : '')}
 
 	$suffix_primary_vals->[$outfile_index]->[$outfile_suffix_index] =
 	  $primary;
@@ -2218,8 +2694,8 @@ sub createSuffixOutfileTagteam
       {
 	warning("Tagteam outfile's hidden suffix conflict for PRIMARY ",
 		"output settings.  The tagteam output is set as ",
-		($primary ? '' : 'NOT '),"PRIMARY, but ",
-		getOutfileSuffixFlag($outfile_id)," is set as ",
+		($primary ? '' : 'NOT '),"PRIMARY, but its suffix [",
+		getOutfileSuffixFlag($outfile_id),"] is set as ",
 		($ofsuff_usage->{PRIMARY} ? '' : 'NOT '),"PRIMARY.")
 	  if($outf_explicit);
 
@@ -2232,8 +2708,8 @@ sub createSuffixOutfileTagteam
       {
 	warning("Tagteam suffix conflict for PRIMARY output settings.  ",
 		"The tagteam output is set as ",($primary ? '' : 'NOT '),
-		"PRIMARY, but the settings for ",
-		getOutfileSuffixFlag($suffix_id)," is set as ",
+		"PRIMARY, but the settings for its suffix [",
+		getOutfileSuffixFlag($suffix_id),"] is set as ",
 		($sf_usage->{PRIMARY} ? '' : 'NOT '),"PRIMARY.")
 	  if($suff_explicit);
 
@@ -2255,9 +2731,11 @@ sub createSuffixOutfileTagteam
     if(!$required && $of_usage->{REQUIRED})
       {
 	warning("Tagteam outfile conflict for REQUIRED output settings.  ",
-		"The tagteam output is set as ",($required ? '' : 'NOT '),
-		"REQUIRED, but ",getOutfileFlag($outfile_index)," is set ",
-		"as ",($of_usage->{REQUIRED} ? '' : 'NOT '),"REQUIRED.")
+		"An outfile tagteam is set as ",($required ? '' : 'NOT '),
+		"REQUIRED, but outfiles supplied as [",
+		getOutfileFlag($outfile_index),"] were explicitly and ",
+		"independently set as ",($of_usage->{REQUIRED} ? '' : 'NOT '),
+		"REQUIRED.")
 	  if($outf_explicit);
 
 	#We will leave the SUMMARY for the usage as-is, since we want required
@@ -2268,8 +2746,8 @@ sub createSuffixOutfileTagteam
       {
 	warning("Tagteam suffix conflict for REQUIRED output settings.  ",
 		"The tagteam output is set as ",($required ? '' : 'NOT '),
-		"REQUIRED, but the settings for ",
-		getOutfileSuffixFlag($suffix_id)," is set as ",
+		"REQUIRED, but the settings for its suffix [",
+		getOutfileSuffixFlag($suffix_id),"] is set as ",
 		($sf_usage->{REQUIRED} ? '' : 'NOT '),"REQUIRED.")
 	  if($suff_explicit);
 
@@ -2311,11 +2789,12 @@ sub createSuffixOutfileTagteam
     if($required && !$primary && $hidden == 2)
       {
 	warning("The suffix [",getOutfileSuffixFlag($suffix_id),
-		"] and outfile [",getOutfileFlag($outfile_index),
-		"] options involved a tagteam cannot both be hidden and ",
+		"] and outfile(s) [",getOutfileFlag($outfile_index),
+		"] involved in a tagteam cannot both be hidden and ",
 		"required unless the output is primary.  Un-hiding.  Please ",
 		"unhide at least one of the two options or change the ",
-		"required state of the tagteam to false/0.",
+		"required state of the tagteam to false/0 to eliminate this ",
+		"warning.",
 		{DETAIL =>
 		 join(',',('If both options that specify where output should ',
 			   'go are required and not primary (note: primary ',
@@ -2331,13 +2810,13 @@ sub createSuffixOutfileTagteam
     #mutually exclusive unless one of them is hidden.
     if($hidden != 1)
       {
-	$of_usage->{DETAILS} .= ($of_usage->{DETAILS} eq '' ? '' : "\n") .
-	  "Mutually exclusive with " . getOutfileSuffixFlag($suffix_id) .
-	    " (both options specify an outfile name in different ways for " .
+	$of_usage->{DETAILS} .= ($of_usage->{DETAILS} eq '' ? '' : "\n\n") .
+	  "Mutually exclusive with [" . getOutfileSuffixFlag($suffix_id) .
+	    "] (both options specify an outfile name in different ways for " .
 	      "the same output).";
-	$sf_usage->{DETAILS} .= ($sf_usage->{DETAILS} eq '' ? '' : "\n") .
-	  "Mutually exclusive with " . getOutfileFlag($outfile_index) .
-	    " (both options specify an outfile name in different ways for " .
+	$sf_usage->{DETAILS} .= ($sf_usage->{DETAILS} eq '' ? '' : "\n\n") .
+	  "Mutually exclusive with [" . getOutfileFlag($outfile_index) .
+	    "] (both options specify an outfile name in different ways for " .
 	      "the same output).";
 
 	if($required)
@@ -2345,10 +2824,10 @@ sub createSuffixOutfileTagteam
 	    #NOTE: "^" is used in the required column of the usage in this same
 	    #condition to reference the following note about one of the tagteam
 	    #options being required
-	    $of_usage->{DETAILS} .= "\n^ Required if " .
-	      getOutfileSuffixFlag($suffix_id) . " is not supplied.";
-	    $sf_usage->{DETAILS} .= "\n^ Required if " .
-	      getOutfileFlag($outfile_index) . " is not supplied.";
+	    $of_usage->{DETAILS} .= "\n^ Required if outfile suffix [" .
+	      getOutfileSuffixFlag($suffix_id) . "] is not supplied.";
+	    $sf_usage->{DETAILS} .= "\n^ Required if outfile [" .
+	      getOutfileFlag($outfile_index) . "] is not supplied.";
 	  }
       }
 
@@ -2384,12 +2863,12 @@ sub createSuffixOutfileTagteam
     #they were edited above to do things like append mutual-exclusion cross-
     #references and required messages).
     my $flags = ($hidden == 1 && $of_usage->{HIDDEN} ?
-		 '' : $of_usage->{OPTFLAG});
-    $flags =~ s/,\*$//;
-    $flags .= ($hidden == 1 && $sf_usage->{HIDDEN} ? '' :
-	       ($flags eq '' ? '' : ',') . $sf_usage->{OPTFLAG});
-    if($primary && $flags !~ /,\*$/)
-      {$flags .= ',*'}
+		 [] : [@{$of_usage->{OPTFLAG}}]);
+    @$flags = grep {$_ ne '*'} @$flags;
+    if($hidden != 1 || !$sf_usage->{HIDDEN})
+      {push(@$flags,@{$sf_usage->{OPTFLAG}})}
+    if($primary && scalar(grep {$_ eq '*'} @$flags) == 0)
+      {push(@$flags,'*')}
 
     my $type = (!$hidden ? 'tagteam' : ($of_usage->{HIDDEN} ?
 					'suffix' : 'outfile'));
@@ -2426,7 +2905,9 @@ sub createSuffixOutfileTagteam
 #This sub is intended to be called after user defaults have been processed
 #It updates the SUFFDEF values in the outfile_tagteams hash and clears out any
 #defaults stored in default_infiles_array if the user supplied a default of
-#their own to either the suffix or the outfile.
+#their own to either the suffix or the outfile.  It also transfers the default
+#output file values that end up in the input_files_array to the
+#default_input_files
 ##TODO: Do not manipulate the default values like this.  See requirement #289
 ##TODO: Save defaults in the usage_array.  See requirement #288
 sub updateTagteamDefaults
@@ -2502,10 +2983,18 @@ sub updateTagteamDefaults
 	  {
 	    @{$default_infiles_array->[$outfid_infile_index]} =
 	      @{$input_files_array->[$outfid_infile_index]};
+
+	    #Clear out the input files array because defaults are added after
+	    #the user has added stuff to it from the command line (instead of
+	    #how suffix defaults are handled - just check if the value is the
+	    #same as the default)
+	    @{$input_files_array->[$outfid_infile_index]} = ();
+
 	    debug({LEVEL => -1},"New (user) default outfiles: [",
 		  join(' ',map {@$_}
 		       @{$default_infiles_array->[$outfid_infile_index]}),
 		  "].");
+
 	    if(defined($suff_default))
 	      {
 		$outfile_tagteams->{$ttid}->{SUFFDEF} = undef;
@@ -2518,6 +3007,73 @@ sub updateTagteamDefaults
 	else
 	  {debug({LEVEL => -1},"Tagteam [$ttid] doesn't have an option that ",
 		 "was changed by user defaults.")}
+      }
+  }
+
+#This clears out the programmer's array variables so that the user can supply
+#default values or explicit values on the command line that replace the
+#defaults.  This should be called just before loading the user defaults.
+sub clearArrayDefaults
+  {
+    #Update the default array and 2D array options in case the user supplied
+    #defaults.
+    foreach my $array_ref (keys(%$array_defaults_hash))
+      {if(scalar(@{$array_defaults_hash->{$array_ref}->{VALUES}}))
+	 {@{$array_defaults_hash->{$array_ref}->{VALUES}} = ()}}
+  }
+
+
+#This sub is intended to be called after user defaults are loaded, but before
+#the command line is processed so that default values can be transferred.  It
+#saves any default values and clears out their variables so that if the user
+#explicitly supplies any, they will replace the default values instead of add
+#to them
+sub updateDefaults
+  {
+    my $user_defaults_exist = $_[0];
+
+    if($user_defaults_exist)
+      {
+	updateTagteamDefaults();
+
+	#Update the default array and 2D array options in case the user
+	#supplied defaults.  If they didn't, the defaults will be added back
+	#later in loadDefaults.
+	foreach my $array_ref (keys(%$array_defaults_hash))
+	  {
+	    if(scalar(@{$array_defaults_hash->{$array_ref}->{VALUES}}))
+	      {
+		@{$array_defaults_hash->{$array_ref}->{DEFAULTS}} =
+		  @{$array_defaults_hash->{$array_ref}->{VALUES}};
+		@{$array_defaults_hash->{$array_ref}->{VALUES}} = ();
+	      }
+	  }
+      }
+
+    #Update the file options to clear them out.  They will be added back later
+    #in loadDefault
+    foreach my $file_type_id (0..$#{$input_files_array})
+      {
+	#If there were any user defaults supplied for the in/outfiles
+	if(scalar(@{$input_files_array->[$file_type_id]}))
+	  {
+	    #Replace any programmer-supplied defaults with the user defaults
+	    @{$default_infiles_array->[$file_type_id]} =
+	      @{$input_files_array->[$file_type_id]};
+	    #Clear the user defaults out of the input_files_array
+	    @{$input_files_array->[$file_type_id]} = ();
+	  }
+      }
+
+    #Update the outdir options to clear them out.  They will be added back
+    #later in loadDefault
+    #If there were any user defaults supplied for the in/outfiles
+    if(scalar(@$outdirs_array))
+      {
+	#Replace any programmer-supplied defaults with the user defaults
+	@$default_outdirs_array = @$outdirs_array;
+	#Clear the user defaults out of the outdirs_array
+	@$outdirs_array = ();
       }
   }
 
@@ -2596,8 +3152,9 @@ sub isCaller
 
 sub addOutdirOption
   {
-    my @in = getSubParams([qw(GETOPTKEY REQUIRED DEFAULT HIDDEN SMRY_DESC
-			      DETAIL_DESC FLAGLESS)],
+    my @in = getSubParams([qw(FLAG|GETOPTKEY REQUIRED DEFAULT HIDDEN
+			      SMRY|SMRY_DESC|SHORT_DESC
+			      DETAIL|DETAIL_DESC|LONG_DESC FLAGLESS ADVANCED)],
 			  [scalar(@_) ? qw(GETOPTKEY) : ()],
 			  [@_]);
     my $get_opt_str = $in[0]; #e.g. 'outdir=s'
@@ -2609,6 +3166,7 @@ sub addOutdirOption
                               #Empty/undefined = exclude from short usage
     my $detail_desc = $in[5]; #e.g. 'Input file(s).  Space separated,...'
     my $flagless    = $in[6]; #Whether the option can be supplied sans flag
+    my $advanced    = $in[7]; #Advanced options print when extended >= 2
 
     #Trim leading & trailing hard returns and white space characters (from
     #using '<<')
@@ -2649,41 +3207,17 @@ sub addOutdirOption
 
 	$default_outdir_added = 1;
 	$required             = 0;
+
+	if(!visibleOutfileExists())
+	  {$hidden = 1}
 	#The descriptions are added below
       }
 
     if(defined($required) && $required !~ /^\d+$/)
       {error("Invalid REQUIRED parameter: [$required].")}
 
-    if(!defined($flagless))
-      {$flagless = 0}
-
-    my $flags = join(',',getOptStrFlags($get_opt_str));
-    my $flag  = getDefaultFlag($flags,',');
-
-    if($outdirs_added)
-      {
-	error('Currently, only 1 outdir option is supported, however ',
-	      'multiple outdirs can be supplied using the 1 outdir option: ',
-	      "[$flag].  Files of different output types cannot currently be ",
-	      'put in different outdirs, but different sets can go in ',
-	      'different dirctories.  See `--help --extended` for examples ',
-	      'using the sample ',getOutdirFlag(),' option.');
-	quit(-7);
-      }
-
-    $outdirs_added = 1;
-
-    if($hidden && !defined($default) && (defined($required) && $required))
-      {
-	warning("Cannot hide option [$flag] if",
-		(!defined($default) ? ' no default provided' : ''),
-		((!defined($default) && defined($required) && $required) ?
-		 ' and if' : ''),
-		(defined($required) && $required ? ' it is required' : ''),
-		".  Setting as not hidden.");
-	$hidden = 0;
-      }
+    #Allow the flag to be an array of scalars and turn it into a get opt str
+    $get_opt_str = makeGetOptKey($get_opt_str,'outdir',1,'addOutdirOption');
 
     $get_opt_str = fixStringOpt($get_opt_str);
 
@@ -2698,6 +3232,25 @@ sub addOutdirOption
 	    quit(-75);
 	  }
 	return(undef);
+      }
+
+    my $flags = [getOptStrFlags($get_opt_str)];
+    my $flag  = getDefaultFlag($flags);
+
+    if($outdirs_added)
+      {outdirLimitation(1)}
+
+    $outdirs_added = 1;
+
+    if($hidden && !defined($default) && (defined($required) && $required))
+      {
+	warning("Cannot hide option [$flag] if",
+		(!defined($default) ? ' no default provided' : ''),
+		((!defined($default) && defined($required) && $required) ?
+		 ' and if' : ''),
+		(defined($required) && $required ? ' it is required' : ''),
+		".  Setting as not hidden.");
+	$hidden = 0;
       }
 
     #Since multiple outdirs are supported by the code and the default is
@@ -2731,49 +3284,34 @@ sub addOutdirOption
     ##TODO: The outdir flags are messed up and need to be fixed. See req 178
     $outdir_flag_array->[0] = $flag;
 
-    my $default_summary = 0;
     #If no summary usage was provided for this option
     if(!defined($smry_desc) || $smry_desc eq '')
       {
 	#If it's a required option, add a default summary
 	if($required)
-	  {
-	    $smry_desc = 'Output directory.';
-	    $default_summary = 1;
-	  }
+	  {$smry_desc = 'Output directory.'}
 	else
 	  {$smry_desc = ''}
       }
 
     if(!defined($detail_desc) || $detail_desc eq '')
       {
-	if($default_summary)
-	  {$detail_desc =
-	     join('',
-		  ('Directory in which to put output files.  This option ',
-		   'requires output files to be generated using outfile ',
-		   'suffixes (e.g. -o).  Default output directory is the ',
-		   'same as that containing each input file.  Relative paths ',
-		   'will be relative to each individual input file.  Creates ',
-		   'directories specified, but not recursively.  Also see ',
-		   '--extended --help for advanced usage examples.'))}
-	elsif(defined($smry_desc) && $smry_desc ne '')
+	if(defined($smry_desc) && $smry_desc ne '')
 	  {$detail_desc = $smry_desc}
 	else
 	  {$detail_desc =
 	     join('',
-		  ('Directory in which to put output files.  Relative paths ',
-		   'will be relative to each individual input file.  Creates ',
+		  ('Directory in which to put output files.  Creates ',
 		   'directories specified, but not recursively.  Also see ',
 		   '--extended --help for advanced usage examples.'))}
       }
 
-    if(!defined($default) || $default eq '')
-      {$default = 'none'}
+    if(!defined($default))
+      {$default = ''}
 
     $required_outdirs = $required;
 
-    if($flagless)
+    if(defined($flagless) && $flagless)
       {
 	if(defined($flagless_multival_type) && $flagless_multival_type > -1)
 	  {
@@ -2781,7 +3319,8 @@ sub addOutdirOption
 		  "'flagless': [$get_opt_str]: [$flagless].  Only 1 is ",
 		  "allowed.",
 		  {DETAIL => "First flagless option was: [" .
-		   $usage_array->[$flagless_multival_type]->{OPTFLAG} . "]."});
+		   getDefaultFlag($usage_array->[$flagless_multival_type]
+				  ->{OPTFLAG}) . "]."});
 	    return(undef);
 	  }
 
@@ -2792,12 +3331,6 @@ sub addOutdirOption
 	#This assumes that the call to addToUsage a few lines below is the
 	#immediate next call to addToUsage
 	$flagless_multival_type = getNextUsageIndex();
-
-	my($flagsadd,$detailsadd) = getFlaglessUsageAddendums();
-
-	$flags .= $flagsadd;
-
-	$detail_desc .= $detailsadd;
       }
 
     addToUsage($get_opt_str,
@@ -2809,28 +3342,79 @@ sub addOutdirOption
 	       undef,
 	       $hidden,
 	       'outdir',
-	       0);
+	       0,
+	       $advanced);
+  }
+
+sub outdirLimitation
+  {
+    my $fatal = $_[0];
+    my $flag  = getOutdirFlag();
+    my $msg =
+      join('',('Currently, only 1 outdir option is supported, however ',
+	       'multiple outdirs can be supplied using the 1 outdir option: ',
+	       "[$flag].  Files of different output types cannot currently ",
+	       'be put in different outdirs, but different sets can go in ',
+	       'different dirctories.  See `--help --extended` for examples ',
+	       "using the sample $flag option."));
+    if($fatal)
+      {
+	error($msg);
+	quit(-7);
+      }
+    else
+      {warning($msg)}
+  }
+
+#Returns a boolean as to whether there exists an outfile type that is visible
+#(i.e. not hidden)
+#Globals used: usage_array
+sub visibleOutfileExists
+  {
+    if(scalar(grep {($_->{OPTTYPE} eq 'outfile' ||
+		     $_->{OPTTYPE} eq 'suffix') && !$_->{HIDDEN}}
+	      @$usage_array))
+      {return(1)}
+
+    return(0);
+  }
+
+#Returns a boolean as to whether there exists an outdir type that is visible
+#(i.e. not hidden)
+#Globals used: usage_array
+sub visibleOutdirExists
+  {
+    if(scalar(grep {($_->{OPTTYPE} eq 'outdir') && !$_->{HIDDEN}}
+	      @$usage_array))
+      {return(1)}
+
+    return(0);
   }
 
 sub addOption
   {
-    my @in = getSubParams([qw(GETOPTKEY GETOPTVAL REQUIRED DEFAULT HIDDEN
-			      SMRY_DESC DETAIL_DESC ACCEPTS)],
-			  [qw(GETOPTKEY GETOPTVAL)],
+    my @in = getSubParams([qw(FLAG|GETOPTKEY VARREF|GETOPTVAL TYPE REQUIRED
+			      DEFAULT HIDDEN SMRY|SMRY_DESC|SHORT_DESC
+			      DETAIL|DETAIL_DESC|LONG_DESC ACCEPTS ADVANCED
+			      INTERNAL_ARRAY_REF)],
+			  [qw(FLAG|GETOPTKEY VARREF|GETOPTVAL)],
 			  [@_]);
-    my $get_opt_str     = $in[0]; #e.g. 'o|outfile-suffix=s'
+    my $get_opt_str     = $in[0]; #e.g. 'o|suffix=s'
     my $get_opt_ref     = $in[1]; #e.g. \$my_option - A reference to a var/sub
-    my $required        = $in[2]; #Is option required?: 0=false, non-0=true
-    my $default         = $in[3]; #e.g. '1'
-    my $hidden          = $in[4]; #0 or non-0. non-0 requires a default.
+    my $type            = $in[2]; #bool,negbool,string,integer,float,enum,count
+    my $required        = $in[3]; #Is option required?: 0=false, non-0=true
+    my $default         = $in[4]; #e.g. '1'
+    my $hidden          = $in[5]; #0 or non-0. non-0 requires a default.
                                   #Excludes from usage output.
-    my $smry_desc       = $in[5]; #e.g. Input file(s).  See --help for format.
+    my $smry_desc       = $in[6]; #e.g. Input file(s).  See --help for format.
                                   #Empty/undefined = exclude from short usage
-    my $detail_desc     = $in[6]; #e.g. 'Input file(s).  Space separated,...'
-    my $accepts         = $in[7]; #e.g. ['yes','no']
+    my $detail_desc     = $in[7]; #e.g. 'Input file(s).  Space separated,...'
+    my $accepts         = $in[8]; #e.g. ['yes','no','maybe']
+    my $advanced        = $in[9]; #Advanced options print when extended >= 2
+    my $internal_array  = $in[10];#For internal use only
 
     #Trim leading & trailing hard returns and white space characters (from
-    #using '<<')
+    #possibly having used '<<' to define these values)
     $smry_desc   =~ s/^\s+//s if(defined($smry_desc));
     $smry_desc   =~ s/\s+$//s if(defined($smry_desc));
     $detail_desc =~ s/^\s+//s if(defined($detail_desc));
@@ -2848,8 +3432,20 @@ sub addOption
     if(defined($required) && $required !~ /^\d+$/)
       {error("Invalid REQUIRED parameter: [$required].")}
 
-    my $flags = join(',',getOptStrFlags($get_opt_str));
-    my $flag  = getDefaultFlag($flags,',');
+    #This validates the type passed in or sets a default if no type info
+    #present
+    $type = getOptType($type,$get_opt_str,$accepts,$get_opt_ref);
+    my $save_getoptstr = $get_opt_str;
+    $get_opt_str = makeGetOptKey($get_opt_str,$type,1,'addOption');
+
+    if(!defined($get_opt_str))
+      {
+	error("Invalid flag definition: [$save_getoptstr].");
+	quit(-99);
+      }
+
+    my $flags = [getOptStrFlags($get_opt_str)];
+    my $flag  = getDefaultFlag($flags);
 
     if($hidden && !defined($default) && (defined($required) && $required))
       {
@@ -2873,16 +3469,16 @@ sub addOption
     #Variable options should be checked for validity, but not for duplicates.
     #They are always present though as of the initial _init call, though not
     #always presented in the interface, thus the check should allow duplicates.
-    my $is_variable_opt =
-      ($calling_sub =~ /^CommandLineInterface::addRunModeOptions$/g);
+    my $is_builtin_opt =
+      ($calling_sub =~ /^CommandLineInterface::add(RunMode|Builtin)Options$/g);
 
-    debug({LEVEL => -2},"Allowing duplicates?: $is_variable_opt");
+    debug({LEVEL => -2},"Allowing duplicates?: $is_builtin_opt");
 
     if(!$is_array_opt &&
-       !isGetOptStrValid($get_opt_str,'general',$is_variable_opt))
+       !isGetOptStrValid($get_opt_str,'general',$is_builtin_opt))
       {
-	if($is_variable_opt)
-	  {warning("Unable to add default variable run mode option.",
+	if($is_builtin_opt)
+	  {warning("Unable to add builtin option.",
 		   {DETAIL => "GetOptStr: [$get_opt_str]."})}
 	else
 	  {
@@ -2905,7 +3501,7 @@ sub addOption
 
     #If no detailed usage was provided for this option
     if(!defined($detail_desc) || $detail_desc eq '')
-      {$detail_desc = 'No detailed usage provided for this option.'}
+      {$detail_desc = 'No usage provided for this option.'}
 
     if(defined($accepts) &&
        (ref($accepts) ne 'ARRAY' ||
@@ -2927,18 +3523,17 @@ sub addOption
     if(!$is_array_opt)
       {
 	if($required)
-	  {requireGeneralOption($get_opt_ref,$get_opt_str)}
+	  {requireGeneralOption($get_opt_ref,$get_opt_str,$default)}
 
 	$general_flag_hash->{$get_opt_ref} = $flag;
       }
 
-    my $genopttype = getGeneralOptType($get_opt_str);
+    if(!defined($type))
+      {$type = getGeneralOptType($get_opt_str)}
 
     if(defined($default) && $default ne '' && $detail_desc !~ /^\[/ &&
-       showDefault($default,$genopttype))
-      {$detail_desc = '[' .
-	 ($genopttype eq 'negbool' ? ($default ? 'On' : 'Off') : $default) .
-	   '] ' . $detail_desc}
+       showDefault($type,$get_opt_ref,$default))
+      {$detail_desc = "[$default] $detail_desc"}
 
     addToUsage($get_opt_str,
 	       $flags,
@@ -2948,8 +3543,235 @@ sub addOption
 	       $default,
 	       $accepts,
 	       $hidden,
-	       $genopttype,
-	       0);
+	       $type,
+	       0,
+	       $advanced,
+	       $internal_array);
+  }
+
+#Checks the validity of values (ignores undefs because they're handled by the
+#requirement checking code)
+#Globals used: $usage_array, $GetOptHash
+sub validateNonFileOptions
+  {
+    my $checktypehash = {%$genopt_types};
+    my $status = 1;
+
+    #For every option that's been supplied a defined reference of a known type
+    foreach my $usghash (grep {exists($GetOptHash->{$_->{GETOPTKEY}}) &&
+				 defined($GetOptHash->{$_->{GETOPTKEY}}) &&
+				   defined($_->{OPTTYPE}) &&
+				     exists($checktypehash->{$_->{OPTTYPE}})}
+			 @$usage_array)
+      {
+	my $varref  = $GetOptHash->{$usghash->{GETOPTKEY}};
+	my $aryref  = $usghash->{GETOPTREF};
+	my $opttype = $usghash->{OPTTYPE};
+	my $flag    = getDefaultFlag($usghash->{OPTFLAG});
+	my $accepts = $usghash->{ACCEPTS};
+
+	#The following types do not need to be checked because either Getopt::
+	#Long checks them or we don't have a reference to the variable (e.g. we
+	#have a reference to a subroutine) so we don't have a value to
+	#interrogate:
+	#bool,negbool, integer,float,string
+
+	if($opttype eq 'enum' && ref($varref) ne 'CODE')
+	  {
+	    if(ref($varref) ne 'SCALAR')
+	      {
+		error("Invalid enum reference [",ref($varref),
+		      "] supplied to [$flag].",
+		      {DETAIL => 'Should be a scalar reference.'});
+		$status = 0;
+	      }
+	    elsif(defined($$varref) && !validateEnum($$varref,$accepts,$flag))
+	      {$status = 0}
+	  }
+	elsif($opttype =~ /_array$/)
+	  {
+	    if(ref($aryref) ne 'ARRAY' ||
+	       scalar(grep {ref($_) ne ''} @$aryref))
+	      {
+		error("Invalid array [",
+		      (ref($aryref) eq 'ARRAY' ? 'ARRAY REF of ' .
+		       join(',',map {ref($_) eq '' ?
+				       'SCALAR' : ref($_) . ' REF'} @$aryref) :
+		       ref($aryref)),"] supplied to [$flag].",
+		      {DETAIL => ('Should be a reference to an ARRAY of ' .
+				  'SCALARs.')});
+		$status = 0;
+	      }
+	    else
+	      {
+		if($opttype eq 'float_array')
+		  {
+		    my $bads = [grep {!isFloat($_)} @$aryref];
+		    if(scalar(@$bads))
+		      {
+			error("Invalid float value(s) [",join(',',@$bads),
+			      "] supplied to [$flag].");
+			$status = 0;
+		      }
+		  }
+		elsif($opttype eq 'integer_array')
+		  {
+		    my $bads = [grep {!isInt($_)} @$aryref];
+		    if(scalar(@$bads))
+		      {
+			error("Invalid integer value(s) [",join(',',@$bads),
+			      "] supplied to [$flag].");
+			$status = 0;
+		      }
+		  }
+		elsif($opttype eq 'string_array')
+		  {
+		    #Nothing to check.  Anything goes.
+		  }
+		elsif($opttype eq 'enum_array')
+		  {
+		    if(scalar(grep {!validateEnum($_,$accepts,$flag)}
+			      @$aryref))
+		      {$status = 0}
+		  }
+	      }
+	  }
+	elsif($opttype =~ /_array2d$/)
+	  {
+	    if(ref($aryref) ne 'ARRAY' ||
+	       scalar(grep {my $ar=$_;
+			    (defined($ar) && ref($ar) ne 'ARRAY') ||
+			      (defined($ar) &&
+			       scalar(grep {defined($_) &&
+					      ref($_) ne ''} @$ar))} @$aryref))
+	      {
+		error("Invalid 2D array [",
+		      (ref($aryref) eq 'ARRAY' ?
+		       'ARRAY REF of ' .
+		       join(';',
+			    map {my $ar=$_;
+				 ref($ar) eq 'ARRAY' ?
+				   'ARRAY REF of ' .
+				     join(',',
+					  map {ref($_) eq '' ?
+						 'SCALAR' : ref($_) . ' REF'}
+					  @$ar) :
+					    (ref($ar) eq '' ?
+					     'SCALAR' : ref($ar) . ' REF')}
+			    @$aryref) :
+		       (ref($aryref) eq '' ?
+			'SCALAR' : ref($aryref) . ' REF')),
+		      "] supplied to [$flag].",
+		      {DETAIL => ('Should be an ARRAY REF of ARRAY REFs of ' .
+				  'SCALARs.')});
+		$status = 0;
+	      }
+	    else
+	      {
+		if($opttype eq 'integer_array2d')
+		  {
+		    if(scalar(grep {!isInt($_)}
+			      map {my $ar=$_;grep {defined($_)} @$ar}
+			      grep {my $ar=$_;defined($ar) &&
+				      scalar(grep {defined($_)} @$ar)}
+			      @$aryref))
+		      {
+			my $bads = [grep {!isInt($_)}
+				    map {my $ar=$_;grep {defined($_)} @$ar}
+				    grep {my $ar=$_;defined($ar) &&
+					    scalar(grep {defined($_)} @$ar)}
+				    @$aryref];
+			error("Invalid integer value(s) [",join(',',@$bads),
+			      "] supplied to [$flag].");
+			$status = 0;
+		      }
+		  }
+		elsif($opttype eq 'float_array2d')
+		  {
+		    if(scalar(grep {!isFloat($_)}
+			      map {my $ar=$_;grep {defined($_)} @$ar}
+			      grep {my $ar=$_;defined($ar) &&
+				      scalar(grep {defined($_)} @$ar)}
+			      @$aryref))
+		      {
+			my $bads = [grep {!isInt($_)}
+				    map {my $ar=$_;grep {defined($_)} @$ar}
+				    grep {my $ar=$_;defined($ar) &&
+					    scalar(grep {defined($_)} @$ar)}
+				    @$aryref];
+			error("Invalid integer value(s) [",join(',',@$bads),
+			      "] supplied to [$flag].");
+			$status = 0;
+		      }
+		  }
+		elsif($opttype eq 'string_array2d')
+		  {
+		    #Nothing to check.  Anything goes.
+		  }
+		elsif($opttype eq 'enum_array2d')
+		  {
+		    if(scalar(grep {!validateEnum($_,$accepts,$flag)}
+			      map {my $ar=$_;grep {defined($_)} @$ar}
+			      grep {my $ar=$_;defined($ar) &&
+				      scalar(grep {defined($_)} @$ar)}
+			      @$aryref))
+		      {
+			my $bads = [grep {!isInt($_)}
+				    map {my $ar=$_;grep {defined($_)} @$ar}
+				    grep {my $ar=$_;defined($ar) &&
+					    scalar(grep {defined($_)} @$ar)}
+				    @$aryref];
+			error("Invalid integer value(s) [",join(',',@$bads),
+			      "] supplied to [$flag].");
+			$status = 0;
+		      }
+		  }
+	      }
+	  }
+      }
+
+    verbose({LEVEL => 3},"All supplied values validated.") if($status);
+
+    return($status);
+  }
+
+#Returns true if value is undefined or (defined and is in the accepts array)
+sub validateEnum
+  {
+    my $value   = $_[0];
+    my $accepts = $_[1];
+    my $flag    = $_[2]; #For error reporting
+    my $status  = 1; #validated
+
+    if(defined($accepts))
+      {
+	if(ref($accepts) ne 'ARRAY' || scalar(@$accepts) == 0)
+	  {
+	    error("Invalid or unsupplied ACCEPTS array supplied to ",
+		  "[$flag].");
+	    $status = 0;
+	  }
+	elsif(scalar(grep {$_ eq $value} @$accepts) == 0)
+	  {
+	    #Exception (TODO: remove deprecated collision mode flag)
+	    unless($flag eq '--collision-mode' && $value eq '')
+	      {
+		error("Unrecognized value [$value] supplied to [$flag].  Must ",
+		      "be one of: [",join(',',@$accepts),"].");
+		$status = 0;
+	      }
+	  }
+      }
+    else
+      {
+	error("ACCEPTS array is required for TYPE enum for the ",
+	      "option defined by [$flag].",
+	      {DETAIL => ('Add a value for ACCEPTS to the call to ' .
+			  'addOption() for [$flag].')});
+	$status = 0;
+      }
+
+    return($status);
   }
 
 #Returns one of the following strings: bool,negbool,count,scalar,unk.
@@ -2961,8 +3783,12 @@ sub getGeneralOptType
       {return('unk')}
     elsif($get_opt_str =~ /\!$/)
       {return('negbool')}
+    elsif($get_opt_str =~ /=i$/)
+      {return('integer')}
+    elsif($get_opt_str =~ /=f$/)
+      {return('float')}
     elsif($get_opt_str =~ /=\S$/)
-      {return('scalar')}
+      {return('string')}
     elsif($get_opt_str =~ /\+$/)
       {return('count')}
     elsif($get_opt_str !~ /[:!\+=]/)
@@ -2973,23 +3799,30 @@ sub getGeneralOptType
 
 sub addArrayOption
   {
-    my @in = getSubParams([qw(GETOPTKEY GETOPTVAL REQUIRED DEFAULT HIDDEN
-			      SMRY_DESC DETAIL_DESC INTERPOLATE ACCEPTS
-			      FLAGLESS)],
-			  [qw(GETOPTKEY GETOPTVAL)],
+    my @in = getSubParams([qw(FLAG|GETOPTKEY VARREF|GETOPTVAL TYPE REQUIRED
+			      DEFAULT HIDDEN SMRY|SMRY_DESC|SHORT_DESC
+			      DETAIL|DETAIL_DESC|LONG_DESC DELIMITER ACCEPTS
+			      FLAGLESS INTERPOLATE ADVANCED)],
+			  [qw(FLAG|GETOPTKEY VARREF|GETOPTVAL)],
 			  [@_]);
-    my $get_opt_str     = $in[0]; #e.g. 'o|outfile-suffix=s'
-    my $get_opt_ref     = $in[1]; #e.g. $my_option - A reference to an array
-    my $required        = $in[2]; #Is option required?: 0=false, non-0=true
-    my $default         = $in[3]; #e.g. '1'
-    my $hidden          = $in[4]; #0 or non-0. non-0 requires a default.
-                                  #Excludes from usage output.
-    my $smry_desc       = $in[5]; #e.g. Input file(s).  See --help for format.
-                                  #Empty/undefined = exclude from short usage
-    my $detail_desc     = $in[6]; #e.g. 'Input file(s).  Space separated,...'
-    my $interpolate     = $in[7]; #0 or non-0. non-0 mean shell interp of vals
-    my $accepts         = $in[8]; #e.g. ['yes','no']
-    my $flagless        = $in[9]; #Whether the option can be supplied sans flag
+    my $get_opt_str = $in[0]; #e.g. 'o|suffix=s'
+    my $get_opt_ref = $in[1]; #e.g. $my_option - A reference to an array
+    my $type        = $in[2]; #e.g. [string],integer,float,enum
+    my $required    = $in[3]; #Is option required?: 0=false, non-0=true
+    my $default     = $in[4]; #e.g. '1'
+    my $hidden      = $in[5]; #0 or non-0. non-0 requires a default.
+                              #Excludes from usage output.
+    my $smry_desc   = $in[6]; #e.g. Input file(s).  See --help for format.
+                              #Empty/undefined = exclude from short usage
+    my $detail_desc = $in[7]; #e.g. 'Input file(s).  Space separated,...'
+    my $delimiter   = $in[8]; #Split what is supplied if defined. Defaults
+                              #to non-number chars if type is integer or
+                              #float, non-accepts chars if enum, and undef
+                              #if string
+    my $accepts     = $in[9]; #e.g. ['yes','no']
+    my $flagless    = $in[10];#Whether the option can be supplied sans flag
+    my $interpolate = $in[11];#For backward compatibility
+    my $advanced    = $in[12];#Advanced options print when extended >= 2
 
     #Trim leading & trailing hard returns and white space characters (from
     #using '<<')
@@ -2998,14 +3831,85 @@ sub addArrayOption
     $detail_desc =~ s/^\s+//s if(defined($detail_desc));
     $detail_desc =~ s/\s+$//s if(defined($detail_desc));
 
-    #Make sure the user has specified a string type if interpolate is true
-    if(defined($interpolate) && $interpolate && $get_opt_str !~ /=s$/)
+    #Validate the accepts parameter
+    if(defined($accepts) &&
+       (ref($accepts) ne 'ARRAY' ||
+	scalar(@$accepts) != scalar(grep {ref(\$_) eq 'SCALAR'} @$accepts)))
       {
-	error("In order to shell-interpolate the values the user passes in, ",
-	      "the first argument must end with '=s'.  [$get_opt_str] was ",
-	      "passed in.");
+	error("Invalid accepts value passed in.  Only a reference to an ",
+	      "array of scalars is valid.  Received a reference to a",
+	      (ref($accepts) eq 'ARRAY' ? 'n ARRAY of (' .
+	       join(',',map {ref(\$_)} @$accepts) . ')' : ' ' . ref($accepts)),
+	      "] instead.");
 	return(undef);
       }
+
+    #Validate or set the default of the type parameter
+    if(defined($type) && $type ne 'string' && $type ne 'integer' &&
+       $type ne 'float' && $type ne 'enum')
+      {
+	error("Invalid TYPE [$type].  Only string, integer, float, or enum ",
+	      "are allowed.");
+	quit(-96);
+      }
+    elsif(!defined($type))
+      {
+	if(ref($get_opt_str)    eq '' && $get_opt_str =~ /=i$/)
+	  {$type = 'integer'}
+	elsif(ref($get_opt_str) eq '' && $get_opt_str =~ /=f$/)
+	  {$type = 'float'}
+	elsif(defined($accepts))
+	  {$type = 'enum'}
+	else
+	  {$type = 'string'}
+      }
+
+    #Allow the flag to be an array of scalars and turn it into a get opt str
+    my $save_getoptstr = $get_opt_str;
+    $get_opt_str = makeGetOptKey($get_opt_str,$type,1,'addArrayOption');
+
+    if(defined($get_opt_str))
+      {$get_opt_str = fixStringOpt($get_opt_str,1)}
+
+    if(!isGetOptStrValid($get_opt_str,'1darray'))
+      {quit(-77)}
+
+    #Validate the type & accepts combo
+    if($type eq 'enum' && (!defined($accepts) || scalar(@$accepts) == 0))
+      {
+	error("ACCEPTS is required if TYPE is enum.");
+	return(undef);
+      }
+    elsif($type ne 'enum' && defined($accepts))
+      {
+	warning("ACCEPTS is ignored when TYPE is not enum.",
+		{DETAIL => ('Remove the ACCEPTS parameter to eliminate this ' .
+			    'warning.')});
+	undef($accepts);
+      }
+
+    #Set the default delimiter based on the type
+    if(!defined($delimiter))
+      {
+	if($type eq 'integer')
+	  {$delimiter = '[^\d+\-eE]+'}
+	elsif($type eq 'float')
+	  {$delimiter = '[^\d+\-eE\.]+'}
+	elsif($type eq 'enum')
+	  {$delimiter = '[^' . join('',@$accepts) . ']+'}
+	elsif(defined($interpolate) && $interpolate)
+	  {$delimiter = '\s+'}
+	#No default delimiter defined for type str
+      }
+    elsif(length($delimiter) == 1)
+      {$delimiter = "$delimiter+"}
+    elsif(length($delimiter) > 1)
+      {$delimiter = "(?:$delimiter)+"}
+
+    #Strip junk off the get opt str
+    $get_opt_str =~ s/[=+:\@\%!].*//;
+    #Make type a string so multiple vals can be parsed with a non-num delimiter
+    $get_opt_str .= '=s';
 
     if($command_line_processed)
       {
@@ -3019,11 +3923,8 @@ sub addArrayOption
     if(defined($required) && $required !~ /^\d+$/)
       {error("Invalid REQUIRED parameter: [$required].")}
 
-    if(!defined($flagless))
-      {$flagless = 0}
-
-    my $flags = join(',',getOptStrFlags($get_opt_str));
-    my $flag  = getDefaultFlag($flags,',');
+    my $flags = [getOptStrFlags($get_opt_str)];
+    my $flag  = getDefaultFlag($flags);
 
     if($hidden && !defined($default) && (defined($required) && $required))
       {
@@ -3034,15 +3935,6 @@ sub addArrayOption
 		(defined($required) && $required ? ' it is required' : ''),
 		".  Setting as not hidden.");
 	$hidden = 0;
-      }
-
-    $get_opt_str = fixStringOpt($get_opt_str);
-
-    if(!isGetOptStrValid($get_opt_str,'1darray'))
-      {
-	error("Invalid GetOpt parameter flag definition: [$get_opt_str] for ",
-	      "1darray type.");
-	quit(-77);
       }
 
     #If no summary usage was provided for this option
@@ -3058,27 +3950,25 @@ sub addArrayOption
     #If no detailed usage was provided for this option
     if(!defined($detail_desc) || $detail_desc eq '')
       {$detail_desc =
-	 join('',('No detailed usage provided for this option.  This is an ',
-		  'array option.  You can provide this option multiple times ',
-		  'to add to the array.  ' .
-		  ($interpolate ? 'Supplied values are interpolated using a ' .
-		   'bsd glob, i.e. space-delimited values surrounded by ' .
-		   'quotes (e.g. "1 2 3 4") will result in each value being ' .
-		   'added to the array.' : 'Values may have spaces and will ' .
-		   'not be shell-interpolated.')))}
+	 join('',('No detailed usage provided for this array option.'))}
+
+    my $disp_delim = getDisplayDelimiter($delimiter,$type,$accepts);
+    if(defined($disp_delim) && length($disp_delim) > 1)
+      {$detail_desc .= "\n\nValues are delimited using this perl regular " .
+	 "expression: [$disp_delim]."}
 
     my $sub;
     if(defined($get_opt_ref) && ref($get_opt_ref) eq 'ARRAY')
       {
-	if(defined($interpolate) && $interpolate)
-	  {$sub = sub {push(@$get_opt_ref,sglob($_[1]))}}
-	else
+	if(!defined($delimiter))
 	  {$sub = sub {push(@$get_opt_ref,$_[1])}}
+	else
+	  {$sub = sub {push(@$get_opt_ref,split(/$delimiter/,$_[1]))}}
       }
     else
       {
-	error("Invalid array variable.  The second option must be a ",
-	      "reference to an array, but got a reference to a [",
+	error("Invalid array variable.  The second parameter must be a ",
+	      "reference to an array, but got a reference to [",
 	      ref($get_opt_ref),"].");
 	return(undef);
       }
@@ -3087,9 +3977,14 @@ sub addArrayOption
     #values having been supplied, so we'll do it here and prevent it in
     #addOption
     if($required)
-      {requireGeneralOption($get_opt_ref,$get_opt_str)}
+      {requireGeneralOption($get_opt_ref,$get_opt_str,$default)}
 
     $general_flag_hash->{$get_opt_ref} = $flag;
+
+    #Save any default values, but don't clear out the programmer's variable
+    #(yet - see loadUserDefaults)
+    $array_defaults_hash->{$get_opt_ref}->{DEFAULTS} = [@$get_opt_ref];
+    $array_defaults_hash->{$get_opt_ref}->{VALUES}   = $get_opt_ref;
 
     my $def_str = $default;
     if(ref($default) eq 'ARRAY' && scalar(grep {ref($_) ne ''} @$default) == 0)
@@ -3098,7 +3993,7 @@ sub addArrayOption
       {warning("Default value supplied to addArrayOption should either be a ",
 	       "scalar or a reference to an array of scalars.")}
 
-    if($flagless)
+    if(defined($flagless) && $flagless)
       {
 	if(defined($flagless_multival_type) && $flagless_multival_type > -1)
 	  {
@@ -3106,13 +4001,14 @@ sub addArrayOption
 		  "'flagless': [$get_opt_str]: [$flagless].  Only 1 is ",
 		  "allowed.",
 		  {DETAIL => "First flagless option was: [" .
-		   $usage_array->[$flagless_multival_type]->{OPTFLAG} . "]."});
+		   getDefaultFlag($usage_array->[$flagless_multival_type]
+				  ->{OPTFLAG}) . "]."});
 	    return(undef);
 	  }
 
 	my $getoptsub;
-	if(defined($interpolate) && $interpolate)
-	  {$getoptsub = sub {push(@$get_opt_ref,sglob($_[0]))}}
+	if(defined($delimiter))
+	  {$getoptsub = sub {push(@$get_opt_ref,split(/$delimiter/,$_[0]))}}
 	else
 	  {$getoptsub = sub {push(@$get_opt_ref,$_[0])}}
 	#No need to do an else, because it would have caused a return above
@@ -3121,41 +4017,103 @@ sub addArrayOption
 	#This assumes that the call to addToUsage a few lines below is the
 	#immediate next call to addToUsage
 	$flagless_multival_type = getNextUsageIndex();
-
-	my($flagsadd,$detailsadd) = getFlaglessUsageAddendums();
-
-	$flags .= $flagsadd;
-
-	$detail_desc .= $detailsadd;
       }
 
     addOption($get_opt_str,
 	      $sub,
+	      $type . '_array',
 	      $required,
 	      $def_str,
 	      $hidden,
 	      $smry_desc,
 	      $detail_desc,
-	      $accepts);
+	      $accepts,
+	      $advanced,
+	      $get_opt_ref);
+  }
+
+#Returns a single character that will work as a delimiter because it matches
+#the regular expression the programmer supplied
+sub getDisplayDelimiter
+  {
+    my $delim   = $_[0];
+    my $type    = $_[1];
+    my $accepts = $_[2];
+
+    if(!defined($delim))
+      {return(undef)}
+    if($delim eq '')
+      {return($delim)}
+
+    my $dispdelims = [',', ';', ':', '|', '~', ' '];
+    my $dispdelim  = $delim;
+
+    if($type eq 'enum')
+      {
+	my $enumchars = join('',@$accepts);
+	if($enumchars =~ /$delim/)
+	  {
+	    error("Delimiter [$delim] matches one or more of the characters ",
+		  "in the enumeration values: [",join(' ',@$accepts),"].");
+	    quit(-103);
+	  }
+
+	if($delim =~ /^(.)\+$/)
+	  {return($1)}
+
+	foreach my $potentialdispdelim (@$dispdelims)
+	  {
+	    if($potentialdispdelim =~ /$delim/ &&
+	       $enumchars !~ /\Q$potentialdispdelim\E/)
+	      {
+		$dispdelim = $potentialdispdelim;
+		last;
+	      }
+	  }
+      }
+    else
+      {
+	if($delim =~ /^(.)\+$/)
+	  {return($1)}
+
+	foreach my $potentialdispdelim (@$dispdelims)
+	  {
+	    if($potentialdispdelim =~ /$delim/)
+	      {
+		$dispdelim = $potentialdispdelim;
+		last;
+	      }
+	  }
+      }
+
+    return($dispdelim);
   }
 
 sub add2DArrayOption
   {
-    my @in = getSubParams([qw(GETOPTKEY GETOPTVAL REQUIRED DEFAULT HIDDEN
-			      SMRY_DESC DETAIL_DESC ACCEPTS FLAGLESS)],
-			  [qw(GETOPTKEY GETOPTVAL)],
+    my @in = getSubParams([qw(FLAG|GETOPTKEY VARREF|GETOPTVAL TYPE REQUIRED
+			      DEFAULT HIDDEN SMRY|SMRY_DESC|SHORT_DESC
+			      DETAIL|DETAIL_DESC|LONG_DESC ACCEPTS FLAGLESS
+			      DELIMITER ADVANCED)],
+			  [qw(FLAG|GETOPTKEY VARREF|GETOPTVAL)],
 			  [@_]);
-    my $get_opt_str     = $in[0]; #e.g. 'o|outfile-suffix=s'
-    my $get_opt_ref     = $in[1]; #e.g. $my_option - A reference to an array
-    my $required        = $in[2]; #Is option required?: 0=false, non-0=true
-    my $default         = $in[3]; #e.g. '1'
-    my $hidden          = $in[4]; #0 or non-0. non-0 requires a default.
-                                  #Excludes from usage output.
-    my $smry_desc       = $in[5]; #e.g. Input file(s).  See --help for format.
-                                  #Empty/undefined = exclude from short usage
-    my $detail_desc     = $in[6]; #e.g. 'Input file(s).  Space separated,...'
-    my $accepts         = $in[7]; #e.g. ['yes','no']
-    my $flagless        = $in[8]; #Whether the option can be supplied sans flag
+    my $get_opt_str = $in[0]; #e.g. 'o|suffix=s'
+    my $get_opt_ref = $in[1]; #e.g. $my_option - A reference to an array
+    my $type        = $in[2]; #e.g. [string],integer,float,enum
+    my $required    = $in[3]; #Is option required?: 0=false, non-0=true
+    my $default     = $in[4]; #e.g. '1'
+    my $hidden      = $in[5]; #0 or non-0. non-0 requires a default.
+                              #Excludes from usage output.
+    my $smry_desc   = $in[6]; #e.g. Input file(s).  See --help for format.
+                              #Empty/undefined = exclude from short usage
+    my $detail_desc = $in[7]; #e.g. 'Input file(s).  Space separated,...'
+    my $accepts     = $in[8]; #e.g. ['yes','no']
+    my $flagless    = $in[9]; #Whether the option can be supplied sans flag
+    my $delimiter   = $in[10];#Split what is supplied if defined. Defaults
+                              #to non-number chars if type is integer or
+                              #float, non-accepts chars if enum, and space
+                              #if string
+    my $advanced    = $in[12];#Advanced options print when extended >= 2
 
     #Trim leading & trailing hard returns and white space characters (from
     #using '<<')
@@ -3164,13 +4122,80 @@ sub add2DArrayOption
     $detail_desc =~ s/^\s+//s if(defined($detail_desc));
     $detail_desc =~ s/\s+$//s if(defined($detail_desc));
 
-    #Make sure the user has specified a string type
-    if($get_opt_str !~ /=s$/)
+    #Validate the accepts parameter
+    if(defined($accepts) &&
+       (ref($accepts) ne 'ARRAY' ||
+	scalar(@$accepts) != scalar(grep {ref(\$_) eq 'SCALAR'} @$accepts)))
       {
-	error("In order to shell-interpolate the values the user passes in, ",
-	      "the first argument must end with '=s'.  [$get_opt_str] was ",
-	      "passed in.");
+	error("Invalid accepts value passed in.  Only a reference to an ",
+	      "array of scalars is valid.  Received a reference to a",
+	      (ref($accepts) eq 'ARRAY' ? 'n ARRAY of (' .
+	       join(',',map {ref(\$_)} @$accepts) . ')' : ' ' . ref($accepts)),
+	      "] instead.");
 	return(undef);
+      }
+
+    #Validate or set the default of the type parameter
+    if(defined($type) && $type ne 'string' && $type ne 'integer' &&
+       $type ne 'float' && $type ne 'enum')
+      {
+	error("Invalid TYPE [$type].  Only string, integer, float, or enum ",
+	      "are allowed.");
+	quit(-97);
+      }
+    elsif(!defined($type))
+      {
+	if(ref($get_opt_str)    eq '' && $get_opt_str =~ /=i$/)
+	  {$type = 'integer'}
+	elsif(ref($get_opt_str) eq '' && $get_opt_str =~ /=f$/)
+	  {$type = 'float'}
+	elsif(defined($accepts))
+	  {$type = 'enum'}
+	else
+	  {$type = 'string'}
+      }
+
+    #Allow the flag to be an array of scalars and turn it into a get opt str
+    $get_opt_str = makeGetOptKey($get_opt_str,$type,1,'add2DArrayOption');
+
+    #Validate the type & accepts combo
+    if($type eq 'enum' && (!defined($accepts) || scalar(@$accepts) == 0))
+      {
+	error("ACCEPTS is required if TYPE is enum.");
+	return(undef);
+      }
+    elsif($type ne 'enum' && defined($accepts))
+      {
+	warning("ACCEPTS is ignored when TYPE is not enum.",
+		{DETAIL => ('Remove the ACCEPTS parameter to eliminate this ' .
+			    'warning.')});
+	undef($accepts);
+      }
+
+    #Set the default delimiter based on the type
+    if(!defined($delimiter))
+      {
+	if($type eq 'integer')
+	  {$delimiter = '[^\d+\-eE]+'}
+	elsif($type eq 'float')
+	  {$delimiter = '[^\d+\-eE\.]+'}
+	elsif($type eq 'enum')
+	  {$delimiter = '[^' . join('',@$accepts) . ']+'}
+	else
+	  {$delimiter = '\s+'}
+      }
+    elsif(length($delimiter) == 1)
+      {$delimiter = "$delimiter+"}
+    elsif(length($delimiter) > 1)
+      {$delimiter = "(?:$delimiter)+"}
+
+    if(defined($get_opt_str))
+      {
+	#Strip junk off the get opt str
+	$get_opt_str =~ s/[=+:\@\%!].*//;
+	#Make type a string so multiple vals can be parsed with a non-num
+	#delimiter
+	$get_opt_str .= '=s';
       }
 
     if($command_line_processed)
@@ -3185,11 +4210,17 @@ sub add2DArrayOption
     if(defined($required) && $required !~ /^\d+$/)
       {error("Invalid REQUIRED parameter: [$required].")}
 
-    if(!defined($flagless))
-      {$flagless = 0}
+    $get_opt_str = fixStringOpt($get_opt_str,1);
 
-    my $flags = join(',',getOptStrFlags($get_opt_str));
-    my $flag  = getDefaultFlag($flags,',');
+    if(!isGetOptStrValid($get_opt_str,'2darray'))
+      {
+	error("Invalid GetOpt parameter flag definition: [$get_opt_str] for ",
+	      "2darray type.");
+	quit(-78);
+      }
+
+    my $flags = [getOptStrFlags($get_opt_str)];
+    my $flag  = getDefaultFlag($flags);
 
     if($hidden && !defined($default) && (defined($required) && $required))
       {
@@ -3200,15 +4231,6 @@ sub add2DArrayOption
 		(defined($required) && $required ? ' it is required' : ''),
 		".  Setting as not hidden.");
 	$hidden = 0;
-      }
-
-    $get_opt_str = fixStringOpt($get_opt_str);
-
-    if(!isGetOptStrValid($get_opt_str,'2darray'))
-      {
-	error("Invalid GetOpt parameter flag definition: [$get_opt_str] for ",
-	      "2darray type.");
-	quit(-78);
       }
 
     #If no summary usage was provided for this option
@@ -3224,19 +4246,20 @@ sub add2DArrayOption
     #If no detailed usage was provided for this option
     if(!defined($detail_desc) || $detail_desc eq '')
       {$detail_desc =
-	 join('',('No detailed usage provided for this option.  This is a 2D ',
-		  'array option.  You can provide this option multiple times ',
-		  'to add an array of space-delimited/shell-interpolated ',
-		  'values (inside quotes) to the array.  bsd glob shell ',
-		  "interpolation is used, e.g. $flag '1 2 3 4' will add the ",
-		  'array [1,2,3,4] to the outer array.'))}
+	 join('',('No detailed usage provided for this 2D array option.'))}
+
+    my $disp_delim = getDisplayDelimiter($delimiter,$type,$accepts);
+    if(defined($disp_delim) && length($disp_delim) > 1)
+      {$detail_desc .= "\n\nInner array elements are delimited from the " .
+	 "value given to a single flag using this perl regular expression: " .
+	   "[$disp_delim]."}
 
     my $sub;
     if(defined($get_opt_ref) &&
        ref($get_opt_ref) eq 'SCALAR' && ref($$get_opt_ref) eq 'ARRAY')
-      {$sub = sub {push(@{$$get_opt_ref},[sglob($_[1])])}}
+      {$sub = sub {push(@{$$get_opt_ref},[split(/$delimiter/,$_[1])])}}
     elsif(defined($get_opt_ref) && ref($get_opt_ref) eq 'ARRAY')
-      {$sub = sub {push(@{$get_opt_ref},[sglob($_[1])])}}
+      {$sub = sub {push(@{$get_opt_ref},[split(/$delimiter/,$_[1])])}}
     else
       {
 	error("Invalid array variable.  The second option must be a ",
@@ -3249,9 +4272,14 @@ sub add2DArrayOption
     #values having been supplied, so we'll do it here and prevent it in
     #addOption
     if($required)
-      {requireGeneralOption($get_opt_ref,$get_opt_str)}
+      {requireGeneralOption($get_opt_ref,$get_opt_str,$default)}
 
     $general_flag_hash->{$get_opt_ref} = $flag;
+
+    #Save any default values, but don't clear out the programmer's variable
+    #(yet - see loadUserDefaults)
+    $array_defaults_hash->{$get_opt_ref}->{DEFAULTS} = [@$get_opt_ref];
+    $array_defaults_hash->{$get_opt_ref}->{VALUES}   = $get_opt_ref;
 
     my $def_str = $default;
     if(ref($default) eq 'ARRAY' &&
@@ -3266,7 +4294,7 @@ sub add2DArrayOption
 	       "scalar or a reference to an array of references to arrays of ",
 	       "scalars.")}
 
-    if($flagless)
+    if(defined($flagless) && $flagless)
       {
 	if(defined($flagless_multival_type) && $flagless_multival_type > -1)
 	  {
@@ -3274,54 +4302,95 @@ sub add2DArrayOption
 		  "'flagless': [$get_opt_str]: [$flagless].  Only 1 is ",
 		  "allowed.",
 		  {DETAIL => "First flagless option was: [" .
-		   $usage_array->[$flagless_multival_type]->{OPTFLAG} . "]."});
+		   getDefaultFlag($usage_array->[$flagless_multival_type]
+				  ->{OPTFLAG}) . "]."});
 	    return(undef);
 	  }
 
 	my $getoptsub;
 	if(defined($get_opt_ref) &&
 	   ref($get_opt_ref) eq 'SCALAR' && ref($$get_opt_ref) eq 'ARRAY')
-	  {$getoptsub = sub {push(@{$$get_opt_ref},[sglob($_[0])])}}
+	  {$sub = sub {push(@{$$get_opt_ref},[split(/$delimiter/,$_[0])])}}
 	elsif(defined($get_opt_ref) && ref($get_opt_ref) eq 'ARRAY')
-	  {$getoptsub = sub {push(@{$get_opt_ref},[sglob($_[0])])}}
+	  {$sub = sub {push(@{$get_opt_ref},[split(/$delimiter/,$_[0])])}}
 	#No need to do an else, because it would have caused a return above
 	$GetOptHash->{'<>'} = $getoptsub;
 
 	#This assumes that the call to addToUsage a few lines below is the
 	#immediate next call to addToUsage
 	$flagless_multival_type = getNextUsageIndex();
-
-	my($flagsadd,$detailsadd) = getFlaglessUsageAddendums();
-
-	$flags .= $flagsadd;
-
-	$detail_desc .= $detailsadd;
       }
 
     addOption($get_opt_str,
 	      $sub,
+	      $type . '_array2d',
 	      $required,
 	      $def_str,
 	      $hidden,
 	      $smry_desc,
 	      $detail_desc,
-	      $accepts);
+	      $accepts,
+	      $advanced,
+	      $get_opt_ref);
   }
 
 sub requireGeneralOption
   {
     my $ref = $_[0];
     my $key = $_[1];
+    my $def = $_[2];
 
-    ##TODO: if it's a reference to a sub, must mark the option's flag/key to be
-    #checked for existence manually.  See requirement 180
+    push(@$required_opt_refs,[$ref,$key,$def]);
+  }
 
-    push(@$required_opt_refs,$ref);
+sub wasGeneralOptionSupplied
+  {
+    my $opt_info = $_[0];
+
+    my $opt_ref = $opt_info->[0];
+
+    if(!defined($opt_ref))
+      {return(0)}
+
+    #Note, these are best guesses.  For example if the option takes an
+    #array, and it's intended to be a 2D array and an empty inner
+    #array is added to start, this would think values have been
+    #supplied when essentially they haven't.  I should more
+    #intelligently handle defaults for all types instead of just
+    #default strings for usage display (e.g. 'none' for no default).
+    #TODO: See req 214
+
+    if(ref($opt_ref) eq 'SCALAR' && !defined($$opt_ref))
+      {return(0)}
+    #Arrays are cleared out before & after user defaults are loaded
+    #and then re-loaded in loadDefaults, which may not have been
+    #called yet, so we're checking for defaults here...
+    elsif(ref($opt_ref) eq 'ARRAY' && scalar(@$opt_ref) == 0 &&
+	  scalar(@{$array_defaults_hash->{$opt_ref}->{DEFAULTS}}) == 0)
+      {return(0)}
+    elsif(ref($opt_ref) eq 'HASH' && scalar(keys(%$opt_ref)) == 0)
+      {return(0)}
+    elsif(ref($opt_ref) ne 'SCALAR' && ref($opt_ref) ne 'ARRAY' &&
+	  ref($opt_ref) ne 'HASH')
+      {
+	my $def = $opt_info->[2];
+	#We're going to trust that if the user supplied a default string, they
+	#are handling the default after-the-fact themselves
+	if(defined($def))
+	  {return(1)}
+
+	my @flags = getOptStrFlags($opt_info->[1]);
+	if(scalar(grep {my $arg=$_;scalar(grep {$_ eq $arg} @flags)}
+		  @$preserve_args) == 0)
+	  {return(0)}
+      }
+
+    return(1);
   }
 
 sub addOptions
   {
-    my @in = getSubParams([qw(GETOPTHASH REQUIRED OVERWRITE RENAME)],
+    my @in = getSubParams([qw(GETOPTHASH REQUIRED OVERWRITE RENAME ADVANCED)],
 			  [qw(GETOPTHASH)],
 			  [@_]);
     my $getopthash = $in[0];
@@ -3336,6 +4405,7 @@ sub addOptions
                              #the variable already exists as a value in the
                              #getopts hash, delete and remake the key-value
                              #pair using the existing key.
+    my $advanced   = $in[4]; #Advanced options print when extended >= 2
 
     if($command_line_processed)
       {
@@ -3398,7 +4468,9 @@ sub addOptions
 	  }
 
 	if($required)
-	  {requireGeneralOption($getopthash->{$get_opt_str},$get_opt_str)}
+	  {requireGeneralOption($getopthash->{$get_opt_str},
+				$get_opt_str,
+				undef)}
 
 	$GetOptHash->{$get_opt_str} = $getopthash->{$get_opt_str};
 
@@ -3406,13 +4478,14 @@ sub addOptions
 
 	#Let's do what we can...
 	my $default = getDefaultStr($getopthash->{$get_opt_str});
-	my $flags = join(',',getOptStrFlags($get_opt_str));
-	my $desc = (showDefault($default,$genopttype) ?
-		    (defined($default) && $default ne '' ?
-		     "[$default] " : '[none] ') : '') . 'No description ' .
-		       'supplied.  Programmer note: Use addOption() instead ' .
-			 'of addOptions(), or use addToUsage() to supply a ' .
-			   'usage.';
+	my $flags = [getOptStrFlags($get_opt_str)];
+	my $desc = (!showDefault($genopttype,$getopthash->{$get_opt_str},
+				 $default) ? '' :
+		    (!defined($default) ? '[] ' :
+		     ($default eq '' ? "[''] " : "[$default] "))) .
+		       'No description supplied.  Programmer note: Use ' .
+			 'addOption() instead of addOptions(), or use ' .
+			   'addToUsage() to supply a usage.';
 
 	addToUsage($get_opt_str,
 		   $flags,
@@ -3425,7 +4498,8 @@ sub addOptions
 		   undef,
 		   0,
 		   getGeneralOptType($get_opt_str),
-		   0);
+		   0,
+		   $advanced);
       }
   }
 
@@ -3474,41 +4548,61 @@ sub clipStr
 sub addToUsage
   {
     my $getoptkey   = $_[0];
-    my $flags_str   = $_[1];
+    my $flags_array = $_[1];
     my $smry_desc   = $_[2];
     my $detail_desc = $_[3];
     my $required    = $_[4];
     my $default     = $_[5];
     my $accepts     = $_[6]; #Array of scalars
     my $hidden      = $_[7];
-    my $opttype     = defined($_[8]) ? $_[8] : 'scalar';
-    my $flagless    = defined($_[9]) ? $_[9] : 0;
+    my $opttype     = defined($_[8]) ? $_[8] : 'string';
+    my $flagless    = $_[9];
+    my $advanced    = $_[10];
+
+    #For 1D & 2D array options
+    my $varref      = $_[11];
+    my $delim       = $_[12];
 
     #For in/out file types (used in help output)
-    my $primary     = defined($_[10]) ? $_[10] : 0;
-    my $format_desc = $_[11];
-    my $file_id     = $_[12];
+    my $primary     = defined($_[13]) ? $_[13] : 0;
+    my $format_desc = $_[14];
+    my $file_id     = $_[15];
 
-    if(!defined($flags_str))
+    if(!defined($flags_array))
       {
-	error("Flag string undefined.");
+	error("Flags array undefined.");
 	return(0);
+      }
+
+    #To be backward compatible, convert a string to an array using comma delim
+    if(ref($flags_array) ne 'ARRAY')
+      {
+	error("Invalid flags array passed in.",
+	      {DETAIL => 'Must be a reference to an array of scalars'});
+	quit(-102);
       }
 
     my $usage_index = scalar(@$usage_array);
 
     push(@$usage_array,{GETOPTKEY => $getoptkey,
-			OPTFLAG   => $flags_str,
+			GETOPTREF => $varref,   #Currently only used for arrays
+			OPTFLAG   => $flags_array,
 			SUMMARY   => (defined($smry_desc) ? $smry_desc : ''),
 			DETAILS   => (defined($detail_desc) ? $detail_desc:''),
 			REQUIRED  => (defined($required) ? $required : 0),
 			DEFAULT   => $default,
 			ACCEPTS   => $accepts,
 		        HIDDEN    => (defined($hidden) ? $hidden : 0),
-			OPTTYPE   => $opttype,  #bool,negbool,count,scalar,
-                                                #array,infile,outfile,outdir,
-                                                #suffix,unk
-			FLAGLESS  => $flagless, #1 or 0
+			OPTTYPE   => $opttype,  #bool,negbool,count,integer,
+                                                #float,string,enum,integer_
+                                                #array,float_array,string_
+                                                #array,enum_array,integer_
+                                                #array2d,float_array2d,string_
+                                                #array2d,enum_array2d,
+                                                #infile,outfile,outdir,suffix,
+			FLAGLESS  => $flagless, #1, 0, or undef
+			ADVANCED  => $advanced,
+			DELIMITER => $delim,
 
 			#File option info
 			PRIMARY   => $primary, #primary means stdin/out default
@@ -3520,7 +4614,24 @@ sub addToUsage
 		        TTHIDN    => 0}); #& set in createSuffixOutfileTagteam.
                                           #TTHIDN indicates whether 1 is hidden
 
+    $usage_lookup->{$getoptkey} = $usage_array->[-1];
+
     return($usage_index);
+  }
+
+#Supply a getoptkey and get back a usage hash
+sub getUsageHash
+  {
+    my $getoptkey = $_[0];
+    if(!defined($getoptkey) || ref($getoptkey) ne '')
+      {error('Invalid GETOPTKEY: [',
+	     (defined($getoptkey) ? ref($getoptkey) : 'undef'),'].',
+	     {DETAIL => 'Must be a scalar value.'})}
+    if(exists($usage_lookup->{$getoptkey}) &&
+       defined($usage_lookup->{$getoptkey}))
+      {return($usage_lookup->{$getoptkey})}
+    error("GETOPTKEY [$getoptkey] not found.");
+    return({});
   }
 
 sub getNextUsageIndex
@@ -3529,7 +4640,7 @@ sub getNextUsageIndex
 #Globals used: $usage_array
 sub getFileUsageHash  {
     my $file_id = $_[0];
-    my $type    = $_[1];
+    my $type    = $_[1]; #infile,outfile
     if(scalar(@_) != 2)
       {
 	error("getFileUsageHash requires exactly 2 parameters: a file ID & a ",
@@ -3545,45 +4656,48 @@ sub getFileUsageHash  {
     return({});
   }
 
+#Converts a getopt key string into an array of associated flag strings
 sub getOptStrFlags
   {
     my $get_opt_str = $_[0];
-    my $genopttype = getGeneralOptType($get_opt_str);
+    my $genopttype  = getGeneralOptType($get_opt_str);
     $get_opt_str =~ s/[=:\!].*$//;
     my @flags =
       map {(length($_) > 1 ? '--' : '-') . $_} split(/\|/,$get_opt_str);
-    if($genopttype eq 'negbool')
-      {push(@flags,map {"--no-$_"} split(/\|/,$get_opt_str))}
-    return(@flags);
+#    if($genopttype eq 'negbool')
+#      {push(@flags,map {"--no$_"} split(/\|/,$get_opt_str))}
+    return(wantarray ? @flags : [@flags]);
   }
 
 #Returns the first 2 character flag or the first flag if a 2-character flag is
 #not present
 sub getDefaultFlag
   {
-    my $flag_str = defined($_[0]) && $_[0] ne '' ? $_[0] : return(undef);
-    my $delim    = defined($_[1]) && $_[1] ne '' ? $_[1] : ',';
-    if($flag_str !~ /(^-|$delim\-)/)
+    my $flag_array = $_[0];
+    if(!defined($flag_array) || ref($flag_array) ne 'ARRAY')
       {
-	error("Invalid flag string: [$flag_str]");
-	return(undef);
+	error("Invalid flag array: [",
+	      (defined($flag_array) ?
+	       (ref($flag_array) eq '' ? 'SCALAR' : ref($flag_array) . ' REF')
+	       : 'undef'),"]");
+	return('');
       }
 
     my $first_flag = '';
-    foreach my $flag (split(/$delim/,$flag_str))
+    foreach my $flag (@$flag_array)
       {
 	if($first_flag eq '' && $flag =~ /^-/)
 	  {$first_flag = $flag}
-	if($flag =~ /^-[^-]$/)
+	if($flag =~ /^-[^\-]$/)
 	  {return($flag)}
       }
 
-    return($first_flag eq '' ? undef : $first_flag);
+    return($first_flag);
   }
 
 sub getInfile
   {
-    my @in = getSubParams([qw(FILETYPEID ITERATE)],[],[@_]);
+    my @in           = getSubParams([qw(FILETYPEID ITERATE)],[],[@_]);
     my $file_type_id = $in[0];
     my $iterate      = defined($in[1]) ? $in[1] : $auto_file_iterate;
 
@@ -3591,7 +4705,11 @@ sub getInfile
       {processCommandLine()}
 
     if(!defined($file_set_num))
-      {$file_set_num = 0}
+      {
+	$file_set_num = 0;
+	if(!defined($max_set_num))
+	  {$max_set_num = 0}
+      }
 
     if($file_set_num >= scalar(@$input_file_sets))
       {
@@ -3648,7 +4766,6 @@ sub getInfile
 	return(undef);
       }
 
-
     my @return_files = ();
     if(wantarray)
       {
@@ -3664,7 +4781,6 @@ sub getInfile
 
     return(wantarray ? @return_files :
 	   $input_file_sets->[$file_set_num]->[$file_type_id]);
-#    return($input_file_sets->[$file_set_num]->[$file_type_id]);
   }
 
 #Globals used: $suffix_id_lookup
@@ -3689,6 +4805,17 @@ sub isSuffixPrimary
     #was stored here by the addOutfileSuffixOption sub
     return(isTypeSuffixPrimary($suffix_id_lookup->[$suffix_id]->[0],
 			       $suffix_id_lookup->[$suffix_id]->[1]));
+  }
+
+#Note: This could be way more efficient if everything went through the usage
+#array and usage array indexes were the types passed around for everything
+#Globals used: required_suffix_types
+sub isSuffixRequired
+  {
+    my $suffix_id = $_[0];
+    foreach my $suff_ary (@$required_suffix_types)
+      {return(1) if($suffix_id == $suff_ary->[2])}
+    return(0);
   }
 
 #Determines whether a suffix is defined or not.  By "defined", what is meant
@@ -3739,7 +4866,7 @@ sub isTypeSuffixPrimary
 
 sub getOutfile
   {
-    my @in = getSubParams([qw(SUFFIXID ITERATE)],[],[@_]);
+    my @in        = getSubParams([qw(SUFFIXID ITERATE)],[],[@_]);
     my $suffix_id = $in[0];
     my $iterate   = defined($in[1]) ? $in[1] : $auto_file_iterate;
 
@@ -3749,7 +4876,11 @@ sub getOutfile
     #If this is the first time we've returned any files, set up the file set
     #counter
     if(!defined($file_set_num))
-      {$file_set_num = 0}
+      {
+	$file_set_num = 0;
+	if(!defined($max_set_num))
+	  {$max_set_num = 0}
+      }
 
     #If we're past the number of files supplied by the user, reset the file set
     #counter and return undef
@@ -3797,13 +4928,21 @@ sub getOutfile
 				      ->[$suffix_id_lookup->[$_]->[1]])}
 		      (0..$#{$suffix_id_lookup}))[0];
       }
-    #Else if no ID was provided and no output files have been supplied
+    #Else if no ID was provided and no output files have been supplied (for
+    #this set - which implies none specified for *any* set)
     elsif(!defined($suffix_id) &&
 	  scalar(grep {scalar(@$_) &&
 			 defined($output_file_sets->[$file_set_num]
 				 ->[$_->[0]]->[$_->[1]])}
 		 @$suffix_id_lookup) == 0)
-      {return(undef)}
+      {
+	#If all output file types are primary, return '-'
+	if(scalar(@$suffix_id_lookup) ==
+	   scalar(grep {isSuffixPrimary($_->[2])} @$suffix_id_lookup))
+	  {return('-')}
+	#Else return undef
+	return(undef);
+      }
     #Else if no ID was provided and no output file types have been defined
     elsif(!defined($suffix_id) &&
 	  scalar(grep {scalar(@$_)} @$suffix_id_lookup) == 0)
@@ -3864,14 +5003,17 @@ sub getOutfile
 		  #Indexes of the outfile suffixes array
 		  0..$#{$outfile_suffix_array}) == 2)
 	  {
-	    error("Cannot supply both an outfile suffix [",
+	    error("Outfile tagteam options are mutually exclusive.  Cannot ",
+		  "supply both an outfile suffix [",
 		  getOutfileSuffixFlag($default_outfile_suffix_added ?
 				       $default_outfile_suffix_id :
 				       ($default_outfile_id == 0 ? 1 : 0)),
-		  "] and a named output file [",
+		  "] and outfile(s) [",
 		  getOutfileFlag($default_outfile_added ? $default_outfile_id :
 				 ($default_outfile_suffix_id == 0 ? 1 : 0)),
-		  "]).  Please use one or the other.");
+		  "] at the same time.  Please use one or the other.",
+		  {DETAIL => 'Note: Double-check to make sure one or the ' .
+		   'other does not have a default value specified.'});
 	    return(undef);
 	  }
 	#Else if there are only 2 outfile types and a tagteam exists
@@ -3886,12 +5028,12 @@ sub getOutfile
 	    error("Suffix ID is required when there is more than one output ",
 		  "file type defined & supplied on the command line.",
 		  {DETAIL =>
-		   join('',("E.g. Outfiles can be defined by supplying an ",
-			    "extension/suffix appended to an input file, by ",
-			    "file name, or (in the absence of output flags) ",
-			    "by the fact that an options is 'primary', in ",
-			    "which case output defaults to STDOUT when not ",
-			    "defined on the command line.  There are [",
+		   join('',("E.g. Outfiles can be defined by supplying a ",
+			    "suffix appended to an input file, by file name, ",
+			    "or (in the absence of output flags) by the fact ",
+			    "that an options is 'primary', in which case ",
+			    "output defaults to STDOUT when not defined on ",
+			    "the command line.  There are [",
 			    scalar(grep {scalar(@$_) &&
 					   defined($output_file_sets
 						   ->[$file_set_num]->[$_->[0]]
@@ -3939,12 +5081,25 @@ sub getOutfile
 	return(undef);
       }
 
+    #If the output file name is not defined and no output files of this type
+    #were specified by the user, manipulate the file name to either '-' if the
+    #suffix type is primary (otherwise, keep undef)
+    my($convert_undefs);
+    if(!defined($output_file_sets->[$file_set_num]->[$file_type_index]
+		->[$suffix_index]) &&
+       scalar(grep {scalar(@$_) &&
+		      defined($_->[$file_type_index]->[$suffix_index])}
+	      @$output_file_sets) == 0 && isSuffixPrimary($suffix_id))
+      {$convert_undefs = '-'}
+
     debug({LEVEL => -99},"Returning outfile for set [$file_set_num], file ",
 	  "type (index) [$file_type_index], and suffix index [$suffix_index",
 	  "].");
 
-    return($output_file_sets->[$file_set_num]->[$file_type_index]
-	   ->[$suffix_index]);
+    my $outfile = $output_file_sets->[$file_set_num]->[$file_type_index]
+      ->[$suffix_index];
+
+    return($convert_undefs && !defined($outfile) ? $convert_undefs : $outfile);
   }
 
 #This subroutine takes a tagteam ID and returns a suffix ID.  The suffix ID
@@ -4042,28 +5197,25 @@ sub isTagteamPartnerDefined
 #tagteam_to_supplied_oid that is used by tagteamToSuffixID
 sub validateTagteam
   {
-    ##TODO: Enhance this method to take user-supplied defaults into account.
-    ##      Right now, the defaults that are checked are those created by the
-    ##      programmer via the calls to addOutfileOption and
-    ##      addOutfileSuffixOption.  The user can use --save-as-default to
-    ##      create custom defaults.  Right now, those are not taken into
-    ##      account.  See requirement 282.
-
+    #Note: the tagteam ID could be a suffix ID depending on how it was created
     my $ttid = $_[0];
 
+    #If the tagteam ID is not defined, return failure
     if(!defined($ttid))
       {return(0)}
 
+    #If the tagteam ID doesn't exist return failure
     if(!exists($outfile_tagteams->{$ttid}))
       {
 	error("Invalid tagteam ID: [$ttid].");
 	return(0);
       }
 
-    #If already validated
+    #If already validated, return success
     if(exists($tagteam_to_supplied_oid->{$ttid}))
       {return(1)}
 
+    #Validate the suffix IDs for this tagteam
     if(scalar(@$suffix_id_lookup) <= $outfile_tagteams->{$ttid}->{SUFFID})
       {
 	error("The suffix ID: [$outfile_tagteams->{$ttid}->{SUFFID}] for ",
@@ -4121,10 +5273,14 @@ sub validateTagteam
 				    (0..$#{$outf_value->[$i]}))}
 	      (0..$#{$outf_value})) == 0);
 
-    debug({LEVEL => -1},"Suffix default for flag [",
-	  getOutfileSuffixFlag($outfile_tagteams->{$ttid}->{SUFFID}),
-	  "] in the tagteam pair, is [",
-	  (defined($suff_default) ? $suff_default : 'undef'),"].");
+    debug({LEVEL => -1},"Suffix [",
+	  getOutfileSuffixFlag($outfile_tagteams->{$ttid}->{SUFFID},-1),
+	  "] default value in the tagteam pair, is [",
+	  (defined($suff_default) ? $suff_default : 'undef'),"].  Suff val: [",
+	  (defined($suff_value) ? $suff_value : 'undef'),"]  Outf val: [",
+	  (defined($outf_value) ? $outf_value : 'undef'),"]  Is Suff def: ",
+	  "[",($is_suff_default ? 1 : '0'),"]  Is outf def: [",
+	  ($is_outf_default ? 1 : '0'),"]");
 
     #If the suffix has a value and it is not a default value and either outf
     #has no value (i.e. is empty) or is the default value
@@ -4149,16 +5305,17 @@ sub validateTagteam
     elsif(defined($suff_value) && !$is_suff_default &&
 	  defined($outf_value) && scalar(@$outf_value) && !$is_outf_default)
       {
-	error("Cannot supply both an outfile suffix flag [",
+	error("Outfile tagteam options are mutually exclusive.  Cannot ",
+	      "supply both an outfile suffix [",
 	      getOutfileSuffixFlag($outfile_tagteams->{$ttid}->{SUFFID}),
-	      "] and an outfile flag [",getOutfileFlag($outfid_infile_index),
-	      "] at the same time.  They are mutually exclusive options.  ",
+	      "] and outfiles [",getOutfileFlag($outfid_infile_index),
+	      "] at the same time.  ",
 	      "Use --force to surpass this fatal error and arbitrarily use [",
 	      ($outfile_tagteams->{$ttid}->{SUFFID} <
 	       $outfile_tagteams->{$ttid}->{OUTFID} ?
 	       getOutfileSuffixFlag($outfile_tagteams->{$ttid}->{SUFFID}) :
 	       getOutfileFlag($suffid_infile_index)),
-	      "] and ignore the other option.");
+	      "], ignoring the other option.");
 	quit(-67);
 	$tagteam_to_supplied_oid->{$ttid} =
 	  ($outfile_tagteams->{$ttid}->{SUFFID} <
@@ -4184,20 +5341,21 @@ sub validateTagteam
     #Else if both have default values
     elsif($is_outf_default && $is_suff_default)
       {
-	error("Cannot have default values for both an outfile suffix flag [",
+	error("Outfile tagteam options are mutually exclusive.  Cannot have ",
+	      "default values for both an outfile suffix [",
 	      getOutfileSuffixFlag($outfile_tagteams->{$ttid}->{SUFFID}),
 	      "] (default: [",
 	      (defined($suff_default) ? $suff_default : 'undef'),
-	      "]) and an outfile flag [",getOutfileFlag($outfid_infile_index),
+	      "]) and an outfile [",getOutfileFlag($outfid_infile_index),
 	      "] (default: [(",join('),(',map {join(',',@$_)} @$outf_default),
-	      ")]) at the same time.  They are mutually exclusive options.  ",
+	      ")]) at the same time.  ",
 	      "Use --force to surpass this fatal error and arbitrarily use [",
 	      ($outfile_tagteams->{$ttid}->{SUFFID} <
 	       $outfile_tagteams->{$ttid}->{OUTFID} ?
 	       getOutfileSuffixFlag($outfile_tagteams->{$ttid}->{SUFFID}) :
 	       getOutfileFlag($suffid_infile_index)),
-	      "] and ignore the other option.");
-	quit(-999);
+	      "], ignoring the other option.");
+	quit(-90);
 	$tagteam_to_supplied_oid->{$ttid} =
 	  ($outfile_tagteams->{$ttid}->{SUFFID} <
 	   $outfile_tagteams->{$ttid}->{OUTFID} ?
@@ -4315,14 +5473,14 @@ sub getMissingConflictingTagteamFlags
 	  {push(@$missing_flag_combos,
 		(defined($oflag) && $oflag ne '' &&
 		 defined($sflag) && $sflag ne '' ?
-		 "$oflag or $sflag" : 'internal error'))}
+		 "[$oflag] or [$sflag]" : 'internal error'))}
 	elsif($outfile_supplied && $suffix_supplied)
 	  {push(@$conflicting_flags,
 		(defined($oflag) && $oflag ne '' &&
 		 defined($sflag) && $sflag ne '' ?
-		 "($sflag " .
+		 "[$sflag] (" .
 		 "$outfile_suffix_array->[$infile_index]->[$suffix_index]) " .
-		 "and ($oflag '" .
+		 "and [$oflag] ('" .
 		 substr(join("' $oflag '",
 			     map {join(' ',@$_)}
 			     @{$input_files_array->[$outfile_index]}),0,20) .
@@ -4367,9 +5525,17 @@ sub nextFileCombo
       }
 
     if(!defined($file_set_num))
-      {$file_set_num = 0}
+      {
+	$file_set_num = 0;
+	if(!defined($max_set_num))
+	  {$max_set_num = 0}
+      }
     elsif($file_set_num < scalar(@$input_file_sets) - 1)
-      {$file_set_num++}
+      {
+	$file_set_num++;
+	if($max_set_num < $file_set_num)
+	  {$max_set_num = $file_set_num}
+      }
     else
       {
 	$file_set_num         = undef;
@@ -4390,7 +5556,11 @@ sub fileReturnedBefore
     my $suffix_index    = $_[1]; #Supply this for outfiles but not for infiles
 
     if(!defined($file_set_num))
-      {$file_set_num = 0}
+      {
+	$file_set_num = 0;
+	if(!defined($max_set_num))
+	  {$max_set_num = 0}
+      }
 
     #If this is an output file
     if(defined($suffix_index))
@@ -4433,27 +5603,43 @@ sub addDefaultFileOptions
 	      (0..$#{$input_files_array})) == 0)
       {addInfileOption()}
 
-    my $first_infile_type = (grep {!exists($outfile_types_hash->{$_})}
-			     (0..$#{$input_files_array}))[0];
+    my $def_prim_inf_type = getDefaultPrimaryInfileID();
 
-    #If the programmer did not assign a primary input file type, pick a default
-    if(!defined($primary_infile_type))
+    #If the programmer did not assign a primary input file type and the number
+    #of explicitly non-primary infile types is not all of the infile types,
+    #pick a default
+    if(!defined($primary_infile_type) && defined($def_prim_inf_type))
       {
-	$primary_infile_type = $first_infile_type;
+	$primary_infile_type = $def_prim_inf_type;
 
-	my($flagsadd,$detailsadd,$defaultadd) = getPrimaryUsageAddendums();
-	$usage_array->[$usage_file_indexes->[$first_infile_type]]->{OPTFLAG} .=
-	  $flagsadd;
-	$usage_array->[$usage_file_indexes->[$first_infile_type]]->{DETAILS} .=
-	  $detailsadd;
-	$usage_array->[$usage_file_indexes->[$first_infile_type]]->{DEFAULT} .=
-	  ($usage_array->[$usage_file_indexes->[$first_infile_type]]->{DEFAULT}
-	   eq '' ? $defaultadd : ($defaultadd eq '' ? '' : " or $defaultadd"));
+	$usage_array->[$usage_file_indexes->[$def_prim_inf_type]]->{PRIMARY} =
+	  1;
+	if(!defined($usage_array->[$usage_file_indexes->[$def_prim_inf_type]]
+		    ->{DEFAULT}))
+	  {$usage_array->[$usage_file_indexes->[$def_prim_inf_type]]->{DEFAULT}
+	     = ''}
+	elsif($usage_array->[$usage_file_indexes->[$def_prim_inf_type]]
+	      ->{DEFAULT} eq '')
+	  {$usage_array->[$usage_file_indexes->[$def_prim_inf_type]]->{DEFAULT}
+	     = "''"}
       }
 
+    #If there was an error during setup (implied by cleanup_mode > 1) and there
+    #is no usage entry for the primary infile type, skip all this and return
+    if($cleanup_mode > 1 && $primary_infile_type > $#{$usage_file_indexes})
+      {return(0)}
+
     #If the programmer did not assign any multi-value option as 'flagless', set
-    #the primary input file as flagless
-    if(!defined($flagless_multival_type) || $flagless_multival_type < 0)
+    #the primary input file as flagless (if it is defined and not explicitly
+    #set to not be flagless)
+    if((!defined($flagless_multival_type) || $flagless_multival_type < 0) &&
+       defined($primary_infile_type) &&
+       ((defined($usage_array->[$usage_file_indexes->[$primary_infile_type]]
+		 ->{FLAGLESS}) &&
+	 $usage_array->[$usage_file_indexes->[$primary_infile_type]]
+	 ->{FLAGLESS}) ||
+	!defined($usage_array->[$usage_file_indexes->[$primary_infile_type]]
+		 ->{FLAGLESS})))
       {
 	#Keep track globally of which option is the multi-value flagless one
 	$flagless_multival_type = $usage_file_indexes->[$primary_infile_type];
@@ -4465,12 +5651,6 @@ sub addDefaultFileOptions
 
 	$usage_array->[$usage_file_indexes->[$primary_infile_type]]
 	  ->{FLAGLESS} = 1;
-
-	my($flagsadd,$detailsadd) = getFlaglessUsageAddendums();
-	$usage_array->[$usage_file_indexes->[$primary_infile_type]]
-	  ->{OPTFLAG} .= $flagsadd;
-	$usage_array->[$usage_file_indexes->[$primary_infile_type]]
-	  ->{DETAILS} .= $detailsadd;
       }
 
     my $num_outfile_types = scalar(keys(%$outfile_types_hash));
@@ -4481,7 +5661,7 @@ sub addDefaultFileOptions
     #than a 1:M relationship
     my $add_outf_suff =
       ($num_suffix_types == 0 &&
-       ($num_outfile_types == 0 || !isDefaultPrimaryOut1toM()));
+       ($num_outfile_types == 0 || !isDefaultPrimaryOut1toMorUnrelated()));
 
     #If the programmer did not add an outfile suffix option and one is
     #appropriate
@@ -4490,63 +5670,27 @@ sub addDefaultFileOptions
 	debug({LEVEL => -1},"Adding default outfile suffix option because ",
 	      "the number of suffix types added [$num_suffix_types] == 0 and ",
 	      "(the number of outfile types [$num_outfile_types] == 0 or the ",
-	      "first primary outfile type had [",(isDefaultPrimaryOut1toM() ?
-						  'at least 1' : 'no'),
-	      "] 1:M relationships defined with input files.");
+	      "first primary outfile type had [",
+	      (isDefaultPrimaryOut1toMorUnrelated() ? 'at least 1' : 'no'),
+	      "] 1:M relationships or no relationship defined with input ",
+	      "files.");
 	addOutfileSuffixOption();
       }
-
-    #If a primary outfile suffix option exists (first one is always primary),
-    #add stub addendums to the primary input file type
-    if($add_outf_suff || $num_suffix_types)
-      {
-	my($flagsadd,$detailsadd,$optstradd) = getPrimaryStubUsageAddendums();
-	if($optstradd ne '')
-	  {
-	    my $oldkey = $usage_array
-	      ->[$usage_file_indexes->[$primary_infile_type]]->{GETOPTKEY};
-	    my $newkey = $oldkey;
-	    #The infile getopt key is assumed to have '=' in it
-	    $newkey =~ s/=/|$optstradd=/;
-	    if($oldkey ne $newkey)
-	      {
-		#Set the new key in the getopt hash and update it in the usage
-		#hash
-		$usage_array->[$usage_file_indexes->[$primary_infile_type]]
-		  ->{GETOPTKEY} = $newkey;
-		$GetOptHash->{$newkey} = $GetOptHash->{$oldkey};
-		delete($GetOptHash->{$oldkey});
-
-		#Put the stub options before STDIN or *, if either is there
-		if($usage_array->[$usage_file_indexes->[$primary_infile_type]]
-		   ->{OPTFLAG} =~ /,STDIN|,\*/)
-		  {$usage_array->[$usage_file_indexes->[$primary_infile_type]]
-		     ->{OPTFLAG} =~ s/(,STDIN|,\*)/,$flagsadd$1/}
-		else
-		  {$usage_array->[$usage_file_indexes->[$primary_infile_type]]
-		     ->{OPTFLAG} .= ',' . $flagsadd}
-
-		#Append the details about how to use the stub
-		$usage_array->[$usage_file_indexes->[$primary_infile_type]]
-		  ->{DETAILS} .= $detailsadd;
-	      }
-	    else
-	      {warning("Unable to add stub options to the primary input file ",
-		       "type [",
-		       getDefaultFlag($usage_array->[$usage_file_indexes
-						     ->[$primary_infile_type]]
-				      ->{OPTFLAG}),"].",
-		      {DETAIL =>
-		       "Expected '=' to be in the GetOpt hash key."})}
-	  }
-      }
+    else
+      {debug({LEVEL => -1},"Not adding default outfile suffix option because ",
+	     "the number of suffix types added [$num_suffix_types] != 0 or ",
+	     "(the number of outfile types [$num_outfile_types] != 0 and the ",
+	     "first primary outfile type had [",
+	     (isDefaultPrimaryOut1toMorUnrelated() ? 'at least 1' : 'no'),
+	     "] 1:M relationships or no relationship defined with input ",
+	     "files.")}
 
     #If the programmer did not add an outfile option
     if($num_outfile_types == 0)
       {addOutfileOption()}
 
     #If one of the default outfile types was added, create a tagteam with it
-    #and the first primary outfile/outfile-suffix type
+    #and the first primary outfile/suffix type
     if($default_outfile_added || $default_outfile_suffix_added)
       {
 	my $def_outf_suff_id = '';
@@ -4605,7 +5749,7 @@ sub addDefaultFileOptions
 	    my $suff_linked_inf_id =
 	      $suffix_id_lookup->[$prim_suff_usg_hash->{FILEID}]->[0];
 
-	    #If both outfile types are linked to the same inpit file type, go
+	    #If both outfile types are linked to the same input file type, go
 	    #ahead and create the tagteam, otherwise, skip it.
 	    if($outf_linked_inf_id == $suff_linked_inf_id)
 	      {createSuffixOutfileTagteam($prim_suff_usg_hash->{FILEID},
@@ -4615,11 +5759,72 @@ sub addDefaultFileOptions
 
     #If the programmer did not add an outdir option, add a default
     if(!$outdirs_added)
-      {addOutdirOption()}
+      {
+	addOutdirOption();
+
+	my $od_usg_hash = getOutdirUsageHash();
+
+	#Append notes to detail_descs of default-added outfile types and
+	#outfile suffix types (if the outdir type created above is not hidden)
+	#to indicate that they will deposit their files in the supplied outdir
+
+	if(!$od_usg_hash->{HIDDEN})
+	  {
+	    if($default_outfile_suffix_added)
+	      {
+		my $suf_usg_hash =
+		  getOutfileUsageHash($default_outfile_suffix_id);
+		$suf_usg_hash->{DETAILS} .= "  Does not replace extensions.  " .
+		  "Output files are placed in the same directory as each " .
+		    "input file (unless [" . getOutdirFlag() . "] is " .
+		      "supplied).  Will not overwrite without --overwrite.";
+	      }
+
+	    if($default_outfile_added)
+	      {
+		#This assumes there's only 1 (hidden) suffix when the type is
+		#outfile
+		my $of_usg_hash =
+		  getOutfileUsageHash((getSuffixIDs($default_outfile_id))[0]);
+		$of_usg_hash->{DETAILS} .= "  Output files are placed in " .
+		  "the current directory (unless [" . getOutdirFlag() .
+		    "] is supplied).  Will not overwrite without --overwrite.";
+	      }
+	  }
+      }
+    else
+      {
+	my $od_usg_hash = getOutdirUsageHash();
+
+	#Tell user where output will go if hidden and there's a default
+	if($od_usg_hash->{HIDDEN} && defined($od_usg_hash->{DEFAULT}) &&
+	   $od_usg_hash->{DEFAULT} ne '')
+	  {
+	    if($default_outfile_suffix_added)
+	      {
+		my $suf_usg_hash =
+		  getOutfileUsageHash($default_outfile_suffix_id);
+		$suf_usg_hash->{DETAILS} .= "\n\nOutput files will be " .
+		  "placed in [$od_usg_hash->{DEFAULT}].";
+	      }
+
+	    if($default_outfile_added)
+	      {
+		#This assumes there's only 1 (hidden) suffix when the type is
+		#outfile
+		my $of_usg_hash =
+		  getOutfileUsageHash((getSuffixIDs($default_outfile_id))[0]);
+		$of_usg_hash->{DETAILS} .= "\n\nOutput files will be placed " .
+		  "in [$od_usg_hash->{DEFAULT}].  Output file paths are not " .
+		    "allowed unless the default output directory is removed.";
+	      }
+	  }
+      }
   }
 
-#Returns true if the first (primary/required/unhidden) outfile type is 1:M
-sub isDefaultPrimaryOut1toM
+#Returns true if the first (primary/required/unhidden) outfile type is 1:M or
+#is not linked/related to an input file
+sub isDefaultPrimaryOut1toMorUnrelated
   {
     my $prim_suff_usg_hash = getDefaultPrimaryOutUsageHash(0);
 
@@ -4650,7 +5855,7 @@ sub isDefaultPrimaryOut1toM
     debug({LEVEL => -1},"Relationship of primary out type [$file_index]: ",
 	  "[$relat].");
 
-    if($relat eq '1:M' || $relat eq '1')
+    if($relat eq '1:M' || $relat eq '1' || $relat eq '')
       {return(1)}
 
     return(0);
@@ -4694,16 +5899,16 @@ sub getDefaultPrimaryLinkedInfileID
     debug({LEVEL => -1},"Outfile index selected as default primary: [",
 	  (defined($outfile_index) ? $outfile_index : 'undef'),
 	  "] which belongs to [",
-	  (defined($outfile_index) ? getOutfileFlag($outfile_index) : 'undef'),
-	  "] and [",($outfile_usage_hash->{PRIMARY} ? 'is' : 'is not'),
-	  "] primary.");
+	  (defined($outfile_index) ? getOutfileFlag($outfile_index,-1) :
+	   'undef'),"] and [",($outfile_usage_hash->{PRIMARY} ?
+			       'is' : 'is not'),"] primary.");
     #I need the outfile_id to tell which one is the lesser between it and the
     #suffix ID...
     #There should be only 1 ID for this type since it's an outfile type, or at
     #least the first one will be the relevant one (if I ever add the ability to
     #add other suffixes to outfile types)
     my $outfile_id = (defined($outfile_index) ?
-		      (getSuffixIDs($outfile_index))[0] : 0);
+		      (getSuffixIDs($outfile_index))[0] : undef);
     my($linked_index1);
     if(defined($outfile_index) &&
        scalar(grep {$_->[0] == $outfile_index} @$required_relationships))
@@ -4735,15 +5940,23 @@ sub getDefaultPrimaryInfileID
     #If the primary infile type has already been defined
     if(defined($primary_infile_type))
       {return($primary_infile_type)}
+    #If there are no input file types
+    elsif(getNumInfileTypes() == 0)
+      {return(undef)}
 
-    #Return the first after sorting by descending primary status (though all
-    #should be 0 - we'll do this as a safeguard), descending required status,
-    #ascending hidden status, or order in which they were created
+    #Return the first after sorting by ascending explicitly-set non-primary
+    #status (i.e. if the programmer explicitly set a file type to not be
+    #primary, it's the LAST choice if *every* file type is not primary),
+    #descending primary status (though all should be 0 - we'll do this as a
+    #safeguard), descending required status, ascending hidden status, or order
+    #in which they were created
     return((sort {my $ua = getInfileUsageHash($a);
 		  my $ub = getInfileUsageHash($b);
-		  $ub->{PRIMARY} <=> $ua->{PRIMARY} ||
-		    $ub->{REQUIRED} <=> $ua->{REQUIRED} ||
-		      $ua->{HIDDEN} <=> $ub->{HIDDEN} || $a <=> $b}
+		  exists($exp_nonprimary_inf_types->{$a}) <=>
+		    exists($exp_nonprimary_inf_types->{$b}) ||
+		      $ub->{PRIMARY} <=> $ua->{PRIMARY} ||
+			$ub->{REQUIRED} <=> $ua->{REQUIRED} ||
+			  $ua->{HIDDEN} <=> $ub->{HIDDEN} || $a <=> $b}
 	    grep {!exists($outfile_types_hash->{$_})}
 	    (0..$#{$input_files_array}))[0])
   }
@@ -4767,7 +5980,7 @@ sub getNumSuffixTypes
     return($num);
   }
 
-#Variable options are those whose availability varies besaed on the
+#Variable options are those whose availability varies based on the
 #default_run_mode.  They include: --run, --dry-run, --usage, & --help.  This
 #method adds --usage, --help, --run, and/or --dry-run to accommodate the
 #default_run_mode.
@@ -4775,7 +5988,7 @@ sub getNumSuffixTypes
 #NOTE: various calls to addOption will set a value in the global GetOptHash,
 #but those values already exist for the options this method adds (e.g. --help).
 #That's fine.  The values were pre-added so that user defaults could be read in
-#the establish a user-defined default run mode.
+#to establish a user-defined default run mode.
 #
 #Uses globals: $default_run_mode, $run, $dry_run, $explicit_dry_run,
 #              $explicit_run, $explicit_usage, $explicit_help, $GetOptHash
@@ -4792,8 +6005,7 @@ sub addRunModeOptions
 			  'necessary to supply this option if the script ' .
 			  'contains no required options or when all ' .
 			  'required options have default values that are ' .
-			  'either hard-coded, or provided via ' .
-			  '--save-as-default.');
+			  'either hard-coded, or provided via --save-args.');
     my $dry_run_smry   = ('');
     my $dry_run_desc   = ('Run without generating output files.');
 
@@ -4836,6 +6048,7 @@ sub addRunModeOptions
 	#Add --usage as shown optional opt using addOption
 	addOption(GETOPTKEY   => 'usage',
 		  GETOPTVAL   => \$explicit_usage,
+		  TYPE        => 'bool',
 		  REQUIRED    => 0,
 		  HIDDEN      => $usage_hidden,
 		  SMRY_DESC   => $usage_smry,
@@ -4844,6 +6057,7 @@ sub addRunModeOptions
 	#Add --help as a hidden optional opt using addOption
 	addOption(GETOPTKEY   => 'help',
 		  GETOPTVAL   => \$explicit_help,
+		  TYPE        => 'bool',
 		  REQUIRED    => 0,
 		  HIDDEN      => $help_hidden,
 		  SMRY_DESC   => ($default_run_mode eq 'help' && $help &&
@@ -4856,6 +6070,7 @@ sub addRunModeOptions
 	#Add --run as a hidden optional opt using addOption
 	addOption(GETOPTKEY   => 'run',
 		  GETOPTVAL   => \$explicit_run,
+		  TYPE        => 'bool',
 		  REQUIRED    => 0,
 		  HIDDEN      => $run_hidden,
 		  SMRY_DESC   => $run_smry,
@@ -4864,6 +6079,7 @@ sub addRunModeOptions
 	#Add --dry-run as a shown optional opt using addOption
 	addOption(GETOPTKEY   => 'dry-run',
 		  GETOPTVAL   => \$explicit_dry_run,
+		  TYPE        => 'bool',
 		  REQUIRED    => 0,
 		  HIDDEN      => $dry_run_hidden,
 		  SMRY_DESC   => $dry_run_smry,
@@ -4876,6 +6092,7 @@ sub addRunModeOptions
 	    #Add --run as a hidden optional opt using addOption
 	    addOption(GETOPTKEY   => 'run',
 		      GETOPTVAL   => \$explicit_run,
+		      TYPE        => 'bool',
 		      REQUIRED    => 0,
 		      HIDDEN      => 1,
 		      SMRY_DESC   => ($run &&
@@ -4886,6 +6103,7 @@ sub addRunModeOptions
 	    #Add --dry-run as a shown optional opt using addOption
 	    addOption(GETOPTKEY   => 'dry-run',
 		      GETOPTVAL   => \$explicit_dry_run,
+		      TYPE        => 'bool',
 		      REQUIRED    => 0,
 		      HIDDEN      => 0,
 		      SMRY_DESC   => $dry_run_smry,
@@ -4896,6 +6114,7 @@ sub addRunModeOptions
 	    #Add --run as a shown optional opt using addOption
 	    addOption(GETOPTKEY   => 'run',
 		      GETOPTVAL   => \$explicit_run,
+		      TYPE        => 'bool',
 		      REQUIRED    => 0,
 		      HIDDEN      => 0,
 		      SMRY_DESC   => $run_smry,
@@ -4904,6 +6123,7 @@ sub addRunModeOptions
 	    #Add --dry-run as a hidden optional opt using addOption
 	    addOption(GETOPTKEY   => 'dry-run',
 		      GETOPTVAL   => \$explicit_dry_run,
+		      TYPE        => 'bool',
 		      REQUIRED    => 0,
 		      HIDDEN      => 1,
 		      SMRY_DESC   => ($dry_run &&
@@ -4917,6 +6137,7 @@ sub addRunModeOptions
 	    #Add --run as a shown optional opt using addOption
 	    addOption(GETOPTKEY   => 'run',
 		      GETOPTVAL   => \$explicit_run,
+		      TYPE        => 'bool',
 		      REQUIRED    => 0,
 		      HIDDEN      => 0,
 		      SMRY_DESC   => $run_smry,
@@ -4925,6 +6146,7 @@ sub addRunModeOptions
 	    #Add --dry-run as a shown optional opt using addOption
 	    addOption(GETOPTKEY   => 'dry-run',
 		      GETOPTVAL   => \$explicit_dry_run,
+		      TYPE        => 'bool',
 		      REQUIRED    => 0,
 		      HIDDEN      => 0,
 		      SMRY_DESC   => $dry_run_smry,
@@ -4936,6 +6158,7 @@ sub addRunModeOptions
 	    #Add --usage as a shown optional opt using addOption
 	    addOption(GETOPTKEY   => 'usage',
 		      GETOPTVAL   => \$explicit_usage,
+		      TYPE        => 'bool',
 		      REQUIRED    => 0,
 		      HIDDEN      => 0,
 		      SMRY_DESC   => $usage_smry,
@@ -4944,6 +6167,7 @@ sub addRunModeOptions
 	    #Add --help as a hidden optional opt using addOption
 	    addOption(GETOPTKEY   => 'help',
 		      GETOPTVAL   => \$explicit_help,
+		      TYPE        => 'bool',
 		      REQUIRED    => 0,
 		      HIDDEN      => 1,
 		      SMRY_DESC   => (($help && defined($help_smry) &&
@@ -4956,6 +6180,7 @@ sub addRunModeOptions
 	    #Add --usage as a hidden optional opt using addOption
 	    addOption(GETOPTKEY   => 'usage',
 		      GETOPTVAL   => \$explicit_usage,
+		      TYPE        => 'bool',
 		      REQUIRED    => 0,
 		      HIDDEN      => 1,
 		      SMRY_DESC   => (($usage && defined($usage_smry) &&
@@ -4966,6 +6191,7 @@ sub addRunModeOptions
 	    #Add --help as a shown optional opt using addOption
 	    addOption(GETOPTKEY   => 'help',
 		      GETOPTVAL   => \$explicit_help,
+		      TYPE        => 'bool',
 		      REQUIRED    => 0,
 		      HIDDEN      => 0,
 		      SMRY_DESC   => $help_smry,
@@ -4976,6 +6202,7 @@ sub addRunModeOptions
 	    #Add --usage as a shown optional opt using addOption
 	    addOption(GETOPTKEY   => 'usage',
 		      GETOPTVAL   => \$explicit_usage,
+		      TYPE        => 'bool',
 		      REQUIRED    => 0,
 		      HIDDEN      => 0,
 		      SMRY_DESC   => (($default_run_mode eq 'usage' &&
@@ -4987,6 +6214,7 @@ sub addRunModeOptions
 	    #Add --help as a shown optional opt using addOption
 	    addOption(GETOPTKEY   => 'help',
 		      GETOPTVAL   => \$explicit_help,
+		      TYPE        => 'bool',
 		      REQUIRED    => 0,
 		      HIDDEN      => 0,
 		      SMRY_DESC   => $help_smry,
@@ -4998,6 +6226,7 @@ sub addRunModeOptions
 	#Add --usage as shown optional opt using addOption
 	addOption(GETOPTKEY   => 'usage',
 		  GETOPTVAL   => \$explicit_usage,
+		  TYPE        => 'bool',
 		  REQUIRED    => 0,
 		  HIDDEN      => 0,
 		  SMRY_DESC   => $usage_smry,
@@ -5006,6 +6235,7 @@ sub addRunModeOptions
 	#Add --help as a shown optional opt using addOption
 	addOption(GETOPTKEY   => 'help',
 		  GETOPTVAL   => \$explicit_help,
+		  TYPE        => 'bool',
 		  REQUIRED    => 0,
 		  HIDDEN      => 0,
 		  SMRY_DESC   => $help_smry,
@@ -5014,6 +6244,7 @@ sub addRunModeOptions
 	#Add --run as a shown optional opt using addOption
 	addOption(GETOPTKEY   => 'run',
 		  GETOPTVAL   => \$explicit_run,
+		  TYPE        => 'bool',
 		  REQUIRED    => 0,
 		  HIDDEN      => 0,
 		  SMRY_DESC   => $run_smry,
@@ -5022,11 +6253,288 @@ sub addRunModeOptions
 	#Add --dry-run as a shown optional opt using addOption
 	addOption(GETOPTKEY   => 'dry-run',
 		  GETOPTVAL   => \$explicit_dry_run,
+		  TYPE        => 'bool',
 		  REQUIRED    => 0,
 		  HIDDEN      => 0,
 		  SMRY_DESC   => $dry_run_smry,
 		  DETAIL_DESC => $dry_run_desc);
       }
+  }
+
+#This adds all the builtin options like verbose, overwrite, etc..  All these
+#options are highly integrated into all functionality and cannot be disabled.
+#However future versions of this module may allow them to be hidden.
+#Globals used: $overwrite,$skip_existing,$append,$force,$verbose,$quiet,$DEBUG,
+#              $extended,$version,$header,$error_limit,$use_as_default,
+#              $user_collide_mode,$pipeline_mode,$error_limit_default
+sub addBuiltinOptions
+  {
+    #short_descs extended 0
+    my $extended_short = 'Print detailed usage.';
+
+    #long_descs extended 1
+    my $verbose_long   = 'Verbose mode.';
+
+    my $quiet_long     = 'Quiet mode.';
+
+    my $overwrite_long = join('',('Overwrite existing output files.  By ',
+				  'default, existing output files will not ',
+				  'be over-written.  Mutually exclusive with ',
+				  '--skip and --append.'));
+
+    my $skip_long      = join('',('Skip existing output files.  Mutually ',
+				  'exclusive with --overwrite and --append.'));
+
+    my $header_long    = join('',('Outfile header flag.  Headers are ',
+				  "commented with '#' and include script ",
+				  'version, date, and command line call at',
+				  ' the top of every output file.  See ',
+				  '--extended.'));
+
+    my $version_long   = 'Print version info.  See --extended.';
+
+    my $extended_long  = join('',('Print extended usage/help/version/header ',
+				  '(and errors/ warnings where noted).  ',
+				  'Supply alone for extended usage.  ',
+				  'Includes extended version in output file ',
+				  'headers.  Incompatible with --noheader.  ',
+				  'See --help & --version.'));
+
+    #long_descs - extended 2 (advanced)
+    my $force_long     = join('',('Prevent script-exit upon fatal error.  ',
+				  'Use with extreme caution.  Will not ',
+				  'override overwrite protection (see ',
+				  '--overwrite or --skip).'));
+
+    my $debug_long     = join('',('Debug mode.  Prepends trace to warning/',
+				  'error messages.  Prints debug() messages ',
+				  'based on debug level.  Values less than 0 ',
+				  'debug the CommandLineInterface module ',
+				  'used by this script.'));
+
+    my $save_args_long = join('',('Save accompanying command line arguments ',
+				  'as defaults to be used in every call of ',
+				  'this script.  Replaces previously saved ',
+				  'args.  Supply without other args to ',
+				  'removed saved args.'));
+
+    my $pipeline_long  = join('',('Supply --pipeline to include the script ',
+				  'name in errors, warnings, and debug ',
+				  'messages.  If not supplied (and no ',
+				  'default set), the script will ',
+				  'automatically determine if it is running ',
+				  'within a series of piped commands or as a ',
+				  'part of a parent script.  Note, supplying ',
+				  'either flag will prevent that check from ',
+				  'happening.'));
+
+    my $errlim_long    = join('',('Limits each type of error/warning to this ',
+				  'number of outputs.  Intended to declutter ',
+				  'output.  Note, a summary of warning/error ',
+				  'types is printed when the script ',
+				  'finishes, if one occurred or if in ',
+				  'verbose mode.  0 = no limit.  See also ',
+				  '--quiet.'));
+
+    my $append_long    = join('',('Append mode.  Appends output to all ',
+				  'existing output files instead of skipping ',
+				  'or overwriting them.  This is useful for ',
+				  'checkpointed jobs on a cluster.  Mutually ',
+				  'exclusive with --overwrite and --skip.'));
+
+    #long_descs - hidden
+    my $collision_long = join('',('DEPRECATED.  When multiple input files ',
+				  'output to the same output file, this ',
+				  'option specifies what to do.  Merge mode ',
+				  'will concatenate output in the common ',
+				  'output file.  Rename mode (valid only if ',
+				  'this script accepts multiple types of ',
+				  'input files) will create a unique output ',
+				  'file name by appending a unique ',
+				  'combination ofinput file names together ',
+				  '(with a delimiting dot).  Rename mode ',
+				  'will throw an error if a unique file name ',
+				  'cannot be constructed (e.g. when 2 input ',
+				  'files of the same name in different ',
+				  'directories are outputting to a common ',
+				  'directory).  Error mode causes the script ',
+				  'to quit with an error if multiple input ',
+				  'files are detected to output to the same ',
+				  "output file.\n\nTHIS OPTION IS DEPRECATED ",
+				  'AND HAS BEEN REPLACED BY SUPPLYING ',
+				  'COLLISION MODE VIA addOutFileSuffixOption ',
+				  'AND addOutfileOption.  THIS OPTION ',
+				  'HOWEVER WILL OVERRIDE THE COLLISION MODE ',
+				  'OF ALL OUTFILE OPTIONS AND APPLY TO FILES ',
+				  'THAT ARE NOT DEFINED BY ',
+				  'addOutFileSuffixOption OR ',
+				  'addOutfileOption IF OPENED MULTIPLE TIMES ',
+				  'UNLESS SET EXPLICITLY IN THE openOut ',
+				  'CALL.'));
+
+    addOption(FLAG       => 'verbose',
+	      VARREF     => \$verbose,
+	      TYPE       => 'count',
+	      REQUIRED   => 0,
+	      DEFAULT    => 0,
+	      HIDDEN     => 0,
+	      SHORT_DESC => '',
+	      LONG_DESC  => $verbose_long,
+	      ACCEPTS    => undef,
+	      ADVANCED   => 0);
+    addOption(FLAG       => 'quiet',
+	      VARREF     => \$quiet,
+	      TYPE       => 'bool',
+	      REQUIRED   => 0,
+	      DEFAULT    => 0,
+	      HIDDEN     => 0,
+	      SHORT_DESC => '',
+	      LONG_DESC  => $quiet_long,
+	      ACCEPTS    => undef,
+	      ADVANCED   => 0);
+    addOption(FLAG       => 'overwrite',
+	      VARREF     => \$overwrite,
+	      TYPE       => 'count',
+	      REQUIRED   => 0,
+	      DEFAULT    => 0,
+	      HIDDEN     => 0,
+	      SHORT_DESC => '',
+	      LONG_DESC  => $overwrite_long,
+	      ACCEPTS    => undef,
+	      ADVANCED   => 0);
+    addOption(FLAG       => 'skip',
+	      VARREF     => \$skip_existing,
+	      TYPE       => 'bool',
+	      REQUIRED   => 0,
+	      DEFAULT    => 0,
+	      HIDDEN     => 0,
+	      SHORT_DESC => '',
+	      LONG_DESC  => $skip_long,
+	      ACCEPTS    => undef,
+	      ADVANCED   => 0);
+    addOption(FLAG       => 'header',
+	      VARREF     => \$header,
+	      TYPE       => 'negbool',
+	      REQUIRED   => 0,
+	      DEFAULT    => 0,
+	      HIDDEN     => 0,
+	      SHORT_DESC => '',
+	      LONG_DESC  => $header_long,
+	      ACCEPTS    => undef,
+	      ADVANCED   => 0);
+    addOption(FLAG       => 'version',
+	      VARREF     => \$version,
+	      TYPE       => 'bool',
+	      REQUIRED   => 0,
+	      DEFAULT    => 0,
+	      HIDDEN     => 0,
+	      SHORT_DESC => '',
+	      LONG_DESC  => $version_long,
+	      ACCEPTS    => undef,
+	      ADVANCED   => 0);
+    addOption(FLAG       => 'extended',
+	      VARREF     => \$extended,
+	      TYPE       => 'count',
+	      REQUIRED   => 0,
+	      DEFAULT    => 0,
+	      HIDDEN     => 0,
+	      SHORT_DESC => $extended_short,
+	      LONG_DESC  => $extended_long,
+	      ACCEPTS    => undef,
+	      ADVANCED   => 0);
+    addOption(FLAG       => 'force',
+	      VARREF     => \$force,
+	      TYPE       => 'count',
+	      REQUIRED   => 0,
+	      DEFAULT    => 0,
+	      HIDDEN     => 0,
+	      SHORT_DESC => '',
+	      LONG_DESC  => $force_long,
+	      ACCEPTS    => undef,
+	      ADVANCED   => 1);
+    addOption(FLAG       => 'debug',
+	      VARREF     => \$DEBUG,
+	      TYPE       => 'count',
+	      REQUIRED   => 0,
+	      DEFAULT    => 0,
+	      HIDDEN     => 0,
+	      SHORT_DESC => '',
+	      LONG_DESC  => $debug_long,
+	      ACCEPTS    => undef,
+	      ADVANCED   => 1);
+    addOption(FLAG       => 'save-args',
+	      VARREF     => \$use_as_default,
+	      TYPE       => 'bool',
+	      REQUIRED   => 0,
+	      DEFAULT    => 0,
+	      HIDDEN     => 0,
+	      SHORT_DESC => '',
+	      LONG_DESC  => $save_args_long,
+	      ACCEPTS    => undef,
+	      ADVANCED   => 1);
+    addOption(FLAG       => 'pipeline',
+	      VARREF     => \$pipeline_mode,
+	      TYPE       => 'negbool',
+	      REQUIRED   => 0,
+	      DEFAULT    => undef,
+	      HIDDEN     => 0,
+	      SHORT_DESC => '',
+	      LONG_DESC  => $pipeline_long,
+	      ACCEPTS    => undef,
+	      ADVANCED   => 1);
+    addOption(FLAG       => 'error-limit',
+	      VARREF     => \$error_limit,
+	      TYPE       => 'integer',
+	      REQUIRED   => 0,
+	      DEFAULT    => $error_limit_default,
+	      HIDDEN     => 0,
+	      SHORT_DESC => '',
+	      LONG_DESC  => $errlim_long,
+	      ACCEPTS    => undef,
+	      ADVANCED   => 1);
+    addOption(FLAG       => 'append',
+	      VARREF     => \$append,
+	      TYPE       => 'bool',
+	      REQUIRED   => 0,
+	      DEFAULT    => 0,
+	      HIDDEN     => 0,
+	      SHORT_DESC => '',
+	      LONG_DESC  => $append_long,
+	      ACCEPTS    => undef,
+	      ADVANCED   => 1);
+    addOption(FLAG       => 'collision-mode',
+	      VARREF     => \$user_collide_mode,
+	      TYPE       => 'enum',
+	      REQUIRED   => 0,
+	      DEFAULT    => getCollisionMode(),
+	      HIDDEN     => 1,
+	      SHORT_DESC => '',
+	      LONG_DESC  => $collision_long,
+	      ACCEPTS    => ['merge','rename','error'],
+	      ADVANCED   => 1);
+  }
+
+#This sub mainly adds little details to the usage and help output to explain
+#various built-in behaviors, relationships, and settings.  Should only be
+#called once.  E.g. It appends the location of the defaults_dir to the
+#--save-args usage.
+sub applyOptionAddendums
+  {
+    #Append the location of the defaults directory to the --save-args option
+    my $defdir = (defined($defaults_dir) ?
+		  $defaults_dir : (sglob('~/.rpst'))[0]);
+    $defdir = 'undefined' if(!defined($defdir));
+    my $saveargs_usg = getUsageHash('save-args');
+    $saveargs_usg->{DETAILS} .= "  Values are stored in [$defdir].";
+
+    #Append overwrite's outdir abilities if an outdir option exists
+    my $odf = getOutdirFlag();
+    my $overwrite_usg = getUsageHash('overwrite:+');
+    $overwrite_usg->{DETAILS} .= join('',('  Supply twice to safely remove ',
+					  'pre-existing output directories ',
+					  "(See $odf).  This will not remove ",
+					  'a directory containing manually ',
+					  'touched files.'));
   }
 
 #Uses globals: $explicit_dry_run, $explicit_run, $explicit_usage,
@@ -5055,13 +6563,6 @@ sub determineRunMode
       {
 	if($status == 0) #No required opts or all have values
 	  {$run = 1}
-	elsif($status == -1) #Required opts exist but value unknown
-	  {
-	    warning('Cannot determine if required options have been ',
-		    'supplied.  Assuming they were.  Silence this warning ',
-		    'by supplying --run (or --dry-run).');
-	    $run = 2;
-	  }
 	else #Required opts not supplied
 	  {
 	    if(!$real_args) #No opts supplied
@@ -5074,13 +6575,6 @@ sub determineRunMode
       {
 	if($status == 0) #No required opts or all have values
 	  {$dry_run = 1}
-	elsif($status == -1) #Required opts exist but value unknown
-	  {
-	    warning('Cannot determine if required options have been ',
-		    'supplied.  Assuming they were.  Silence this warning ',
-		    'by supplying --dry-run (or --run).');
-	    $dry_run = 2;
-	  }
 	else #Required opts not supplied
 	  {
 	    if(!$real_args) #No opts supplied
@@ -5098,18 +6592,6 @@ sub determineRunMode
 	    else
 	      {$usage = 1}
 	  }
-	elsif($status == -1) #Required opts exist but value unknown
-	  {
-	    if(!$real_args)
-	      {$usage = 1}
-	    else
-	      {
-		warning('Cannot determine if required options have been ',
-			'supplied.  Assuming they were.  Silence this ',
-			'error by supplying --run or --dry-run.');
-		$run = 2;
-	      }
-	  }
 	else #Required opts not supplied
 	  {
 	    if(!$real_args) #No opts supplied
@@ -5126,18 +6608,6 @@ sub determineRunMode
 	      {$run = 1}
 	    else
 	      {$help = 1}
-	  }
-	elsif($status == -1) #Required opts exist but value unknown
-	  {
-	    if(!$real_args)
-	      {$help = 1}
-	    else
-	      {
-		warning('Cannot determine if required options have been ',
-			'supplied.  Assuming they were.  Silence this ',
-			'error by supplying --run or --dry-run.');
-		$run = 2;
-	      }
 	  }
 	else #Required opts not supplied
 	  {
@@ -5176,7 +6646,8 @@ sub getRunModeStatus
     #$required_suffix_types,   #Array of arrays like [$idx,$suff_idx,$suff_id]
     #$required_outfile_types,  #Array of indexes
     #$required_outdirs,        #Integer/number
-    #$required_opt_refs        #Array of references to ? - must check
+    #$required_opt_refs        #Array of arrays of [references to ? - must
+    #                                               check,getoptstr,defstr]
 
     #If there are required input files
     if(scalar(@$required_infile_types) > 0)
@@ -5262,29 +6733,9 @@ sub getRunModeStatus
     if(scalar(@$required_opt_refs) > 0)
        {
 	 #For each general option type
-	 foreach my $opt_ref (@$required_opt_refs)
-	   {
-	     if(!defined($opt_ref))
-	       {return(1)}
-
-	     #Note, these are best guesses.  For example if the option takes an
-	     #array, and it's intended to be a 2D array and an empty inner
-	     #array is added to start, this would think values have been
-	     #supplied when essentially they haven't.  I should more
-	     #intelligently handle defaults for all types instead of just
-	     #default strings for usage display (e.g. 'none' for no default).
-	     #TODO: See req 214
-
-	     if(ref($opt_ref) eq 'SCALAR' && !defined($$opt_ref))
-	       {return(1)}
-	     elsif(ref($opt_ref) eq 'ARRAY' && scalar(@$opt_ref) == 0)
-	       {return(1)}
-	     elsif(ref($opt_ref) eq 'HASH' && scalar(keys(%$opt_ref)) == 0)
-	       {return(1)}
-	     elsif(ref($opt_ref) ne 'SCALAR' && ref($opt_ref) ne 'ARRAY' &&
-		   ref($opt_ref) ne 'HASH')
-	       {return(-1)}
-	   }
+	 foreach my $opt_info (@$required_opt_refs)
+	   {if(!wasGeneralOptionSupplied($opt_info))
+	      {return(1)}}
        }
 
     return(0);
@@ -5387,42 +6838,9 @@ sub doUnsetRequiredOptionsExist
        }
     #If there are required general options
     if(scalar(@$required_opt_refs) > 0)
-       {
-	 #For each general option type
-	 foreach my $opt_ref (@$required_opt_refs)
-	   {
-	     if(!defined($opt_ref))
-	       {return(1)}
-
-	     #Note, these are best guesses.  For example if the option takes an
-	     #array, and it's intended to be a 2D array and an empty inner
-	     #array is added to start, this would think values have been
-	     #supplied when essentially they haven't.  I should more
-	     #intelligently handle defaults for all types instead of just
-	     #default strings for usage display (e.g. 'none' for no default).
-	     #TODO: See req 214
-
-	     if(ref($opt_ref) eq 'SCALAR' && !defined($$opt_ref))
-	       {return(1)}
-	     elsif(ref($opt_ref) eq 'ARRAY' && scalar(@$opt_ref) == 0)
-	       {return(1)}
-	     elsif(ref($opt_ref) eq 'HASH' && scalar(keys(%$opt_ref)) == 0)
-	       {return(1)}
-	     elsif(ref($opt_ref) ne 'SCALAR' && ref($opt_ref) ne 'ARRAY' &&
-		   ref($opt_ref) ne 'HASH')
-	       {
-		 #There's no way to tell if a default exists for something like
-		 #a sub where the default may be set after.  We're going to
-		 #skip this so that execution can proceed.
-		 #TODO: See req 214
-		 warning('Unable to know if required option of type ',
-			 ref($opt_ref),' has been supplied or not.  This is ',
-			 'a current limitation of CommandLineInterface.  ',
-			 'Only options of type SCALAR or simple ARRAYs and ',
-			 'HASHes are supported.');
-	       }
-	   }
-       }
+       {foreach my $opt_info (@$required_opt_refs)
+	  {if(!wasGeneralOptionSupplied($opt_info))
+	     {return(1)}}}
 
     return(0);
   }
@@ -5443,9 +6861,10 @@ sub loadUserDefaults
     #Set user-saved defaults
     GetOptionsFromArray([@user_defaults],%$GetOptHash);
 
+    #Run mode may have been changed by the user via --save-args
     setDefaultRunMode();
 
-    updateTagteamDefaults();
+    updateDefaults(scalar(@user_defaults));
 
     debug({LEVEL => -1},"Default run mode after user: [$default_run_mode]");
 
@@ -5553,8 +6972,6 @@ sub setUserRunMode
 
 sub getOptions
   {
-    my $cleanup_mode = $_[0];
-
     #Get the input options & catch any errors in option parsing
     if(!GetOptions(%$GetOptHash))
       {
@@ -5570,6 +6987,7 @@ sub getOptions
 	$verbose     = 0 if(!defined($verbose));
 	$quiet       = 0 if(!defined($quiet));
 	$error_limit = 0 if(!defined($error_limit));
+	$extended    = 0 if(!defined($extended));
 
 	#This will set the usage, run, etc vars in a pinch
 	determineRunMode(1);
@@ -5579,8 +6997,12 @@ sub getOptions
 	      'correct the offending argument(s) and try again.');
 	usage(1);
 	quit(-12,0);
-	return(-12) if($cleanup_mode);
       }
+    #Else if there are no flagless options but unprocessed arguments
+    elsif((!defined($flagless_multival_type) || $flagless_multival_type < 0) &&
+       scalar(@ARGV))
+      {warning("Unprocessed/unrecognized command line arguments: [",
+	       join(' ',map {/\s/ ? "'$_'" : $_} @ARGV),"].")}
 
     #Set defaults if not defined - assumes command line has already been parsed
     $default_stub        = 'STDIN' unless(defined($default_stub));
@@ -5610,8 +7032,8 @@ sub getOptions
     #anticipate there will be messages printed on STDERR because either verbose
     #or DEBUG is true), guess - otherwise, do it lazily (in the warning or
     #error subs) because pgrep & lsof can be slow sometimes
-    if(!defined($pipeline_mode) && ($verbose || $DEBUG))
-      {$pipeline_mode = inPipeline()}
+#    if(!defined($pipeline_mode) && ($verbose || $DEBUG))
+#      {$pipeline_mode = inPipeline()}
 
     #Now that all the vars are set, flush the buffer if necessary
     flushStderrBuffer();
@@ -5631,13 +7053,33 @@ sub processCommandLine
     else
       {$processCommandLine_called = 1}
 
-    my $cleanup_mode = $explicit_quit && (!defined($force) || !$force);
-
     #In case the programmer did not add any in/out files/dirs, add defaults
     addDefaultFileOptions();
 
+    #Add the builtin options after the programmer's and default file opts
+    addBuiltinOptions();
+
+    #Clear out array defaults so that user defaults and user supplied values
+    #don't append to them, but rather set the arrays from scratch.  We will re-
+    #load them in loadDefaults (if the user didn't supply values).  We're doing
+    #this here instead of earlier because we have references to array variables
+    #in main and don't want to change them until the last moment (during
+    #processCommandLine) so that the programmer can access the default values
+    #they set before the user changes them.  And we need to do it before
+    #loading the user defaults so they won't be appended together with the
+    #programmer's defaults.
+    clearArrayDefaults();
+
     #Set user-saved defaults
     loadUserDefaults();
+
+    #Set the defaults for the usage
+    $extended_def      = $extended;
+    $verbose_def       = $verbose;
+    $DEBUG_def         = $DEBUG;
+    $force_def         = $force;
+    $overwrite_def     = $overwrite;
+    $pipeline_mode_def = $pipeline_mode;
 
     #Determine the default run mode (based possibly on user defaults)
     determineRunMode(1);
@@ -5646,10 +7088,14 @@ sub processCommandLine
     #...)).  We're doing this after setting user defaults because if required
     #options have defaults, we don't want the script to run without an explicit
     #option manually provided.
-    addRunModeOptions($cleanup_mode);
+    addRunModeOptions();
+
+    #Certain options need to get addendums or be modified after user defaults
+    #have been processed.  Mostly, these are automated notes added to the usage
+    applyOptionAddendums();
 
     #Get the input options & catch any errors in option parsing
-    my $status_code = getOptions($cleanup_mode);
+    my $status_code = getOptions();
     if($status_code && (!defined($force) || !$force))
       {return($status_code)}
 
@@ -5659,15 +7105,23 @@ sub processCommandLine
     #decide whether adding options is valid))
     $command_line_processed = 1;
 
+    #If we're in cleanup mode after a fatal error has occurred, quit has
+    #already been called and all we needed to do was make sure all the command
+    #line options had been added so that getOptions doesn't issue irrelevant
+    #warnings.
+    if($cleanup_mode > 1)
+      {
+	$command_line_processed = 2;
+	return(0);
+      }
+
     ##
     ## Validate Options
     ##
 
-    #Supply default input & output file(s) (indicated by the programmer) so
-    #that we can determine the run mode (e.g. run if all required options have
-    #values)
-    loadDefaultFiles();
-    loadDefaultOutdirs();
+    #Load all the previously saved default values for input files, output
+    #files, output directories, arrays, and 2D arrays
+    loadDefaults();
 
     #Allow the user to over-ride the run mode explicitly
     determineRunMode();
@@ -5722,7 +7176,6 @@ sub processCommandLine
 	error('No input detected.');
 	usage(1);
 	quit(-15);
-	return(-15) if($cleanup_mode);
       }
 
     #Make sure that the tagteams' suffix and outfile options' mutual
@@ -5744,10 +7197,11 @@ sub processCommandLine
       {
 	if(getNumInfileTypes() == 0 ||
 	   (scalar(@{$input_files_array->[$req_type]}) == 0 &&
-	    ($req_type != $primary_infile_type ||
-	     isStandardInputFromTerminal())))
+	    (defined($primary_infile_type) &&
+	     ($req_type != $primary_infile_type ||
+	      isStandardInputFromTerminal()))))
 	  {
-	    my $iflag = getFileFlag($req_type);
+	    my $iflag = getInfileFlag($req_type);
 	    push(@$missing_flags,
 		 (defined($iflag) && $iflag ne '' ?
 		  $iflag : 'internal error'));
@@ -5775,7 +7229,7 @@ sub processCommandLine
 	   #    isStandardOutputToTerminal())
 	  )
 	  {
-	    my $iflag = getFileFlag($req_type);
+	    my $iflag = getInfileFlag($req_type);
 	    push(@$missing_flags,
 		 (defined($iflag) && $iflag ne '' ?
 		  $iflag : 'internal error'));
@@ -5793,61 +7247,20 @@ sub processCommandLine
       }
 
     #Now let's check other options
-    #TODO: Must see if the flag was supplied on the command line.
-    #      See Requirement 210
     #If there are required general options
     if(scalar(@$required_opt_refs) > 0)
        {
 	 #For each general option type
-	 foreach my $reqd_opt_ref (@$required_opt_refs)
+	 foreach my $opt_info (@$required_opt_refs)
 	   {
-	     my $unknown             = 0;
-	     my $opt_ref_defficiency = 0;
-
-	     if(!defined($reqd_opt_ref))
-	       {$opt_ref_defficiency = 1}
-
-	     #Note, these are best guesses.  For example if the option takes an
-	     #array, and it's intended to be a 2D array and an empty inner
-	     #array is added to start, this would think values have been
-	     #supplied when essentially they haven't.  I should more
-	     #intelligently handle defaults for all types instead of just
-	     #default strings for usage display (e.g. 'none' for no default).
-	     #TODO: See req 214
-
-	     if(ref($reqd_opt_ref) eq 'SCALAR' && !defined($$reqd_opt_ref))
-	       {$opt_ref_defficiency = 1}
-	     elsif(ref($reqd_opt_ref) eq 'ARRAY' &&
-		   scalar(@$reqd_opt_ref) == 0)
-	       {$opt_ref_defficiency = 1}
-	     elsif(ref($reqd_opt_ref) eq 'HASH' &&
-		   scalar(keys(%$reqd_opt_ref)) == 0)
-	       {$opt_ref_defficiency = 1}
-	     elsif(ref($reqd_opt_ref) ne 'SCALAR' &&
-		   ref($reqd_opt_ref) ne 'ARRAY' &&
-		   ref($reqd_opt_ref) ne 'HASH')
-	       {$unknown = 1}
-
-	     if($opt_ref_defficiency)
+	     if(!wasGeneralOptionSupplied($opt_info))
 	       {
 		 $requirement_defficiency = 1;
 		 push(@$missing_flags,
-		      (exists($general_flag_hash->{$reqd_opt_ref}) &&
-		       defined($general_flag_hash->{$reqd_opt_ref}) ?
-		       $general_flag_hash->{$reqd_opt_ref} :
+		      (exists($general_flag_hash->{$opt_info->[0]}) &&
+		       defined($general_flag_hash->{$opt_info->[0]}) ?
+		       $general_flag_hash->{$opt_info->[0]} :
 		       'internal error'));
-	       }
-	     elsif($unknown)
-	       {
-		 #There's no way to tell if a default exists for something like
-		 #a sub where the default may be set after.  We're going to
-		 #skip this so that execution can proceed.
-		 #TODO: See req 214
-		 warning('Unable to know if required option of type ',
-			 ref($reqd_opt_ref),' has been supplied or not.  ',
-			 'This is a current limitation of ',
-			 'CommandLineInterface.  Only options of type SCALAR ',
-			 'or simple ARRAYs and HASHes are supported.');
 	       }
 	   }
        }
@@ -5861,10 +7274,9 @@ sub processCommandLine
 		 {DETAIL =>
 		  join('These pairs of flags each specify a different way of ',
 		       'naming output files for the same output.  You can ',
-		       'either specify an output file using a suffix/',
-		       'extension to be appended to an input file name or ',
-		       'you can supply a full filename, but not both at the ',
-		       'same time.')});
+		       'either specify an output file using a suffix to be ',
+		       'appended to an input file name or you can supply a ',
+		       'full filename, but not both at the same time.')});
 	 }
 
 	if($requirement_defficiency)
@@ -5872,7 +7284,6 @@ sub processCommandLine
 
 	usage(1);
 	quit(-17,0);
-	return(-17) if($cleanup_mode);
       }
 
     if(scalar(@$required_relationships))
@@ -5891,8 +7302,10 @@ sub processCommandLine
 	error("An outfile suffix is required if an output directory is ",
 	      "supplied.");
 	quit(-18,0);
-	return(-18) if($cleanup_mode);
       }
+
+    unless(validateNonFileOptions())
+      {quit(-94)}
 
     #If there are no files and we're in cleanup mode, we have already processed
     #the options to get things like verbose, debug, etc. and that's all we
@@ -5926,6 +7339,28 @@ sub processCommandLine
     $command_line_processed = 2;
 
     return(0);
+  }
+
+#After the command line has been parsed, supply default values to any options
+#that weren't supplied on the command line
+sub loadDefaults
+  {
+    loadDefaultArrays();
+
+    #Supply default input & output file(s) (indicated by the programmer) so
+    #that we can determine the run mode (e.g. run if all required options have
+    #values)
+    loadDefaultFiles();
+    loadDefaultOutdirs();
+  }
+
+sub loadDefaultArrays
+  {
+    foreach my $array_ref (keys(%$array_defaults_hash))
+      {if(scalar(@{$array_defaults_hash->{$array_ref}->{VALUES}}) == 0 &&
+	  scalar(@{$array_defaults_hash->{$array_ref}->{DEFAULTS}}))
+	 {@{$array_defaults_hash->{$array_ref}->{VALUES}} =
+	    @{$array_defaults_hash->{$array_ref}->{DEFAULTS}}}}
   }
 
 sub loadDefaultFiles
@@ -6027,8 +7462,7 @@ sub loadDefaultFiles
 
 		if($an_error)
 		  {
-		    $all_err_globs .= ($error_status ? ' ' : '') .
-		      getFileFlag($i) . ' "' . $err_globs . '"';
+		    $all_err_globs .= ($error_status ? ' ' : '') . $err_globs;
 		    $error_status = 1;
 
 		    if(scalar(grep {$_ == $i} @$required_infile_types))
@@ -6040,30 +7474,24 @@ sub loadDefaultFiles
 	  }
       }
 
-    #If there was an error (some default files not found
+    #If there was an error (e.g. some default files not found)
     if($error_status)
       {
 	#If a portion of the patterns did match existing files
 	if($got_some)
 	  {
-	    error("Some of the expected default input files were found (not ",
-		  "shown), but those matching this flag & file pattern: ",
-		  "[$all_err_globs] could not be found.  Unable to proceed.  ",
-		  "Please create the default files, make sure the patterns ",
-		  "match the expected files, or supply them explicitly.  See ",
-		  "the usage for the indicated flags for more details.");
+	    error("Some of the expected default input files were not found: ",
+		  "[$all_err_globs].  Unable to proceed.  Please create the ",
+		  "default files.");
 	    usage();
 	    quit(-19);
 	  }
 	#If one of the file types is a required option
 	elsif($some_required)
 	  {
-	    error("Expected required default input files matching this flag ",
-		  "& file pattern: [$all_err_globs] could not be found.  ",
-		  "Unable to proceed.  Please create the default files, make ",
-		  "sure the patterns match the expected files, or supply ",
-		  "them explicitly.  See the usage for the indicated flag(s) ",
-		  "for more details.");
+	    error("Expected required default input files were not found: ",
+		  "[$all_err_globs].  Unable to proceed.  Please create the ",
+		  "default files.");
 	    usage();
 	    quit(-20);
 	  }
@@ -6076,7 +7504,9 @@ sub loadDefaultOutdirs
     if(!$outdirs_added || scalar(@$default_outdirs_array) == 0)
       {return()}
 
-    @$outdirs_array = @$default_outdirs_array;
+    #If there were no outdirs supplied on the command line
+    if(scalar(@$outdirs_array) == 0)
+      {@$outdirs_array = @$default_outdirs_array}
   }
 
 sub requireFileRelationships
@@ -6101,21 +7531,18 @@ sub requireFileRelationships
 	    if(isFileTypeRequired($test_ftype))
 	      {
 		my $hid = isFileTypeHidden($test_ftype);
-		if($hid && $test_ftype == $primary_infile_type)
+		if($hid && defined($primary_infile_type) &&
+		   $test_ftype == $primary_infile_type)
 		  {error("Input file supplied via standard input redirect is ",
 			 "required.")}
-		elsif(!$hid && $test_ftype != $primary_infile_type)
-		  {error("Input file supplied via flag [",
-			 getFileFlag($test_ftype),"] is required.")}
-		elsif(!$hid && $test_ftype == $primary_infile_type)
-		  {error("Input file supplied by either standard input ",
-			 "redirect or via flag [",getFileFlag($test_ftype),
-			 "] is required.")}
+		elsif(!$hid)
+		  {error("Input file(s): [",getInfileFlag($test_ftype),
+			 "] are required.")}
 		else
 		  {
 		    #This shouldn't happen, but putting it here just in case
 		    error("Input file supplied by hidden flag [",
-			  getFileFlag($test_ftype),"] is required.");
+			  getInfileFlag($test_ftype,-1),"] is required.");
 		  }
 		$relationship_violation = 1;
 	      }
@@ -6130,11 +7557,10 @@ sub requireFileRelationships
 	       scalar(@{$test_files->[0]}) != $static_num_files)
 	      {
 		my $numf = scalar(map {scalar(@$_)} @$test_files);
-		error("Only [$static_num_files] file",($static_num_files > 1 ?
-						       "s are" : " is"),
-		      " permitted for a single instance of flag [",
-		      getFileFlag($test_ftype),"], but [$numf] (",
-		      join(',',map {scalar(@$_)} @$test_files),
+		error("Exactly [$static_num_files] file",
+		      ($static_num_files > 1 ? "s are " : " is "),
+		      "expected via [",getInfileFlag($test_ftype),"], but ",
+		      "[$numf] (",join(',',map {scalar(@$_)} @$test_files),
 		      ") ",($numf != 1 ? 'were' : 'was')," supplied.");
 		$relationship_violation = 1;
 	      }
@@ -6154,8 +7580,8 @@ sub requireFileRelationships
 #	#are checked elsewhere.
 #	if(scalar(@$valid_files) == 0)
 #	  {
-#	    error("File type: [",getFileFlag($test_ftype),"] requires at ",
-#		  "least 1 file of type: [",getFileFlag($valid_ftype),
+#	    error("File type: [",getInfileFlag($test_ftype),"] requires at ",
+#		  "least 1 file of type: [",getInfileFlag($valid_ftype),
 #		  "] to be present, however none were supplied.");
 #	    $relationship_violation = 1;
 #	    next;
@@ -6165,15 +7591,13 @@ sub requireFileRelationships
 	  {
 	    if(!twoDArraysAre1toM($test_files,$valid_files))
 	      {
-		error("There may be only 1 file of type: [",
-		      getFileFlag($test_ftype),"] (overall or) for each file ",
-		      "group of type: [",getFileFlag($valid_ftype),
-		      "], however there were these numbers of files supplied ",
-		      "to each occurrence of flag: [",
-		      join(',',map {scalar(@$_)} @$test_files),"], which ",
-		      "does not match the number of groups for flag [",
-		      getFileFlag($valid_ftype),"]: [",scalar(@$valid_files),
-		      "].");
+		error("There may be only 1 file supplied as: [",
+		      getInfileFlag($test_ftype),"] for each file ",
+		      "group supplied as: [",getInfileFlag($valid_ftype),
+		      "], however there were: [",
+		      join(',',map {scalar(@$_)} @$test_files),"] files ",
+		      "supplied with [",scalar(@$valid_files),"] files ",
+		      "respectively.");
 		$relationship_violation = 1;
 	      }
 	  }
@@ -6183,12 +7607,12 @@ sub requireFileRelationships
 	    #arrays are not the same size
 	    if(!twoDArraysAre1to1($test_files,$valid_files))
 	      {
-		error("The number and group sizes of files supplied with ",
-		      "flags [",getFileFlag($test_ftype),"] and [",
-		      getFileFlag($valid_ftype),"] must be the same, but ",
+		error("The number and group sizes of files supplied as [",
+		      getInfileFlag($test_ftype),"] and [",
+		      getInfileFlag($valid_ftype),"] must be the same, but ",
 		      "there were [",join(',',map {scalar(@$_)} @$test_files),
 		      "] and [",join(',',map {scalar(@$_)} @$valid_files),
-		      "] files supplied to each flag respectively.");
+		      "] files supplied.");
 		$relationship_violation = 1;
 	      }
 	  }
@@ -6205,13 +7629,13 @@ sub requireFileRelationships
 				 scalar(@{$valid_files->[$_]})}
 		       0..$#{$test_files})))
 	      {
-		error("The number and group sizes of files supplied with ",
-		      "flags [",getFileFlag($test_ftype),"] and [",
-		      getFileFlag($valid_ftype),"] must either be the same, ",
-		      "or there must be a one to many relationship, but ",
-		      "there were [",join(',',map {scalar(@$_)} @$test_files),
+		error("The number and group sizes of files supplied as [",
+		      getInfileFlag($test_ftype),"] and [",
+		      getInfileFlag($valid_ftype),"] must either be the ",
+		      "same or have a one to many relationship, but there ",
+		      "were [",join(',',map {scalar(@$_)} @$test_files),
 		      "] and [",join(',',map {scalar(@$_)} @$valid_files),
-		      "] files supplied to each flag respectively.");
+		      "] files supplied.");
 		$relationship_violation = 1;
 	      }
 	  }
@@ -6225,8 +7649,8 @@ sub requireFileRelationships
 	  {
 	    error("Invalid relationship type (PAIR_RELAT): ",
 		  "[$relationship].  Unable to enforce relationship between ",
-		  "file types supplied by flags: [",getFileFlag($test_ftype),
-		  "(ID:[$test_ftype])",getFileFlag($valid_ftype),
+		  "file types supplied as: [",getInfileFlag($test_ftype),
+		  "(ID:[$test_ftype])",getInfileFlag($valid_ftype),
 		  "(ID:[$valid_ftype])].");
 	  }
       }
@@ -6603,15 +8027,17 @@ sub getSubParams
 
     my $checks = {};
 
-    foreach my $key (@$keys)
+    foreach my $key (map {split(/\|/,$_)} @$keys)
       {$checks->{$key} = 0}
 
-    if(scalar(@$reqd) != scalar(grep {exists($checks->{$_})} @$reqd))
+    if(scalar(map {split(/\|/,$_)} @$reqd) !=
+       scalar(grep {exists($checks->{$_})} map {split(/\|/,$_)} @$reqd))
       {
 	error("Invalid required keys parameter.  The required keys must be a ",
 	      "subset of all keys provided in the first parameter, but these ",
 	      "keys were not present: [",
-	      join(',',grep {!exists($checks->{$_})} @$reqd),"].");
+	      join(',',(grep {!exists($checks->{$_})} map {split(/\|/,$_)}
+			@$reqd)),"].");
 
 	quit(-23);
       }
@@ -6692,26 +8118,56 @@ sub getSubParams
 		    grep {$_ % 2 == 0} (0..$#{$unproc});
 	      }
 	  }
+	debug({LEVEL => -9},"A match? [$a_match] Non-matches? [",
+	      scalar(@nonmatches),"].");
       }
 
     #It should now be safe to instantiate a hash
     my $hash = {@$unproc};
 
+    #Check for missing required parameters
     my @missing = ();
     foreach my $rkey (@$reqd)
-      {if(!exists($hash->{$rkey}))
-	 {push(@missing,$rkey)}}
-
-    if(scalar(@missing))
       {
-	error("$sub: Required parameters missing: [",join(',',@missing),"].",
-	      ($processCommandLine_called ?
-	       '  Use --force to get past this error.' : ''));
+	my @aliases = split(/\|/,$rkey);
+	my $occurrences = scalar(grep {exists($hash->{$_})} @aliases);
+	if($occurrences == 0)
+	  {push(@missing,$rkey)}
+      }
+
+    #Check for duplicate parameters that are the result of using multiple
+    #aliases for the same parameter.
+    my @dupes = ();
+    foreach my $key (@$keys)
+      {
+	my @aliases = split(/\|/,$key);
+	my $occurrences = scalar(grep {exists($hash->{$_})} @aliases);
+	if($occurrences > 1)
+	  {push(@dupes,$key)}
+      }
+
+    if(scalar(@missing) || scalar(@dupes))
+      {
+	if(scalar(@missing))
+	  {error("$sub: Required parameters missing: [",join(',',@missing),
+		 "].",($processCommandLine_called ?
+		       '  Use --force to get past this error.' : ''))}
+	if(scalar(@dupes))
+	  {error("$sub: Duplicate parameter aliases encountered: [",
+		 join(',',@missing),"].",
+		 ($processCommandLine_called ?
+		  '  Use --force to get past this error.  Note, the value ' .
+		  'of the aliases will be randomly selected.' : ''))}
 	quit(-26);
       }
 
     #Convert each key into its supplied value (or undef)
-    $params = [map {exists($checks->{$_}) ? $hash->{$_} : undef} @$keys];
+    $params = [map {my @als = split(/\|/,$_);my($r);
+		    foreach my $flg (@als)
+		      {if(exists($checks->{$flg}) && exists($hash->{$flg}))
+			 {$r = $hash->{$flg};last;}}
+		    $r}
+	       @$keys];
 
     if(wantarray)
       {return(@$params)}
@@ -7083,15 +8539,15 @@ sub error
 	   $error_hash->{$caller_string}->{NUM} == $error_limit)
 	  {
 	    $error_string .=
-	      join('',($leader_string,"NOTE: Further errors of this ",
-		       "type will be suppressed.\n$leader_string",
-		       "Set --error-type-limit to 0 to turn off error ",
-		       "suppression\n"));
+	      join('',
+		   ($leader_string,"NOTE: Further errors of this type will ",
+		    "be suppressed.\n$leader_string",
+		    "Set --error-limit to 0 to turn off error suppression\n"));
 	    $simple_string .=
-	      join('',($simple_leader,"NOTE: Further errors of this ",
-		       "type will be suppressed.\n$simple_leader",
-		       "Set --error-type-limit to 0 to turn off error ",
-		       "suppression\n"));
+	      join('',
+		   ($simple_leader,"NOTE: Further errors of this type will ",
+		    "be suppressed.\n$simple_leader",
+		    "Set --error-limit to 0 to turn off error suppression\n"));
 	  }
 
 	if(defined($quiet))
@@ -7304,15 +8760,15 @@ sub warning
 	   $warning_hash->{$caller_string}->{NUM} == $error_limit)
 	  {
 	    $warning_string .=
-	      join('',($leader_string,"NOTE: Further warnings of this ",
-		       "type will be suppressed.\n$leader_string",
-		       "Set --error-type-limit to 0 to turn off error ",
-		       "suppression\n"));
+	      join('',
+		   ($leader_string,"NOTE: Further warnings of this type will ",
+		    "be suppressed.\n$leader_string",
+		    "Set --error-limit to 0 to turn off error suppression\n"));
 	    $simple_string .=
-	      join('',($simple_leader,"NOTE: Further warnings of this ",
-		       "type will be suppressed.\n$simple_leader",
-		       "Set --error-type-limit to 0 to turn off error ",
-		       "suppression\n"));
+	      join('',
+		   ($simple_leader,"NOTE: Further warnings of this type will ",
+		    "be suppressed.\n$simple_leader",
+		    "Set --error-limit to 0 to turn off error suppression\n"));
 	  }
 
 	if(defined($quiet))
@@ -7355,8 +8811,12 @@ sub warning
 ##
 sub getLine
   {
-    my @in = getSubParams([qw(HANDLE)],[qw(HANDLE)],[@_]);
-    my $file_handle = $in[0];
+    my @in = getSubParams([qw(HANDLE VERBOSELEVEL VERBOSEFREQ)],
+			  [qw(HANDLE)],
+			  [@_]);
+    my $file_handle   = $in[0];
+    my $verbose_level = defined($in[1]) ? $in[1] : 2;
+    my $verbose_freq  = defined($in[2]) ? $in[2] : 100;
 
     if(!defined($file_handle))
       {
@@ -7379,6 +8839,8 @@ sub getLine
 	    return(@{$infile_line_buffer->{$file_handle}->{FILE}},
 		   map
 		   {
+		     my $item = $_;
+
 		     #If carriage returns were substituted and we haven't
 		     #already issued a carriage return warning for this file
 		     #handle
@@ -7390,13 +8852,22 @@ sub getLine
 			 warning('Carriage returns were found in your file ',
 				 'and replaced with hard returns.');
 		       }
-		     split(/(?<=\n)/,$_);
+
+		     map {$infile_line_buffer->{$file_handle}->{COUNT}++;
+			  verboseOverMe({LEVEL     => $verbose_level,
+					 FREQUENCY => $verbose_freq},
+					"Reading line ",$infile_line_buffer
+					->{$file_handle}->{COUNT},".");
+			  $_}
+		     split(/(?<=\n)/,$item);
 		   } <$file_handle>);
 	  }
-	
+
 	#Otherwise return everything else
 	return(map
 	       {
+		 my $item = $_;
+
 		 #If carriage returns were substituted and we haven't already
 		 #issued a carriage return warning for this file handle
 		 if(s/\r\n|\n\r|\r/\n/g &&
@@ -7407,7 +8878,14 @@ sub getLine
 		     warning('Carriage returns were found in your file ',
 			     'and replaced with hard returns.');
 		   }
-		 split(/(?<=\n)/,$_);
+
+		 map {$infile_line_buffer->{$file_handle}->{COUNT}++;
+		      verboseOverMe({LEVEL     => $verbose_level,
+				     FREQUENCY => $verbose_freq},
+				    "Reading line ",$infile_line_buffer
+				    ->{$file_handle}->{COUNT},".");
+		      $_}
+		 split(/(?<=\n)/,$item);
 	       } <$file_handle>);
       }
 
@@ -7426,8 +8904,15 @@ sub getLine
 		warning('Carriage returns were found in your file and ',
 			'replaced with hard returns.');
 	      }
+
 	    @{$infile_line_buffer->{$file_handle}->{FILE}} =
-	      split(/(?<=\n)/,$line);
+	      map {$infile_line_buffer->{$file_handle}->{COUNT}++;
+		   verboseOverMe({LEVEL     => $verbose_level,
+				  FREQUENCY => $verbose_freq},"Reading line ",
+				 $infile_line_buffer->{$file_handle}->{COUNT},
+				 ".");
+		   $_}
+		split(/(?<=\n)/,$line);
 	  }
 	else
 	  {@{$infile_line_buffer->{$file_handle}->{FILE}} = ($line)}
@@ -7730,10 +9215,11 @@ sub sglob
 	      "Returning argument string: [($command_line_string)].");
 	return($command_line_string);
       }
-    #Else if the string contains unescaped spaces and does not contain escaped
-    #spaces, see if it's a single file (possibly with glob characters)
+    #Else if the string contains unescaped spaces, does not contain escaped
+    #spaces, and does not contain quotes, see if it's a single file (possibly
+    #with glob characters)
     elsif($command_line_string =~ /(?<!\\) / &&
-	  $command_line_string !~ /\\ /)
+	  $command_line_string !~ /\\ / && $command_line_string !~ /["']/)
       {
 	my $x = [bsd_glob($command_line_string,GLOB_CSH)];
 
@@ -7993,7 +9479,7 @@ sub getVersion
 		' Author:  Robert W. Leach',
 		' Contact: rleach@princeton.edu',
 		' Company: Princeton University',
-		' Copyright: 2017'));
+		' Copyright: 2018'));
       }
 
     return($version_message);
@@ -8021,11 +9507,12 @@ sub quit
 
     my $forced_past = 0;
 
-    #If explicit_quit is true and force is not defined or not true, it means
-    #quit has already been called and that subsequent calls to quit are coming
-    #from subs that quit here is calling, so just return so that the first call
-    #to quit can finish.
-    if($explicit_quit && (!defined($force) || !$force))
+    #If not in cleanup mode, explicit_quit is true, and force is not defined or
+    #not true, it means quit has already been called and that subsequent calls
+    #to quit are coming from printRunReport, flushStderrBuffer, or some deep
+    #sub that they called, so just return so that the first call to quit can
+    #finish.
+    if(!$cleanup_mode && $explicit_quit && (!defined($force) || !$force))
       {return($forced_past)}
 
     #If no exit code was provided, quit even if force is indicated. We're over-
@@ -8041,14 +9528,30 @@ sub quit
 	$errno = -1;
       }
 
-    #If there were no errors or we are not in force mode or (we are in force
-    #mode and the error is -1 (meaning an overwrite situation))
+    #We will not allow fatal quits to be forced
+    if($errno && $cleanup_mode && defined($force) && $force)
+      {error("Unable to force past a fatal error during command line cleanup/",
+	     "exit.",
+	     {DETAIL => join('',('To (possibly) force past this error, you ',
+				 'must be sure to call processCommandLine ',
+				 'explicitly in your code before quit is ',
+				 'first called (which may be in the END ',
+				 'block if you do not call it ',
+				 'explicitly).'))})}
+
+    #If there were no errors, we are not in force mode, (we are in force
+    #mode and the error is -1 (meaning an overwrite situation)), or we're in
+    #cleanup mode (i.e. we've been here before), allow quit to happen
     if($errno == 0 || !defined($force) || !$force ||
-       (defined($force) && $force && $errno == -1))
+       (defined($force) && $force && $errno == -1) ||
+       (defined($cleanup_mode) && $cleanup_mode))
       {
 	#If quit is called and gets here, setting this value prevents END from
 	#calling quit (creating a potential loop)
 	$explicit_quit = 1;
+
+	#Record whether or not we were in cleanup mode when we got here
+	my $prior_cleanup_mode = $cleanup_mode;
 
 	#During quitting upon successful completion of the script, we need to
 	#know whether to flush the buffer, print the run report, etc, so if the
@@ -8056,10 +9559,14 @@ sub quit
 	#programmer didn't write any code to process files), and there was no
 	#error, fully process the command line and allow the report to be
 	#generated (if deemed necessary later)
-	if($errno == 0 && !$processCommandLine_called)
+	if(!$cleanup_mode && $errno == 0 && !$processCommandLine_called)
 	  {
 	    debug({LEVEL => -1},
 		  "Calling processCommandLine during successful quit.");
+
+	    #Set cleanup mode so that if a fatal error happens from here, it
+	    #will cause an exit even if in force mode
+	    $cleanup_mode = 1;
 
 	    #Set the error code to whatever processCommandLine returns, in case
 	    #a fatal error occurs
@@ -8072,22 +9579,67 @@ sub quit
 	#that something went wrong in processing the default options or before
 	#all the options were setup if we've gotten here and processCommandLine
 	#was called yet the command line wasn't processed.
-	elsif(!$command_line_processed)
+	elsif(!$cleanup_mode && !$command_line_processed)
 	  {
-	    debug({LEVEL => -1},"Calling getOptions during successful quit.");
+	    #Set cleanup mode so that if a fatal error happens from here, it
+	    #will cause an exit even if in force mode
+	    $cleanup_mode = ($errno ? 2 : 1);
 
-	    getOptions($explicit_quit && (!defined($force) || !$force));
+	    if(!$processCommandLine_called)
+	      {
+		debug({LEVEL => -1},
+		      "Calling processCommandLine during successful quit.");
+		if(!$errno)
+		  {$errno = processCommandLine()}
+		else
+		  {processCommandLine()}
+	      }
+
+	    if(!$command_line_processed)
+	      {
+		debug({LEVEL => -1},
+		      "Calling getOptions during successful quit.");
+		getOptions();
+	      }
 
 	    #In this instance, we have not run the programmer's code, so
 	    #there's really no need for a run report
 	    $report = 0;
 	  }
 
+	#If there was no error, files were supplied by the user, but the file
+	#sets were not all iterated over, issue a warning
+	if($errno == 0 && scalar(@$input_file_sets) && $unproc_file_warn &&
+	   ((!defined($max_set_num) &&
+	     scalar(grep {my $s=$_;scalar(grep {defined($_)} @$s)}
+		    @$input_file_sets)) ||
+	    (defined($max_set_num) && $max_set_num < $#{$input_file_sets})))
+	  {warning((scalar(@$input_file_sets) && defined($max_set_num) ?
+		    $#{$input_file_sets} - $max_set_num :
+		    scalar(@$input_file_sets))," of ",
+		   scalar(@$input_file_sets)," file sets were not processed.",
+		   {DETAIL =>
+		    join('',('Unprocessed sets: [',
+			     join(';',
+				  map {my $s=$_;join(',',map {defined($_) ?
+								$_ : 'undef'}
+						     @$s)} @$input_file_sets),
+			     '].  This can happen when input and/or output ',
+			     'files supplied on the command line are not all ',
+			     'retrieved for processing upon the successful ',
+			     'end of the script.  If there was an error, ',
+			     'quit(ERRNO => #) should be used to avoid this ',
+			     'warning.  If there were no errors, and not ',
+			     'processing all files is a valid outcome, use ',
+			     'setDefaults(UNPROCFILEWARN => 0).'))})}
+
 	#Re-check the same exit conditions as were checked to get in here, just
 	#in case an error occurred during command line processing in the first
-	#case above
+	#case above (in which case, prior_cleanup_mode will be true - instead
+	#of cleanup_mode).
 	if($errno == 0 || !defined($force) || !$force ||
-	   (defined($force) && $force && $errno == -1))
+	   (defined($force) && $force && $errno == -1) ||
+	   (defined($prior_cleanup_mode) && $prior_cleanup_mode))
 	  {
 	    debug({LEVEL => -1},"Exit status: [$errno].  Report: [",
 		  (defined($report) ? $report : 'undef'),"].");
@@ -8379,8 +9931,8 @@ sub getFileSets
 						       $_ : 'undef'} @$tm) :
 				       'undef')} @{$_[3]}) .
 	    ')') : 'undef'),"].  Global collide mode: [",getCollisionMode(),
-	  "].  User over-ridden collide-mode: [$user_collide_mode].  ",
-	  "Programmer global collide-mode: [",
+	  "].  User over-ridden collision-mode: [$user_collide_mode].  ",
+	  "Programmer global collision-mode: [",
 	  (defined($def_collide_mode) ? $def_collide_mode : 'undef'),"]");
 
     debug({LEVEL => -1},"Called with outfile suffixes: [[",
@@ -8629,7 +10181,7 @@ sub getFileSets
 		if(!defined($urec))
 		  {error("Unable to determine default collision mode for ",
 			 "output file type [$fti,$sti].")}
-		#If the user supplied --collide-mode, the supplied mode might
+		#If the user supplied --collision-mode, the supplied mode might
 		#end up changed
 		else
 		  {$loc_collid_mode->[$fti]->[$sti] =
@@ -8790,9 +10342,9 @@ sub getFileSets
 	       ((ref($outdir_array) eq 'ARRAY' && scalar(@$outdir_array)) ||
 		ref(\$outdir_array) eq 'SCALAR'))
 	      {
-		error("You cannot use ",getOutdirFlag()," and embed a ",
-		      "directory path in the outfile stub.  Please use one ",
-		      "or the other.",
+		error("You cannot use an output directory [",getOutdirFlag(),
+		      "] and embed a directory path in the outfile stub at ",
+		      "the same time.  Please use one or the other.",
 		      {DETAIL =>
 		       join('',
 			    ('Any input file option (e.g. -i) can be treated ',
@@ -9453,9 +11005,9 @@ sub mkdirs
     my $local_dry_run   = defined($dry_run)   ? $dry_run   : 0;
     my $seen            = {};
 
-    #If --save-as-default was supplied, do not create any directories unless it
-    #is just the defaults directory, because otherwise the script is only going
-    #to save the command line options & quit
+    #If --save-args was supplied, do not create any directories unless it is
+    #just the defaults directory, because otherwise the script is only going to
+    #save the command line options & quit
     return($status) if(defined($use_as_default) && $use_as_default &&
 		       (scalar(@dirs) != 1 || $dirs[0] ne $defaults_dir));
 
@@ -9468,6 +11020,12 @@ sub mkdirs
 
 	    foreach my $dir (@dirlist)
 	      {
+		if(!defined($dir))
+		  {
+		    error("Undefined directory sent to mkdirs.");
+		    next;
+		  }
+
 		next if(exists($seen->{$dir}));
 
 		#If the directory exists and we're not going to overwrite it,
@@ -9507,7 +11065,7 @@ sub mkdirs
 			if(!$tmp_status)
 			  {
 			    $status = 0;
-			    push(@errored,"$dir $!");
+			    push(@errored,"[$dir]: $!");
 			  }
 		      }
 		  }
@@ -9673,7 +11231,7 @@ sub checkFile
     my $local_overwrite     = defined($overwrite) ? $overwrite : 0;
     my $local_skip_existing = defined($skip_existing) ? $skip_existing : 0;
 
-    if(-e $output_file)
+    if(-e $output_file && $output_file ne '/dev/null')
       {
 	debug({LEVEL => -2},"Output file: [$output_file] exists.");
 
@@ -9701,7 +11259,7 @@ sub checkFile
 		  "you may have multiple versions of this script running ",
 		  "simultaneously.  Please check your input files and ",
 		  "outfile suffixes to fix any conflicts or supply one of ",
-		  "the --skip-existing, --overwrite, or --append flags.")
+		  "the --skip, --overwrite, or --append flags.")
 	      unless($local_quiet);
 
 	    #An exit code of -1 will quit even if --force is supplied.  --force
@@ -9748,33 +11306,11 @@ sub openOut
 
     if(!defined($output_file))
       {
-	if(!$force)
-	  {
-	    error('File name not defined.  Unable to open for output.  ',
-		  'Supply --force to get past this error and send this ',
-		  'output to /dev/null.  Note, supply --force twice to send ',
-		  'this output to STDOUT.');
-	    quit(-47);
-	  }
-	elsif($force == 1)
-	  {
-	    $output_file = '/dev/null';
-	    warning('File name not defined.  Sending output to /dev/null ',
-		    'because --force was supplied.  Note, supply --force ',
-		    'twice to send this output to STDOUT.');
-	  }
-	elsif($force > 1)
-	  {
-	    $output_file = '-';
-	    warning('File name not defined.  Sending output to STDOUT ',
-		    'because --force was supplied twice.  Note, supply ',
-		    '--force once to send this output to /dev/null.');
-	  }
-	else
-	  {
-	    error('Internal error: Invalid value for $force variable.');
-	    quit(-48);
-	  }
+	#Quietly open /dev/null if not defined so that the programmer doesn't
+	#have to check if the user supplied an optional non-primary file type
+	$output_file = '/dev/null';
+	$status      = 0;
+	$local_quiet = 1;
       }
 
     debug({LEVEL=>-1},"openOut collision mode: [",
@@ -9922,8 +11458,8 @@ sub openOut
     debug({LEVEL => -3},"Output file is of type [",
 	  (ref($output_file) eq '' ? 'SCALAR' : ref($output_file)),'].');
 
-    #If there was no output file (or they explicitly sent in the STDOUT file
-    #handle) assume user is outputting to STDOUT
+    #If the output file is '-' or they explicitly sent in the STDOUT file
+    #handle, assume user is outputting to STDOUT
     if($output_file eq '-' || $file_handle eq *STDOUT)
       {
 	debug({LEVEL => -1},"Accepting output file handle(1): [STDOUT]",
@@ -9952,6 +11488,8 @@ sub openOut
 	#instead
 	if($file_handle ne *STDOUT)
 	  {
+	    ##TODO: See requirement #312
+	    open($file_handle,'>>/dev/stdout');
 	    $rejected_out_handles->{$file_handle}->{CURFILE} = 'STDOUT';
 	    $rejected_out_handles->{$file_handle}->{QUIET} = $local_quiet;
 	    $rejected_out_handles->{$file_handle}->{FILES}->{STDOUT} = 0;
@@ -10022,12 +11560,13 @@ sub openOut
                  unless($local_quiet)}
 	    else
 	      {verbose("[$output_file] Opened output file.")
-                 unless($local_quiet)}
+                 if(!$local_quiet && $status)}
 
 	    return($status);
 	  }
 
-	verbose("[$output_file] Opened output file.") unless($local_quiet);
+	verbose("[$output_file] Opened output file.")
+	  if(!$local_quiet && $status);
 
 	#Store info about the run as a comment at the top of the output
 	print $file_handle (getHeader()) if($local_header);
@@ -10244,31 +11783,32 @@ sub openIn
 
     if(!defined($input_file))
       {
-	error("Unable to open input file.  File name undefined.");
+	#We will return a bad status, but quietly open /dev/null to allow the
+	#programmer to not have to check the return value for non-primary
+	#optional files
+	$input_file = '/dev/null';
 	$status = 0;
+      }
+
+    #Open the input file
+    if(!open($file_handle,$input_file))
+      {
+	#Report an error and iterate if there was an error
+	error("Unable to open input file: [$input_file].  $!") if($status);
+
+	#If force is supplied less than twice, set status to
+	#unsuccessful/false, otherwise pretend everything's OK
+	$status = 0 if(!defined($force) || $force < 2);
       }
     else
       {
-	#Open the input file
-	if(!open($file_handle,$input_file))
-	  {
-	    #Report an error and iterate if there was an error
-	    error("Unable to open input file: [$input_file].  $!");
+	verbose('[',($input_file eq '-' ?
+		     (defined($default_stub) ? $default_stub : 'STDIN') :
+		     $input_file),
+		'] Opened input file.') if(!$local_quiet && $status);
 
-	    #If force is supplied less than twice, set status to
-	    #unsuccessful/false, otherwise pretend everything's OK
-	    $status = 0 if(!defined($force) || $force < 2);
-	  }
-	else
-	  {
-	    verbose('[',($input_file eq '-' ?
-			 (defined($default_stub) ? $default_stub : 'STDIN') :
-			 $input_file),
-		    '] Opened input file.') unless($local_quiet);
-
-	    $open_in_handles->{$file_handle}->{CURFILE} = $input_file;
-	    $open_in_handles->{$file_handle}->{QUIET}   = $local_quiet;
-	  }
+	$open_in_handles->{$file_handle}->{CURFILE} = $input_file;
+	$open_in_handles->{$file_handle}->{QUIET}   = $local_quiet || !$status;
       }
 
     return($status);
@@ -10355,7 +11895,7 @@ sub getUserDefaults
     if(open(DFLTS,$defaults_file))
       {
 	@$return_array = map {chomp;if($remove_quotes){s/^['"]//;s/["']$//}
-			      sglob($_)} <DFLTS>;
+			      join(' ',sglob($_))} <DFLTS>;
 	close(DFLTS);
       }
     elsif(-e $defaults_file)
@@ -10421,7 +11961,7 @@ sub saveUserDefaults
     my $defaults_file = (defined($defaults_dir) ?
 			 $defaults_dir : (sglob('~/.rpst'))[0]) . "/$script";
 
-    my $save_argv = [grep {$_ ne '--save-as-default'} @$argv];
+    my $save_argv = [grep {$_ ne '--save-args'} @$argv];
 
     debug({LEVEL => -99},"Defaults dir: [",
 	  (defined($defaults_dir) ? $defaults_dir : 'undef'),"].");
@@ -10553,10 +12093,13 @@ sub getHeader
 
     my $version_str = getVersion(1,2);
     $version_str =~ s/\n(?!#|\z)/\n#/sg;
+
+    my $host = exists($ENV{HOST}) ? $ENV{HOST} : `hostname`;
+
     $header_str = "$version_str\n" .
       '#User: ' . $ENV{USER} . "\n" .
 	'#Time: ' . scalar(localtime($^T)) . "\n" .
-	  '#Host: ' . $ENV{HOST} . "\n" .
+	  "#Host: $host\n" .
 	    '#PID: ' . $$ . "\n" .
 	      '#Directory: ' . $ENV{PWD} . "\n" .
 		'#Command: ' . scalar(getCommand(1)) . "\n\n";
@@ -10933,7 +12476,7 @@ sub makeCheckOutputs
 		  "This is a predicted overwrite situation that can only be ",
 		  "surpassed by providing unique suffixes for each file type ",
 		  "or by using --force combined with either --overwrite or ",
-		  "--skip-existing.");
+		  "--skip.");
 	    quit(-55);
 	  }
       }
@@ -10958,8 +12501,7 @@ sub makeCheckOutputs
 	      "Please make sure the corresponding similarly named input ",
 	      "files output to different directories.  This error may be ",
 	      "circumvented by --force and either --overwrite or ",
-	      "--skip-existing, but it is heavily discouraged - only use for ",
-	      "testing.");
+	      "--skip, but it is heavily discouraged - only use for testing.");
 	quit(-56);
       }
     #Quit if $unique_hash->{$outfile}->{$type}->{error} > 1 or
@@ -11025,7 +12567,7 @@ sub makeCheckOutputs
 			"`--collision-mode VALUE`, where VALUE={error,merge,",
 			"rename}.  To force past this error without changing ",
 			"the collision mode, use --force and either ",
-			"--overwrite or --skip-existing, but this is heavily ",
+			"--overwrite or --skip, but this is heavily ",
 			"discouraged - only use for testing."))});
 
 	#An exit code of -1 will quit even if --force is supplied.  --force
@@ -11071,8 +12613,7 @@ sub makeCheckOutputs
 	    else
 	      {
 		error("Output files exist: [",join(',',@$report_exist),
-		      "].  Use --overwrite, --append, or --skip-existing to ",
-		      "continue.");
+		      "].  Use --overwrite, --append, or --skip to continue.");
 		quit(-58);
 	      }
 	  }
@@ -11753,8 +13294,7 @@ sub processDefaultOptions
       {$outmode_check++ if($_)}
     if($outmode_check > 1)
       {
-	error('--overwrite, --skip-existing, and --append are mutually ',
-	      'exclusive.');
+	error('--overwrite, --skip, and --append are mutually exclusive.');
 	quit(-64);
       }
 
@@ -11800,7 +13340,11 @@ sub argsOrPipeSupplied
     my $run_num = scalar(grep {$_ eq '--usage' || $_ eq 'help' ||
 				 $_ eq '--run' || $_ eq '--dry-run'}
 			 @$preserve_args);
-    my $extended_num = scalar(grep {$_ eq '--extended'} @$preserve_args);
+    my $extended_num =
+      scalar(grep {$preserve_args->[$_] eq '--extended' ||
+		     ($_ > 0 && isInt($preserve_args->[$_]) &&
+		      $preserve_args->[$_ - 1] eq '--extended')}
+	     (0..$#{$preserve_args}));
     my $debug_num = scalar(grep {$preserve_args->[$_] eq '--debug' ||
 				   ($_ > 0 && isInt($preserve_args->[$_]) &&
 				    $preserve_args->[$_ - 1] eq '--debug')}
@@ -11817,7 +13361,21 @@ sub argsOrPipeSupplied
   }
 
 sub isInt
-  {return(defined($_[0]) && $_[0] =~ /^[\+\-]?\d+$/)}
+  {
+    my $flt = $_[0];
+    if($flt =~ /[+\-]?\d+([eE][+\-]?(\d+))?/)
+      {return(1)}
+    return(0);
+  }
+
+sub isFloat
+  {
+    my $flt = $_[0];
+    my $np = '\d+|\d+\.|\d+\.\d+|\.\d+';
+    if($flt =~ /[+\-]?($np)([eE][+\-]?($np))?/)
+      {return(1)}
+    return(0);
+  }
 
 #Globals used: $pipeline_mode
 sub flushStderrBuffer
@@ -11894,7 +13452,10 @@ sub flushStderrBuffer
 
     my $script = $0;
     $script =~ s/^.*\/([^\/]+)$/$1/;
-    if(!defined($pipeline_mode))
+
+    #Don't initialize pipeline_mode if printing usage so the default printed is
+    #accurate
+    if(!defined($pipeline_mode) && !$usage)
       {$pipeline_mode = inPipeline()}
 
     my $debug_num         = 0;
@@ -12001,7 +13562,7 @@ sub flushStderrBuffer
 	      join('',($tmp_ldr,"NOTE: Further ",
 		       ($type eq 'error' ? 'error': "warning"),"s of this ",
 		       "type will be suppressed.\n$tmp_ldr",
-		       "Set --error-type-limit to 0 to turn off error ",
+		       "Set --error-limit to 0 to turn off error ",
 		       "suppression\n"))
 		if(defined($error_limit) && $level == $error_limit);
 
@@ -12190,14 +13751,15 @@ sub isDryRun
 
 sub setDefaults
   {
-    my @in = getSubParams([qw(HEADER ERRLIMIT COLLISIONMODE DEFRUNMODE
-			      DEFSDIR)],
+    my @in = getSubParams([qw(HEADER ERRLIMIT COLLISIONMODE RUNMODE|DEFRUNMODE
+			      DEFSDIR UNPROCFILEWARN)],
 			  [],[@_]);
-    my $header_def    = $in[0];
-    my $errlimit_def  = $in[1];
-    my $colmode_def   = $in[2];
-    my $runmode_def   = $in[3];
-    my $defs_dir      = $in[4];
+    my $header_def     = $in[0];
+    my $errlimit_def   = $in[1];
+    my $colmode_def    = $in[2];
+    my $runmode_def    = $in[3];
+    my $defs_dir       = $in[4];
+    my $unprocwarn_def = $in[5];
 
     my $errors = 0;
 
@@ -12249,6 +13811,14 @@ sub setDefaults
 	$errors++;
       }
 
+    if(defined($unprocwarn_def) && $unprocwarn_def =~ /^\d+$/)
+      {$unproc_file_warn = $unprocwarn_def}
+    elsif(defined($unprocwarn_def))
+      {
+	error("Invalid UNPROCFILEWARN: [$unprocwarn_def].  Must be 0 or 1.");
+	$errors++;
+      }
+
     if($errors > 0)
       {
 	quit(-66);
@@ -12274,6 +13844,10 @@ sub help
     my @stat     = stat($script);
     my $ctime    = @stat && defined($stat[9]) ? $stat[9] : scalar(time);
     my $lmd      = localtime($ctime);
+
+    unless($processCommandLine_called)
+      {processCommandLine()}
+
     $script =~ s/^.*\/([^\/]+)$/$1/;
 
     $script_version_number = 'UNKNOWN'
@@ -12301,72 +13875,270 @@ $custom_help
 
 end_print
 
+    if($advanced)
+      {
+	my $legend = "USAGE LEGEND\n\n";
+	$legend .=
+	  alignCols(['*','=','Required option.'],
+		    [11,1],[0,1,1],[0,0,0]);
+	$legend .=
+	  alignCols(['~','=',
+		     join('',('Required option, but has a default value, thus ',
+			      'effectively optional.'))],
+		    [11,1],[0,1,1],[0,0,0]);
+	$legend .=
+	  alignCols(['^','=',
+		     join('',("Conditionally required option.  E.g. When 1 of ",
+			      "2 mutually exclusive options must be ",
+			      "supplied.  Note, if one of the 2 options has a ",
+			      "default value, '~' will be preferentially ",
+			      "displayed."))],
+		    [11,1],[0,1,1],[0,0,0]);
+	$legend .=
+	  alignCols(['...','=',
+		     join('',('Multiple flags or flag arguments may be ',
+			      'supplied.  E.g.:'))],
+		    [11,1],[0,1,1],[0,0,0]) . "\n";
+	$legend .=
+	  alignCols(['','','-f...','=',
+		     'Multiple instances of "-f" can be supplied.'],
+		    [11,1,14,1],[0,1,1,1,1],[0,0,0,0,0]);
+	$legend .=
+	  alignCols(['','','-f <arg...>','=',
+		     join('',('Multiple arguments can be supplied to "-f".'))],
+		    [11,1,14,1],[0,1,1,1,1],[0,0,0,0,0]);
+	$legend .=
+	  alignCols(['','','-f <arg...>...','=',
+		     join('',('Multiple instances of "-f" can be supplied, ',
+			      'each with multiple arguments.'))],
+		    [11,1,14,1],[0,1,1,1,1],[0,0,0,0,0]) . "\n";
+	$legend .=
+	  alignCols(['','',
+		     join('',("Argument delimiters may be displayed between ",
+			      "the argument and the ellipsis (e.g. comma ",
+			      "delimited would be displayed as: ",
+			      "'<arg,...>').   If the the delimiter is a ",
+			      "space, the arguments must all be grouped ",
+			      "inside a single pair of quotes or be escaped.  ",
+			      "Multiple sequential delimiters are all ",
+			      "condensed to 1 (e.g. '1,,,2' = '1,2').  A ",
+			      "special delimiting character of '*' indicates ",
+			      "that the argument will be (bsd) globbed (glob ",
+			      "patterns recognized: *,?,[],{}).  Only <file> ",
+			      "and <dir> types are globbed.  Glob patterns ",
+			      "must be inside quotes to associate all files ",
+			      "with the preceding flag.  If multi-character ",
+			      "delimiters are used, they will be detailed in ",
+			      "the description."))],
+		    [11,1],[0,1,1],[0,0,0]);
+	$legend .=
+	  alignCols(['[<arg>]','=',
+		     join('',('Flags with optional arguments (e.g. <cnt>) are ',
+			      'displayed inside square brackets.'))],
+		    [11,1],[0,1,1],[0,0,0]);
+	$legend .=
+	  alignCols(['[default]','=',
+		     join('',("An option's description starts with a ",
+			      "description of its default value, if it has a ",
+			      "default.  Note, default values are not ",
+			      "displayed if they are not defined.  ",
+			      "Additionally default values for flags that do ",
+			      "not take arguments are always false and are ",
+			      "not shown.  If negatable options (options that ",
+			      'have flags starting with or without "no" - ',
+			      'e.g. --flag or --noflag) have a default, only ',
+			      'the flag that is the opposite of the default ',
+			      'will be shown in the flag column.'))],
+		    [11,1],[0,1,1],[0,0,0]);
+	$legend .=
+	  alignCols(["<enum>\n<a,b,c>",'=',
+		     join('',("A flag that takes only one of a set of ",
+			      "specific strings is an 'enumeration' and is ",
+			      "indicated by the argument being represetned as ",
+			      "a list of acceptable values inside angle ",
+			      "brackets and delimited by '|'.  Long lists ",
+			      "will be truncated and appended to the ",
+			      "description."))],
+		    [11,1],[0,1,1],[0,0,0]);
+	$legend .=
+	  alignCols(['<cnt>','=',
+		     join('',('Count ("cnt") arguments are integer arguments ',
+			      'whose flags can be supplied multiple times ',
+			      'with or without the count argument argument ',
+			      "(i.e. they're always optional and shown inside ",
+			      'square brackets (see "[<arg>]" above)).  Each ',
+			      'occurrence of the flag without an argument ',
+			      'increments the count (from left to right) or ',
+			      'can be statically set by providing the integer ',
+			      'argument (negative values allowed).  Mixing ',
+			      'flags with and without the count argument can ',
+			      'produce unexpected results, so only use one ',
+			      'style or the other.  If the flag has a default ',
+			      'value, the count starts at that value.'))],
+		    [11,1],[0,1,1],[0,0,0]);
+	$legend .=
+	  alignCols(['<dir>','=',
+		     join('',('Directory.  Any dir type argument can be ',
+			      'supplied a BSD glob pattern (though they must ',
+			      'be inside quotes to associate them with the ',
+			      'accompanying flag).'))],
+		    [11,1],[0,1,1],[0,0,0]);
+	$legend .=
+	  alignCols(['<file>','=',
+		     join('',('Any file type argument can be given a single ',
+			      "dash character ('-') as an argument, which ",
+			      'stands for either "read from STDIN" or "write ',
+			      'to STDOUT", depending on the file flag type.  ',
+			      'Only one infile option can read from STDIN in ',
+			      'one run.  Any file type argument can be ',
+			      'supplied a BSD glob pattern (inside quotes).'))],
+		    [11,1],[0,1,1],[0,0,0]);
+	$legend .=
+	  alignCols(['<flt>','=',
+		     join('',('Float.  E.g. a number with a decimal value.  ',
+			      'Signed or unsigned.  Scientific notation is ',
+			      'allowed.'))],
+		    [11,1],[0,1,1],[0,0,0]);
+	$legend .=
+	  alignCols(['<int>','=',
+		     join('',('Integer argument.  Signed or unsigned.  ',
+			      'Scientific notation (without a decimal) is ',
+			      'allowed.'))],
+		    [11,1],[0,1,1],[0,0,0]);
+	$legend .=
+	  alignCols(['<sfx>','=',
+		     join('',('Suffix appended to input file names.  Note, a ',
+			      'dot is not added by default.  Providing an ',
+			      'empty string essentially creates an output ',
+			      'file name that is the same as the input file ',
+			      'name, but you will get an error unless ',
+			      '--overwrite is also provided.'))],
+		    [11,1],[0,1,1],[0,0,0]);
+	$legend .=
+	  alignCols(['<stub>','=',
+		     join('',('A stub argument must always be accompanied by ',
+			      'input on standard in.  A stub is used as a ',
+			      'file name prefix for input on standard in.  ',
+			      'Stubs get <sfx> appended to them, defined by ',
+			      'suffix options, to create an output file ',
+			      'name.  If no stub is provided, the default ',
+			      'stub used for input on standard in is ',
+			      '"STDIN".'))],
+		    [11,1],[0,1,1],[0,0,0]);
+	$legend .=
+	  alignCols(['STDIN','=',
+		     join('',('If "STDIN" is listed among an input file ',
+			      "option's flags, it means that if input on ",
+			      'standard in is detected, it will be treated as ',
+			      "an input file of this option's type.  Only 1 ",
+			      'input file option can read from STDIN.  If ',
+			      'there is no redirection on standard in, the ',
+			      'script will not wait for manual input from the ',
+			      'terminal.'))],
+		    [11,1],[0,1,1],[0,0,0]) . "\n";
+	$legend .=
+	  alignCols(['','','STDIN & -f <stub>','=',
+		     join('',('-f reads from STDIN by default & a stub can ',
+			      'optionally be supplied to name the input ',
+			      'file.'))],
+		    [11,1,17,1],[0,1,1,1,1],[0,0,0,0,0]);
+	$legend .=
+	  alignCols(['','','STDIN & -f -','=',
+		     join('',('STDIN can be directed to this file type ',
+			      "instead of the default by supplying '-f -'.  ",
+			      'Note, no stub can (yet) be set for infile ',
+			      'options that do not read from STDIN by ',
+			      'default.'))],
+		    [11,1,17,1],[0,1,1,1,1],[0,0,0,0,0]) . "\n";
+	$legend .=
+	  alignCols(['STDOUT','=',
+		     join('',('If "STDOUT" is listed among an output file ',
+			      "option's (or suffix option's) flags, it means ",
+			      'that output goes to standard out by default ',
+			      '(when no file name or suffix is defined).'))],
+		    [11,1],[0,1,1],[0,0,0]);
+
+	print($legend,"\n\n");
+      }
+
     if($advanced > 1 ||
        ($advanced == 1 && (!defined($advanced_help) || $advanced_help eq '')))
       {
 	my $header = '                 ' .
 	  join("\n                 ",split(/\n/,getHeader()));
 
-	my $odf = getOutdirFlag();
+	my $odf = getOutdirFlag(2);
+
+	print("ADVANCED\n========\n\n",
+	      alignCols(['* HEADER FORMAT:',
+			 join('',('Unless --noheader is supplied or STANDARD ',
+				  'output is going to the terminal (and not ',
+				  'redirected into a file), every output ',
+				  'file, including output to standard out, ',
+				  'will get a header that is commented using ',
+				  "the '#' character (i.e. each line of the ",
+				  "header will begin with '#').  The format ",
+				  'of the standard header looks like this:'))],
+			[16],[0,1],[0,0]),"\n",
+	      $header,"\n\n",
+	      "                 The header is important for 2 reasons:\n\n",
+	      alignCols(['1.',
+			 join('',('It records information about how the file ',
+				  'was created: user name, time, script ',
+				  'version information, and the command line ',
+				  'that was used to create it.'))],
+			[2],[17,1],[0,0]),"\n",
+	      alignCols(['2.',
+			 join('',('The header is used to confirm that a file ',
+				  'inside a directory that is to be output to ',
+				  '(using $odf) was created by this script ',
+				  'before deleting it when in overwrite ',
+				  'mode.  See OVERWRITE PROTECTION below.'))],
+			[2],[17,1],[0,0]),"\n",
+	      alignCols(['* OVERWRITE PROTECTION:',
+			 join('',('This script prevents the over-writing of ',
+				  'files (unless --overwrite is provided).  A ',
+				  'check is performed for pre-existing files ',
+				  'before any output is generated.  It will ',
+				  'even check if future output files will be ',
+				  'over-written in case two input files from ',
+				  'different directories have the same name ',
+				  'and a common $odf.  Furthermore, before ',
+				  'output starts to a given file, a last-',
+				  'second check is performed in case another ',
+				  'program or script instance is competing ',
+				  'for the same output file.  If such a case ',
+				  'is encountered, an error will be generated ',
+				  "and the file will always be skipped.\n\n",
+				  'Directories: When $odf is supplied with ',
+				  '--overwrite, the directory and its ',
+				  'contents will not be deleted.  If you ',
+				  'would like an output directory to be ',
+				  'automatically removed, supply --overwrite ',
+				  'twice on the command line.  The directory ',
+				  'will be removed, but only if all of the ',
+				  'files inside it can be confirmed to have ',
+				  'been created by a previous run of this ',
+				  'script.  For this, headers are required to ',
+				  'be in the files (i.e. the previous run ',
+				  'must not have included the --noheader ',
+				  'flag.  This requirement ensures that it is ',
+				  'very unlikely to accidentally delete ',
+				  'anything that is not intended to have been ',
+				  'deleted.  If a directory cannot be ',
+				  'emptied, the script will proceed with a ',
+				  'warning about any files in the output ',
+				  "directory it could not clean out.\n\nNote ",
+				  'that individual files bearing the same ',
+				  'name as a current output file will be ',
+				  'overwritten regardless of a header.'))],
+			[23],[0,1],[0,0]),"\n",
+	     );
+
 	print << "end_print";
-ADVANCED
-========
-
-* HEADER FORMAT: Unless --noheader is supplied or STANDARD output is going to
-                 the terminal (and not redirected into a file), every output
-                 file, including output to standard out, will get a header that
-                 is commented using the '#' character (i.e. each line of the
-                 header will begin with '#').  The format of the standard
-                 header looks like this:
-
-$header
-
-                 The header is important for 2 reasons:
-
-                 1. It records information about how the file was created: user
-                    name, time, script version information, and the command
-                    line that was used to create it.
-
-                 2. The header is used to confirm that a file inside a
-                    directory that is to be output to (using $odf) was
-                    created by this script before deleting it when in overwrite
-                    mode.  See OVERWRITE PROTECTION below.
-
-* OVERWRITE PROTECTION: This script prevents the over-writing of files (unless
-                        --overwrite is provided).  A check is performed for
-                        pre-existing files before any output is generated.  It
-                        will even check if future output files will be over-
-                        written in case two input files from different
-                        directories have the same name and a common $odf.
-                        Furthermore, before output starts to a given file, a
-                        last-second check is performed in case another program
-                        or script instance is competing for the same output
-                        file.  If such a case is encountered, an error will be
-                        generated and the file will always be skipped.
-
-                        Directories: When $odf is supplied with
-                        --overwrite, the directory and its contents will not be
-                        deleted.  If you would like an output directory to be
-                        automatically removed, supply --overwrite twice on the
-                        command line.  The directory will be removed, but only
-                        if all of the files inside it can be confirmed to have
-                        been created by a previous run of this script.  For
-                        this, headers are required to be in the files (i.e. the
-                        previous run must not have included the --noheader
-                        flag.  This requirement ensures that it is very
-                        unlikely to accidentally delete anything that is not
-                        intended to have been deleted.  If a directory cannot
-                        be emptied, the script will proceed with a warning
-                        about any files in the output directory it could not
-                        clean out.
-
-                        Note that individual files bearing the same name as a
-                        current output file will be overwritten regardless of a
-                        header.
-
 * ADVANCED USER DEFAULTS:
 
-If you find you are always supplying the same option over and over, you can save it as a default using the --save-as-default flag.  Run the script with --save-as-default along with the options and their values that you want to save and they will be included every time the script runs.  To clear the defaults, run the script with --save-as-default as the only parameter.
+If you find you are always supplying the same option over and over, you can save it as a default using the --save-args flag.  Run the script with --save-args along with the options and their values that you want to save and they will be included every time the script runs.  To clear the defaults, run the script with --save-args as the only parameter.
 
 Saving *one* of the following flags changes the "default run mode":
 
@@ -12383,14 +14155,9 @@ Only one mode may be saved as a default run mode.
 
 * ADVANCED FILE I/O FEATURES:
 
-Sets of input files, each with different output directories can be supplied.
-Supply each file set with an additional (e.g.) -i flag.  Wrap each set of files
-in quotes and separate them with spaces.
+Sets of input files, each with different output directories can be supplied.  Supply each file set with an additional (e.g.) -i flag.  Wrap each set of files in quotes and separate them with spaces.
 
-Output directories (e.g.) --outdir can be supplied multiple times in the same
-order so that each input file set can be output into a different directory.  If
-the number of files in each set is the same, you can supply all output
-directories as a single set instead of each having a separate --outdir flag.
+Output directories (e.g.) --outdir can be supplied multiple times in the same order so that each input file set can be output into a different directory.  If the number of files in each set is the same, you can supply all output directories as a single set instead of each having a separate --outdir flag.
 
 Examples:
 
@@ -12402,15 +14169,13 @@ Examples:
 
     Resulting file sets: 1/a,d  2/b,e  3/c,f
 
-If the number of files per set is the same as the number of directories in 1
-set are the same, this is what will happen:
+If the number of files per set is the same as the number of directories in 1 set are the same, this is what will happen:
 
   $0 -i 'a b' -i 'd e' --outdir '1 2'
 
     Resulting file sets: 1/a,d  2/b,e
 
-NOT this: 1/a,b 2/d,e  To do this, you must supply the --outdir flag for each
-set, like this:
+NOT this: 1/a,b 2/d,e  To do this, you must supply the --outdir flag for each set, like this:
 
   $0 -i 'a b' -i 'd e' --outdir '1' --outdir '2'
 
@@ -12424,11 +14189,7 @@ Other examples:
 
     Result: 1/a  2/b  3/c  4/d  5/e  6/f
 
-If this script has multiple types of file options (which are processed
-together), the files which are associated with one another will be
-associated in the same manner as the output directories above.  Basically, if
-the number of files or sets of files match, they will be automatically
-associated in the order in which they were provided on the command line.
+If this script has multiple types of file options (which are processed together), the files which are associated with one another will be associated in the same manner as the output directories above.  Basically, if the number of files or sets of files match, they will be automatically associated in the order in which they were provided on the command line.
 
 end_print
       }
@@ -12443,8 +14204,14 @@ end_print
 
 sub customUsage
   {
+    my $local_extended = defined($_[0]) ? $_[0] :
+      (defined($extended) ? $extended : 0);
+
     my $short = '';
     my $long  = '';
+
+    my($short_flag_col_width,$long_flag_col_width) =
+      getUsageFlagColWidths();
 
     #We want to keep the order the programmer added the options, except to
     #require that required options be first and that the combo variable option
@@ -12457,59 +14224,78 @@ sub customUsage
 
     my $combo_flag = 'run|dry-run';
 
+    my $advanced_header = 0;
     my($flags_remainder,$short_desc_remainder,$long_desc_remainder);
-    foreach my $usage_hash (grep {!$_->{HIDDEN}}
-			    sort {($b->{REQUIRED} || $b->{TTREQD}) <=>
-				    ($a->{REQUIRED} || $a->{TTREQD}) ||
-				      ($b->{OPTFLAG} eq $combo_flag) <=>
-					($a->{OPTFLAG} eq $combo_flag) ||
-					  $pos_hash->{$a} <=> $pos_hash->{$b}}
+    foreach my $usage_hash (grep {(!$_->{HIDDEN} && !$_->{ADVANCED}) ||
+				    ($_->{HIDDEN} && $extended > 2) ||
+				       ($_->{ADVANCED} && !$_->{HIDDEN} &&
+					$extended > 1)}
+			    sort {#Put --extended last
+			      ($a->{GETOPTKEY} eq 'extended:+') <=>
+				($b->{GETOPTKEY} eq 'extended:+') ||
+				  (defined($a->{ADVANCED}) && $a->{ADVANCED})
+				    <=> (defined($b->{ADVANCED}) &&
+					 $b->{ADVANCED}) ||
+					   ($b->{REQUIRED} || $b->{TTREQD}) <=>
+					     ($a->{REQUIRED} || $a->{TTREQD}) ||
+					       (join('|',@{$b->{OPTFLAG}}) eq
+						$combo_flag) <=>
+						  (join('|',@{$a->{OPTFLAG}}) eq
+						   $combo_flag) ||
+						     $pos_hash->{$a} <=>
+						       $pos_hash->{$b}}
 			    @$usage_array)
       {
-	my $flags      = $usage_hash->{OPTFLAG};
-	my $short_desc = $usage_hash->{SUMMARY};
-	my $long_desc  = $usage_hash->{DETAILS};
-	my $default    = (defined($usage_hash->{DEFAULT}) &&
-			  $usage_hash->{DEFAULT} ne '' &&
-			  showDefault($usage_hash->{DEFAULT},
-				      $usage_hash->{OPTTYPE}) ?
-			  "[$usage_hash->{DEFAULT}]" : '');
-	my $accepts    = (defined($usage_hash->{ACCEPTS}) &&
-			  $usage_hash->{ACCEPTS} ne '' ?
-			  '{' . join(', ',@{$usage_hash->{ACCEPTS}}) . '}' :
-			  '');
-	my $required   = (#The option is required OR
-			  (exists($usage_hash->{REQUIRED}) &&
-			   defined($usage_hash->{REQUIRED}) &&
-			   $usage_hash->{REQUIRED}) ||
-			  #1 of 2 tagteam options is required and 1 is hidden
-			  ($usage_hash->{TTREQD} && $usage_hash->{TTHIDN}) ?
-			  'REQUIRED' :
-			  (#1 of 2 options is required and 0 or 2 are hidden
-			   $usage_hash->{TTREQD} && !$usage_hash->{TTHIDN} ?
-			   'REQUIRD^' : 'OPTIONAL'));
-
-	#Add the accepts string if it's defined and not already manually added
-	#to the short description
-	if($accepts ne '' && defined($short_desc) && $short_desc ne '' &&
-	   $short_desc !~ /^[\[\{]/)
+	my $short_flags = getUsageFlags($usage_hash,1);
+	my $long_flags  = getUsageFlags($usage_hash);
+	my $short_desc  = $usage_hash->{SUMMARY};
+	my $long_desc   = $usage_hash->{DETAILS};
+	#If the enum values are too long to be displayed in the flags column &
+	#were truncated (i.e. replaced with an ellipsis)
+	if($usage_hash->{OPTTYPE} =~ /enum/ && $long_flags =~ /\.{3}>/)
 	  {
-	    $short_desc = $accepts . $short_desc;
-
-	    if($short_desc !~ /^\[[^\]\}]*\]\s*\{[^\}]*\}\s/)
-	      {$short_desc =~ s/\}\s*/\} /}
+	    my $enumvals = join(',',@{$usage_hash->{ACCEPTS}});
+	    $long_desc .= "\n\nFull list of acceptable values: [$enumvals].";
 	  }
-	elsif($accepts ne '' && defined($short_desc) && $short_desc ne '' &&
-	      $short_desc !~ /^\[[^\]+]\]\s*\{/)
+	#If the array value delimiter is multi-character or otherwise does not
+	#match a display value and the description doesn't mention 'delim',
+	#append the delimiter pattern
+	if($usage_hash->{OPTTYPE} =~ /_array/ && $long_desc !~ /delim/i)
 	  {
-	    $short_desc =~ s/\]/\]$accepts/;
+	    my $disp_delim = getDisplayDelimiter($usage_hash->{DELIMITER},
+						 $usage_hash->{OPTTYPE},
+						 $usage_hash->{ACCEPTS});
 
-	    if($short_desc !~ /^\[[^\]\}]*\]\s*\{[^\}]*\}\s/)
-	      {$short_desc =~ s/\}\s*/\} /}
+	    if(defined($disp_delim) && length($disp_delim) > 1)
+	      {
+		my $qm = quotemeta($disp_delim);
+		#This assumes the presence of any regular expression character
+		#means it's a regular expression
+		$long_desc .= "\n\nDelimiting " .
+		  ($qm ne $disp_delim ? 'pattern' : 'string') .
+		    ": [$disp_delim].";
+	      }
+	  }
+
+	my $required = '';
+	if(exists($usage_hash->{REQUIRED}) &&
+	   defined($usage_hash->{REQUIRED}) && $usage_hash->{REQUIRED})
+	  {
+	    if(hasDefinedDefault($usage_hash))
+	      {$required = '~'}
+	    #1 of 2 tagteam options is required and 1 is hidden
+	    elsif($usage_hash->{TTREQD} && $usage_hash->{TTHIDN})
+	      {$required = '*'}
+	    #1 of 2 tagteam options is required and 0 or 2 are hidden
+	    elsif($usage_hash->{TTREQD} && !$usage_hash->{TTHIDN})
+	      {$required = '^'}
+	    else
+	      {$required = '*'}
 	  }
 
 	#Add the default string if it's defined and not already manually added
 	#to the short description
+	my $default  = displayDefault($usage_hash);
 	if($default ne '' && defined($short_desc) && $short_desc ne '' &&
 	   $short_desc !~ /^\[/)
 	  {
@@ -12521,23 +14307,6 @@ sub customUsage
 	    elsif($short_desc =~ /^\[[^\]]*\]\s*[^\{]/ &&
 	       $short_desc !~ /^\[[^\]]*\]\s/)
 	      {$short_desc =~ s/\]\s*/\] /}
-	  }
-
-	#Add the accepts string if it's defined and not already manually added
-	#to the long description
-	if($accepts ne '' && $long_desc !~ /^[\[\{]/)
-	  {
-	    $long_desc = $accepts . $long_desc;
-
-	    if($long_desc !~ /^\[[^\]\}]*\]\s*\{[^\}]*\}\s/)
-	      {$long_desc =~ s/\}\s*/\} /}
-	  }
-	elsif($accepts ne '' && $long_desc !~ /^\[[^\]+]\]\s*\{/)
-	  {
-	    $long_desc =~ s/\]/\]$accepts/;
-
-	    if($long_desc !~ /^\[[^\]\}]*\]\s*\{[^\}]*\}\s/)
-	      {$long_desc =~ s/\}\s*/\} /}
 	  }
 
 	#Add the default string if it's defined and not already manually added
@@ -12554,32 +14323,285 @@ sub customUsage
 	      {$long_desc =~ s/\]\s*/\] /}
 	  }
 
+	if(!$advanced_header && $usage_hash->{ADVANCED} &&
+	   ((defined($long_desc) && $long_desc ne '') ||
+	    (defined($short_desc) && $short_desc ne '')))
+	  {
+	    $advanced_header = 1;
+	    $long .= "ADVANCED\n\n";
+	  }
+
+	if($advanced_header && $usage_hash->{GETOPTKEY} eq 'extended:+')
+	  {$long .= "\n"}
+
 	if(defined($short_desc) && $short_desc ne '')
-	  {$short .= alignUsageCols($flags,$short_desc,$required,1)}
+	  {$short .= alignCols([$required,$short_flags,$short_desc],
+			       [1,$short_flag_col_width],
+			       [0,1,2],
+			       [0,2,0])}
 	if(defined($long_desc) && $long_desc ne '')
-	  {$long .= alignUsageCols($flags,$long_desc,$required,0)}
+	  {$long .= alignCols([$required,$long_flags,$long_desc],
+			      [1,$long_flag_col_width],
+			      [0,1,2],
+			      [0,2,0]) . "\n"}
 	elsif(defined($short_desc) && $short_desc ne '')
-	  {$long .= alignUsageCols($flags,$short_desc,$required,0)}
+	  {$long .= alignCols([$required,$long_flags,$short_desc],
+			      [1,$long_flag_col_width],
+			      [0,1,2],
+			      [0,2,0]) . "\n"}
       }
+
+    $short .= "\n";
 
     return($short,$long);
   }
 
+##TODO: Add support for setting multiple times. (Currently only called by usage/
+##      help.)
+sub getWindowWidth
+  {
+    if(!defined($window_width))
+      {
+	$window_width = $window_width_def;
+	eval('use Term::ReadKey;1') || return($window_width);
+	$window_width = (GetTerminalSize())[0];
+	return($window_width);
+      }
+    return($window_width);
+  }
+
+sub getUsageFlagColWidths
+  {
+    my $max_flag_col_width   = 22;
+    my $short_flag_col_width = 0;
+    my $long_flag_col_width  = 0;
+
+    foreach my $usage_hash (grep {(!$_->{HIDDEN} && !$_->{ADVANCED}) ||
+				    ($_->{HIDDEN} && $extended > 2) ||
+				       ($_->{ADVANCED} && !$_->{HIDDEN} &&
+					$extended > 1)} @$usage_array)
+      {
+	my $short_flags =  getUsageFlags($usage_hash,1);
+	my $long_flags  = getUsageFlags($usage_hash);
+
+	if(defined($usage_hash->{SUMMARY}) && $usage_hash->{SUMMARY} ne '' &&
+	   length($short_flags) > $short_flag_col_width)
+	  {$short_flag_col_width = length($short_flags)}
+
+	if($long_flag_col_width < $max_flag_col_width)
+	  {
+	    foreach my $long_flag (split(/\n/,$long_flags))
+	      {
+		if(length($long_flag) > $long_flag_col_width)
+		  {
+		    $long_flag_col_width = length($long_flag);
+		    last if($long_flag_col_width >= $max_flag_col_width);
+		  }
+	      }
+	  }
+
+	last if($long_flag_col_width  >= $max_flag_col_width &&
+	        $short_flag_col_width >= $max_flag_col_width);
+      }
+
+    if($long_flag_col_width >= $max_flag_col_width)
+      {$long_flag_col_width = $max_flag_col_width}
+    if($short_flag_col_width >= $max_flag_col_width)
+      {$short_flag_col_width = $max_flag_col_width}
+
+    return($short_flag_col_width,$long_flag_col_width);
+  }
+
+#Takes the usage hash of 1 option and returns the flags with arguments as they
+#are to be displayed in the detailed usage output.
+#Globals used: $extended,$GetOptHash
+sub getUsageFlags
+  {
+    my $usghash = $_[0];
+    my $minmode = $_[1];
+
+    #Prepare the list of flags
+    my @flaglist = @{$usghash->{OPTFLAG}};
+    if($usghash->{FLAGLESS})
+      {unshift(@flaglist,'')}
+
+    my $flagstr =
+      join("\n",
+	   map {
+	     #append a space unless it's an empty string.  This allows us to
+	     #process the flagless options the same as the flagged options
+	     $_ .= ($_ eq '' ? '' : ' ');
+
+	     #Prepare the enumeration string
+	     my $en = '';
+	     if($usghash->{OPTTYPE} =~ /enum/)
+	       {
+		 $en = join(',',@{$usghash->{ACCEPTS}});
+		 if(length($en) > 60)
+		   {$en =~ s/(.{57})/$1.../}
+	       }
+
+	     my $dl = '';
+	     if($usghash->{OPTTYPE} =~ /_array/)
+	       {
+		 $dl = getDisplayDelimiter($usghash->{DELIMITER},
+					   $usghash->{OPTTYPE},
+					   $usghash->{ACCEPTS});
+		 if(defined($dl))
+		   {
+		     if(length($dl) > 1)
+		       {$dl = '...'}
+		     else
+		       {$dl = "$dl..."}
+		   }
+		 else
+		   {$dl = ''}
+	       }
+
+	     if($usghash->{OPTTYPE} eq 'bool')
+	       {
+		 s/ $//;
+		 $_;
+	       }
+	     elsif($usghash->{OPTTYPE} eq 'negbool')
+	       {
+		 s/ $//;
+		 my $f  = $_;
+		 my $nf = $_;
+		 $nf =~ s/^-+//;
+		 $nf = "--no$nf";
+		 my $def = ${$GetOptHash->{$usghash->{GETOPTKEY}}};
+		 if(!defined($def))
+		   {($f,$nf)}
+		 elsif($def)
+		   {$nf}
+		 else
+		   {$f}
+	       }
+	     elsif($usghash->{OPTTYPE} eq 'count')
+	       {$_ . "[<cnt>]"}
+	     elsif($usghash->{OPTTYPE} eq 'string')
+	       {"$_<str>"}
+	     elsif($usghash->{OPTTYPE} eq 'integer')
+	       {"$_<int>"}
+	     elsif($usghash->{OPTTYPE} eq 'float')
+	       {"$_<flt>"}
+	     elsif($usghash->{OPTTYPE} eq 'enum')
+	       {"$_<$en>"}
+	     elsif($usghash->{OPTTYPE} eq 'string_array' ||
+		   $usghash->{OPTTYPE} eq 'string_array2d')
+	       {"$_<str$dl...>..."}
+	     elsif($usghash->{OPTTYPE} eq 'integer_array' ||
+		   $usghash->{OPTTYPE} eq 'integer_array2d')
+	       {"$_<int$dl...>..."}
+	     elsif($usghash->{OPTTYPE} eq 'float_array' ||
+		   $usghash->{OPTTYPE} eq 'float_array2d')
+	       {"$_<flt$dl...>..."}
+	     elsif($usghash->{OPTTYPE} eq 'enum_array' ||
+		   $usghash->{OPTTYPE} eq 'enum_array2d')
+	       {"$_<{$en}$dl...>..."}
+	     elsif($usghash->{OPTTYPE} eq 'infile' ||
+		   $usghash->{OPTTYPE} eq 'outfile')
+	       {"$_<file*...>..."}
+	     elsif($usghash->{OPTTYPE} eq 'outdir')
+	       {"$_<dir*...>..."}
+	     elsif($usghash->{OPTTYPE} eq 'suffix')
+	       {"$_<sfx>"}
+	     else
+	       {"$_ ?ERROR?"}
+	   } @flaglist) .
+
+	     #Append stdin & stub/dash for primary/non-primary input files
+	     ($usghash->{OPTTYPE} eq 'infile' ?
+	      ($usghash->{PRIMARY} ? "\nSTDIN\nSTDIN & " .
+	       getDefaultFlag($usghash->{OPTFLAG}) . ' <stub>' :
+	       "\nSTDIN & " . getDefaultFlag($usghash->{OPTFLAG}) .
+	       ' -') : '') .
+
+		 ($usghash->{HIDDEN} ? "\n[HIDDEN-OPTION]" : '');
+
+    if($minmode)
+      {$flagstr =~ s/\n.*//s}
+
+    debug({LEVEL => -1},"Returning flagstr: [$flagstr].");
+
+    return($flagstr);
+  }
+
 sub showDefault
   {
-    my $default = $_[0];
-    my $type    = $_[1];
+    my $type    = $_[0];
+    my $ref     = $_[1];
+    my $default = $_[2];
 
     if($type ne 'bool' && $type ne 'negbool' && $type ne 'count')
       {return(1)}
-    elsif($type eq 'bool')    #Never show the default of a boolean
-      {return(0)}
-    elsif($type eq 'negbool') #Only show a negatable boolean's def if it's true
-      {return(defined($default) && $default != 0)}
+    elsif($type eq 'bool')
+      {return(defined($default) && $default ne '' && $default ne '0')}
+    elsif($type eq 'negbool') #Only show a negatable boolean's def if the
+                              #default is defined and the value is undefined
+      {return(defined($default) && (!defined($ref) || !defined($$ref)))}
     elsif($type eq 'count')   #Only show a count's def if it's non-0
       {return(defined($default) && $default != 0)}
 
     return(1);
+  }
+
+#Globals used: $GetOptHash
+sub displayDefault
+  {
+    my $usage_hash = $_[0];
+    my $disp = '';
+    if(showDefault($usage_hash->{OPTTYPE},
+                   $GetOptHash->{$usage_hash->{GETOPTKEY}},
+                   $usage_hash->{DEFAULT}))
+      {
+        my $undef    = '';
+        my $emptystr = '[]';
+
+        #Empty string defaults for these types make no sense and imply the
+        #default is undefined, so don't display square brackets
+        if($usage_hash->{OPTTYPE} =~ /file/ ||
+           $usage_hash->{OPTTYPE} =~ /integer/ ||
+           $usage_hash->{OPTTYPE} =~ /float/ ||
+           $usage_hash->{OPTTYPE} =~ /enum/ ||
+           $usage_hash->{OPTTYPE} eq 'outdir')
+          {$emptystr = ''}
+
+        if(defined($usage_hash->{DEFAULT}))
+          {
+            if($usage_hash->{DEFAULT} eq '')
+              {
+                if(defined($GetOptHash->{$usage_hash->{GETOPTKEY}}))
+                  {$disp = $emptystr}
+                else
+                  {$disp = $undef}
+              }
+            else
+              {$disp = "[$usage_hash->{DEFAULT}]"}
+          }
+        else
+          {$disp = $undef}
+      }
+
+    return($disp);
+  }
+
+#$usage_hash->{DEFAULT} is only for display purposes. This sub checks the actual
+#default value either in the reference variable or the default saved elsewhere
+sub hasDefinedDefault
+  {
+    my $usage_hash = $_[0];
+
+    #For now, we will assume that the display default having a defined value
+    #that's not an empty string means that there really is a default set (which
+    #may not be true)
+    ##TODO: Check the actual default, which includes checking things like the
+    #default_infiles_array, etc.
+    if(defined($usage_hash->{DEFAULT}) && $usage_hash->{DEFAULT} ne '')
+      {return(1)}
+
+    return(0);
   }
 
 #Globals used: $help_summary, $advanced_help, $extended
@@ -12591,46 +14613,55 @@ sub customHelp
 
     my $out = '';
 
-    my $summary_flag = '* WHAT IS THIS:';
+    my $summary_flag = 'WHAT IS THIS:';
     my $summary = (defined($help_summary) ? $help_summary :
-		   join('','The author of this script has not provided a ',
-			'description of what it is used for.  Please add the ',
-			'description by using a call to setScriptInfo() ',
-			'near the top of the script.'));
+		   join('','No script description available.'));
 
-    $out .= alignHelpCols($summary_flag,$summary) if(defined($help_summary) ||
-						     !$ignore);
+    $out .= alignCols(['*',$summary_flag,$summary],
+		      [1,14],
+		      [0,1,2],
+		      [0,0,0]) . "\n" if(defined($help_summary) || !$ignore);
 
     #Now let's construct the custom advanced help string.
     if($local_extended && defined($advanced_help) && $advanced_help ne '')
-      {$out .= alignHelpCols('* DETAILS:',$advanced_help)}
+      {
+	$out .= alignCols(['*','DETAILS:',$advanced_help],
+			  [1,14],
+			  [0,1,2],
+			  [0,0,0]) . "\n";
+      }
 
     #For each input file type that is not hidden or is primary (of which there
     #can be only 1, BTW)
     foreach my $usage_hash (grep {$_->{OPTTYPE} eq 'infile' &&
-				    (!$_->{HIDDEN} || $_->{PRIMARY})}
+				    ($local_extended > 1 || !$_->{HIDDEN} ||
+				     $_->{PRIMARY})}
 			    @$usage_array)
       {
-	my $flag = '* ' . "INPUT FORMAT:\n" . $usage_hash->{OPTFLAG};
+	my $flag = "INPUT FORMAT:\n" . join(',',@{$usage_hash->{OPTFLAG}});
 	if($usage_hash->{HIDDEN} && $usage_hash->{PRIMARY})
 	  {
-	    $flag = '* ' . "STDIN FORMAT:";
+	    $flag = "STDIN FORMAT:";
 	    #Include the hidden flags if extended > 1
-	    if($extended > 1)
-	      {$flag .= "\n" . $usage_hash->{OPTFLAG}}
+	    if($local_extended > 1)
+	      {$flag .= "\n" . join(',',@{$usage_hash->{OPTFLAG}})}
+	    if($usage_hash->{HIDDEN})
+	      {$flag .= ",[HIDDEN-OPTION]"}
 	  }
-	my $desc = $usage_hash->{FORMAT};
+	elsif($usage_hash->{HIDDEN})
+	  {$flag .= ",[HIDDEN-OPTION]"}
 
+	my $desc = $usage_hash->{FORMAT};
 	if(!defined($desc) || $desc eq '')
 	  {
 	    next if($ignore);
-	    $desc = join('','The author of this script has not provided a ',
-			 'format description for this input file type.  ',
-			 'Please add a description using the addInfileOption ',
-			 'method.');
+	    $desc = join('','No format description available.');
 	  }
 
-	$out .= alignHelpCols($flag,$desc);
+	$out .= alignCols(['*',$flag,$desc],
+			  [1,14],
+			  [0,1,2],
+			  [0,0,0]) . "\n";
       }
 
     #Keep track of the tagteam output options that have been processed
@@ -12641,9 +14672,18 @@ sub customHelp
     foreach my $usage_hash (grep {($_->{OPTTYPE} eq 'outfile' ||
 				   $_->{OPTTYPE} eq 'suffix') &&
 				     ($_->{TAGTEAM} || !$_->{HIDDEN} ||
-				      $_->{PRIMARY})}
+				      $_->{PRIMARY} || $local_extended > 1)}
 			    @$usage_array)
       {
+	#If this is a suffix linked to an outfile type, skip it completely -
+	#This is just an internal way of code re-use
+	if($usage_hash->{HIDDEN} && $usage_hash->{OPTTYPE} eq 'suffix')
+	  {
+	    my $file_type_id = $suffix_id_lookup->[$usage_hash->{FILEID}]->[0];
+	    if(exists($outfile_types_hash->{$file_type_id}))
+	      {next}
+	  }
+
 	#If this option is a part of a tagteam
 	if($usage_hash->{TAGTEAM})
 	  {
@@ -12661,7 +14701,7 @@ sub customHelp
 	    next if($usage_hash->{HIDDEN} && !$usage_hash->{PRIMARY});
 	  }
 
-	my $flag = '* ';
+	my $flag = '';
 
 	#Create the section title in the header
 	if($usage_hash->{HIDDEN} && $usage_hash->{PRIMARY})
@@ -12670,8 +14710,10 @@ sub customHelp
 	  {$flag .= "OUTPUT FORMAT:"}
 
 	#Append the flags to the header as a sub-title if not hidden
-	if(!$usage_hash->{HIDDEN} || $extended > 1)
-	  {$flag .= "\n" . $usage_hash->{OPTFLAG}}
+	if(!$usage_hash->{HIDDEN} || $local_extended > 1)
+	  {$flag .= "\n" . join(',',@{$usage_hash->{OPTFLAG}})}
+	if($usage_hash->{HIDDEN})
+	  {$flag .= ",[HIDDEN-OPTION]"}
 
 	my $desc = $usage_hash->{FORMAT};
 
@@ -12685,250 +14727,238 @@ sub customHelp
 			     'methods.'));
 	  }
 
-	$out .= alignHelpCols($flag,$desc);
+	$out .= alignCols(['*',$flag,$desc],
+			  [1,14],
+			  [0,1,2],
+			  [0,0,0]) . "\n";
       }
 
     return($out);
   }
 
-sub alignHelpCols
+sub sum
   {
-    my $flags_remainder = $_[0];
-    my $desc_remainder  = $_[1];
-    my $indent_len      = 2;
-    my $flag_col_len    = 15;
-    my $space_len       = 1;
-    my $desc_col_len    = 62;
-
-    debug({LEVEL => -1},"Processing flags str: [$flags_remainder] and ",
-	  "decription: [$desc_remainder]");
-
-    #Remove any leading hard returns
-    $desc_remainder =~s/^\n+//;
-
-    my $first = 1;
-    my($line,$out);
-    while($flags_remainder ne '' || $desc_remainder ne '')
-      {
-	unless($first)
-	  {$line = ' ' x $indent_len}
-	my $flags_str_len = 0;
-	if(length($flags_remainder) >
-	   ($flag_col_len + ($first ? $indent_len : 0)))
-	  {
-	    my $flags_start =
-	      substr($flags_remainder,0,
-		     $flag_col_len + ($first ? $indent_len : 0));
-	    if($flags_start =~ /\n/)
-	      {$flags_start =~ s/\n.*//}
-	    elsif($flags_start !~ /,$/)
-	      {
-		$flags_start =~ s/(.*,).*/$1/;
-		if(length($flags_start) == $flag_col_len)
-		  {$flags_start =~ s/(.*-).*/$1/}
-	      }
-	    if($flags_remainder =~ /\Q$flags_start\E\n*(.*)/s)
-	      {$flags_remainder = $1}
-
-	    debug({LEVEL => -1},"Next flags portion: [$flags_start]\n",
-		  "Remainder flags: [$flags_remainder].");
-
-	    $line .= $flags_start;
-	    $flags_str_len = length($flags_start);
-	  }
-	else
-	  {
-	    debug({LEVEL => -1},"Next flags portion: [$flags_remainder]\n",
-		  "Remainder flags: [].");
-
-	    $line .= $flags_remainder;
-	    $flags_str_len = length($flags_remainder);
-	    $flags_remainder = '';
-	  }
-
-	debug({LEVEL => -1},"Padding flags string with [$indent_len + ",
-	      "$flag_col_len + $space_len - ",$flags_str_len,"] spaces.");
-
-	$line .= ' ' x (($first ? $indent_len : 0) + $flag_col_len +
-			$space_len - $flags_str_len);
-
-	if(length($desc_remainder) > $desc_col_len ||
-	   $desc_remainder !~ /[^\n]{$desc_col_len}\n./s)
-	  {
-	    #If the line begins with at least 4 spaces, allow the line length
-	    #to be longer than the column width (given this is the last column)
-	    my $desc_start = ($desc_remainder =~ /^ {4}/ ? $desc_remainder :
-			      substr($desc_remainder,0,$desc_col_len));
-	    my $next_char  =
-	      length($desc_remainder) > $desc_col_len ?
-		substr($desc_remainder,$desc_col_len - 1,1) : '';
-	    my $added_hyphen = 0;
-	    if($desc_start =~ /\n\n/)
-	      {$desc_start =~ s/(?<=\n)\n.*//s}
-	    elsif($desc_start =~ /\n/)
-	      {$desc_start =~ s/(?<=\n).*//s}
-	    elsif($desc_start !~ /\s$/ && $next_char !~ /^\s/)
-	      {
-		$desc_start =~ s/(.*)\b\{lb}\s*\S+/$1/;
-		if(length($desc_start) == $desc_col_len)
-		  {$desc_start =~ s/\s+\S{1,20}$//}
-		if(length($desc_start) == $desc_col_len)
-		  {
-		    if($desc_start =~ s/[A-Za-z]$/-/)
-		      {$added_hyphen = 1}
-		  }
-	      }
-
-	    $desc_start =~ s/[ \t]+$//;
-	    #If the line was empty (i.e. the only character was \n)
-	    if($desc_start eq '')
-	      {
-		if($desc_remainder =~ /^\n(.*)/s)
-		  {$desc_remainder = $1}
-	      }
-	    else
-	      {
-		chop($desc_start) if($added_hyphen);
-		if($desc_remainder =~ /\Q$desc_start\E(.*)/s)
-		  {
-		    $desc_remainder = $1;
-		    $desc_remainder =~ s/^ *// unless($desc_start =~ /\n/);
-		    chomp($desc_start);
-		  }
-	      }
-
-	    debug({LEVEL => -1},"Next portion: [$desc_start]\n",
-		  "Remainder: [$desc_remainder].");
-
-	    $line .= $desc_start;
-	  }
-	else
-	  {
-	    debug({LEVEL => -1},"Next portion: [$desc_remainder]\n",
-		  "Remainder: [].");
-
-	    $line .= $desc_remainder;
-	    $desc_remainder = '';
-	  }
-
-	$line =~ s/[ \t]*$/\n/;
-	$out .= $line;
-	$first = 0;
-      }
-
-    $out =~ s/\s*$/\n\n/;
-
-    debug({LEVEL => -1},"Returning: [$out]");
-
-    return($out);
+    my $sum = 0;
+    $sum += $_ foreach(@_);
+    return($sum);
   }
 
-sub alignUsageCols
+sub alignCols
   {
-    my $flags_remainder    = $_[0];
-    my $desc_remainder     = $_[1];
-    my $required_remainder = $_[2];
-    my $short              = (defined($_[3]) ? $_[3] : 0);
-    my $indent_len   = 5;
-    my $flag_col_len = 20;
-    my $req_col_len  = 8;
-    my $desc_col_len = 45;
-    my $space_len    = 1;
+    my $column_vals  = $_[0]; #array - 1 row, but cells may have hard returns
+    my $col_widths   = $_[1]; #array - may leave off last col or all but 1
+    my $gap_widths   = $_[2]; #array - starts with the indent size
+    my $wrap_indents = $_[3]; #array - soft-wrap indent sizes
 
-    debug({LEVEL => -1},"Called with description: [$desc_remainder].");
+    my $term_width = getWindowWidth();
 
-    if($short)
-      {$flags_remainder =~ s/,.*//}
-
-    my($line,$out);
-    while($flags_remainder ne '' || $desc_remainder ne '')
+    #Validate the gap widths
+    if(!defined($gap_widths))
+      {$gap_widths = [0,map {1} 1..$#{$column_vals}]}
+    elsif(scalar(@$gap_widths) == 1)
       {
-	$line = ' ' x $indent_len;
-	if(length($flags_remainder) > $flag_col_len)
+	if(scalar(@$column_vals) > 1)
 	  {
-	    my $flags_start = substr($flags_remainder,0,$flag_col_len);
-	    if($flags_start !~ /,$/)
-	      {
-		$flags_start =~ s/(.*,).*/$1/;
-		if(length($flags_start) == $flag_col_len)
-		  {$flags_start =~ s/(.*-).*/$1/}
-	      }
-	    if($flags_remainder =~ /\Q$flags_start\E(.*)/s)
-	      {$flags_remainder = $1}
+	    my $tmp = $gap_widths->[0];
+	    $gap_widths = [0,map {$tmp} 1..$#{$column_vals}];
+	  }
+      }
+    elsif(scalar(@$gap_widths) == $#{$column_vals})
+      {unshift(@$gap_widths,0)}
+    elsif(scalar(@$gap_widths) != scalar(@$column_vals))
+      {
+	error("Invalid number of gap widths [",scalar(@$gap_widths),
+	      "] versus number of column values: [",scalar(@$column_vals),"].");
+	return('');
+      }
 
-	    $line .= $flags_start;
+    #Validate the column widths
+    if(scalar(@$column_vals) != scalar(@$col_widths))
+      {
+	if($#{$column_vals} == scalar(@$col_widths))
+	  {push(@$col_widths,$term_width - sum(@$col_widths,@$gap_widths))}
+	elsif(scalar(@$col_widths) == 1)
+	  {
+	    my $tmp = $col_widths->[0];
+	    $col_widths = [(map {$tmp} 1..$#{$column_vals}),
+			   $term_width - sum(@$col_widths,@$gap_widths)];
 	  }
 	else
 	  {
-	    $line .= $flags_remainder;
-	    $flags_remainder = '';
+	    error("Invalid number of column widths [",scalar(@$col_widths),"] ",
+		  "versus number of column values [",scalar(@$column_vals),
+		  "].");
+	    return('');
 	  }
 
-	$line .= ' ' x ($indent_len + $flag_col_len + $space_len -
-			length($line));
-
-	$line .= ($required_remainder eq '' ?
-		  ' ' x $req_col_len : $required_remainder) .
-		    ' ' x $space_len;
-	$required_remainder = '';
-
-	if(length($desc_remainder) > $desc_col_len ||
-	   $desc_remainder !~ /[^\n]{$desc_col_len}\n./s)
+	if($col_widths->[-1] < 1)
 	  {
-	    my $desc_start = substr($desc_remainder,0,$desc_col_len);
-	    my $next_char  =
-	      length($desc_remainder) > $desc_col_len ?
-		substr($desc_remainder,$desc_col_len - 1,1) : '';
-	    my $added_hyphen = 0;
-	    if($desc_start =~ /\n\n/)
-	      {$desc_start =~ s/(?<=\n)\n.*//s}
-	    elsif($desc_start =~ /\n/)
-	      {$desc_start =~ s/(?<=\n).*//s}
-	    elsif($desc_start !~ /\s$/ && $next_char !~ /^\s/)
+	    warning("Window width [$term_width] too small for specified ",
+		    "column widths [",
+		    join(',',(@$col_widths)[0..($#{$col_widths}-1)]),"].",
+		    {DETAIL => 'No room is left for the last column'});
+	    return('');
+	  }
+      }
+
+    #Validate the soft-wrap indents
+    if(!defined($wrap_indents))
+      {$wrap_indents = [map {0} 0..$#{$column_vals}]}
+    elsif(scalar(@$wrap_indents) < scalar(@$column_vals))
+      {
+	while(scalar(@$wrap_indents) < scalar(@$column_vals))
+	  {push(@$wrap_indents,0)}
+      }
+    elsif(scalar(@$wrap_indents) > scalar(@$column_vals))
+      {
+	error("Invalid number of soft-wrap indents [",scalar(@$wrap_indents),
+	      "] versus number of column values: [",scalar(@$column_vals),"].");
+	return('');
+      }
+
+    my($line,$out);
+    my @remainders = @$column_vals;
+    while(scalar(grep {$_ ne ''} @remainders))
+      {
+	$line = '';
+
+	foreach my $index (0..$#{$column_vals})
+	  {
+	    my $remainder   = $remainders[$index];
+	    my $gap_width   = $gap_widths->[$index];
+	    my $col_width   = $col_widths->[$index];
+	    my $wrap_indent = $wrap_indents->[$index];
+
+	    if($index > 0)
 	      {
-		$desc_start =~ s/(.*)\b\{lb}\s*\S+/$1/;
-		if(length($desc_start) == $desc_col_len)
-		  {$desc_start =~ s/\s+\S{1,20}$//}
-		if(length($desc_start) == $desc_col_len)
-		  {
-		    if($desc_start =~ s/[A-Za-z]$/-/)
-		      {$added_hyphen = 1}
-		  }
+		#Append spaces to fill up to the current column
+		$line .= ' ' x (sum((@$col_widths)[0..($index - 1)],
+				    (@$gap_widths)[0..($index - 1)]) -
+				length($line));
 	      }
 
-	    $desc_start =~ s/[ \t]+$//;
-	    #If the line was empty (i.e. the only character was \n)
-	    if($desc_start eq '')
+	    #Add the gap
+	    $line .= ' ' x $gap_width;
+
+	    if(length($remainder) > $col_width ||
+	       $remainder !~ /^[^\n]{$col_width}\n./s)
 	      {
-		if($desc_remainder =~ /^\n(.*)/s)
-		  {$desc_remainder = $1}
+		my $soft_wrap = 1;
+		my $current = substr($remainder,0,$col_width);
+		my $next_char =
+		  length($remainder) > $col_width ?
+		    substr($remainder,$col_width,1) : '';
+		my $added_hyphen = 0;
+		if($current =~ /^[^\n]*\n\n/)
+		  {
+		    $current =~ s/(?<=\n)\n.*//s;
+		    $soft_wrap = 0;
+		  }
+		elsif($current =~ /\n/)
+		  {
+		    $current =~ s/(?<=\n).*//s;
+		    $soft_wrap = 0;
+		  }
+		elsif(#$current !~ /\s$/ && $current !~ /^\s/ &&
+		      $next_char ne "\n" && $next_char ne '' &&
+		      $next_char ne ' ')
+		  {
+		    #$current =~ s/(.*)\b\{lb}\s*\S+/$1/;
+		    if(length($current) == $col_width)
+		      {
+			my($dashwrap,$commawrap,$spacewrap);
+			$dashwrap = $commawrap = $spacewrap = $current;
+
+			#Try to break up the current cell value at the last
+			#dash, if one exists that's not the first series of
+			#dashes on the line and not followed by a dash
+			$dashwrap =~ s/(.*[^\-]-)(?!-)\S{1,20}$/$1/;
+
+			#Try to break up the current cell value at the last
+			#comma, if one exists that's not the first series of
+			#commas on the line and not followed by a comma
+			$commawrap =~ s/(.*[^,],)(?!,)\S.*/$1/;
+
+			#Try to break up the current cell value at the last
+			#space, if one exists that's not followed by something
+			#that looks longer than a real word
+			$spacewrap =~ s/\s+\S{1,20}$//;
+
+			#If both were trimmed
+			if(length($dashwrap) < length($current) &&
+			   length($commawrap) < length($current))
+			  {
+			    #Keep the longer one
+			    $current = (length($dashwrap) > length($commawrap) ?
+					$dashwrap : $commawrap);
+			  }
+			elsif(length($dashwrap) < length($current))
+			  {$current = $dashwrap}
+			else
+			  {$current = $commawrap}
+
+			if(length($spacewrap) < $col_width &&
+			   (length($current) == $col_width ||
+			    length($spacewrap) > length($current)))
+			  {$current = $spacewrap}
+		      }
+		    if(length($current) == $col_width && $col_width > 1 &&
+		       $current !~ /\s$/ && $current !~ /^\s/)
+		      {
+			#Force a dash if valid
+			if($current =~ s/[A-Za-z]$/-/)
+			  {$added_hyphen = 1}
+		      }
+		  }
+
+		if(length($current) == $col_width && $next_char eq "\n")
+		  {$soft_wrap = 0}
+
+		$current =~ s/[ \t]+$//;
+		#If the line was empty (i.e. the only character was \n)
+		if($current eq '')
+		  {
+		    if($remainder =~ /^\n(.*)/s)
+		      {$remainder = $1}
+		  }
+		else
+		  {
+		    my $pattern = $current;
+		    chop($pattern) if($added_hyphen);
+		    if($remainder =~ /\Q$pattern\E *(.*)/s)
+		      {
+			$remainder = $1;
+			$remainder =~ s/^ *// unless($current =~ /\n/);
+			if($soft_wrap && $wrap_indent && length($remainder) &&
+			   $remainder ne "\n")
+			  {$remainder = (' ' x $wrap_indent) . $remainder}
+			chomp($current);
+		      }
+		  }
+
+		if(length($current) == $col_width && $next_char eq "\n")
+		  {$remainder =~ s/^\n//}
+
+		debug("Next portion colidx [$index]: [$current]\n",
+		      "Remainder: [$remainder].",{LEVEL => -1});
+
+		$line .= $current;
 	      }
 	    else
 	      {
-		chop($desc_start) if($added_hyphen);
-		if($desc_remainder =~ /\Q$desc_start\E(.*)/s)
-		  {
-		    $desc_remainder = $1;
-		    $desc_remainder =~ s/^ *// unless($desc_start =~ /\n/);
-		    chomp($desc_start);
-		  }
+		debug("Next portion colidx [$index]: [$remainder]\n",
+		      "Remainder: [].",{LEVEL => -1});
+
+		$line .= $remainder;
+		$remainder = '';
 	      }
 
-	    debug({LEVEL => -1},"Next portion: [$desc_start]\n",
-		  "Remainder: [$desc_remainder].");
+	    if($index == $#{$column_vals})
+	      {$line =~ s/\s*$/\n/s}
 
-	    $line .= $desc_start;
-	  }
-	else
-	  {
-	    debug({LEVEL => -1},"Next portion: [$desc_remainder]\n",
-		  "Remainder: [].");
-
-	    $line .= $desc_remainder;
-	    $desc_remainder = '';
+	    $remainders[$index] = $remainder;
 	  }
 
-	$line =~ s/[ \t]*$/\n/;
 	$out .= $line;
       }
 
@@ -12947,14 +14977,13 @@ sub getSummaryUsageOptStr
     my $script = $0;
     $script =~ s/^.*\/([^\/]+)$/$1/;
 
-    my $optionals          = ($local_extended ? '' : 'options');
-    my $optionals_wo_prim  = ($local_extended ? '' : 'options');
+    my $optionals          = 'OPTIONS';
+    my $optionals_wo_prim  = 'OPTIONS';
     my $requireds          = '';
     my $requireds_wo_prim  = '';
     my $primary_inf_exists = 0;
     my $primary_hidden     = 0;
     my $first_reqd         = 1;
-    my $first_optl         = 1;
 
     #Add visible options
     foreach my $usage_hash (grep {!defined($_->{HIDDEN}) ||
@@ -12979,6 +15008,19 @@ sub getSummaryUsageOptStr
 		defined($usage_hash->{HIDDEN}) && $usage_hash->{HIDDEN});
 
 	my $flag = getDefaultFlag($usage_hash->{OPTFLAG});
+	if($usage_hash->{OPTTYPE} eq 'negbool')
+	  {
+	    my $def = ${$GetOptHash->{$usage_hash->{GETOPTKEY}}};
+	    if(!defined($def))
+	      {$flag =~ s/^-+/--[no]/}
+	    elsif($def)
+	      {
+		my $nf = $flag;
+		$nf =~ s/^-+//;
+		$nf = "--no$nf";
+		$flag = $nf;
+	      }
+	  }
 
 	#Add to the required options string
 	if(defined($usage_hash->{REQUIRED}) && $usage_hash->{REQUIRED})
@@ -12990,68 +15032,156 @@ sub getSummaryUsageOptStr
 	    #Add a required input file's example argument
 	    if($usage_hash->{OPTTYPE} eq 'infile')
 	      {
-		$requireds .= " \"input file(s)\"";
-		$requireds_wo_prim .= " \"input file(s)\"" unless($prim);
+		$requireds .= " <file*...>...";
+		$requireds_wo_prim .= " <file*...>..." unless($prim);
 	      }
 	    #Add a required output file's example argument
 	    elsif($usage_hash->{OPTTYPE} eq 'outfile')
 	      {
-		$requireds .= " \"output file(s)\"";
-		$requireds_wo_prim .= " \"output file(s)\"";
+		$requireds .= " <file*...>...";
+		$requireds_wo_prim .= " <file*...>...";
 	      }
 	    #Add a required output file's example argument
 	    elsif($usage_hash->{OPTTYPE} eq 'suffix')
 	      {
-		$requireds .= " .extension";
-		$requireds_wo_prim .= " .extension";
+		$requireds .= " <sfx>";
+		$requireds_wo_prim .= " <sfx>";
 	      }
 	    #Add a required output directory's example argument
 	    elsif($usage_hash->{OPTTYPE} eq 'outdir')
 	      {
-		$requireds .= " \"output directory(/ies)\"";
-		$requireds_wo_prim .= " \"output directory(/ies)\"";
+		$requireds .= " <dir*...>";
+		$requireds_wo_prim .= " <dir*...>";
 	      }
-	    #Add a required array option's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'array')
+	    #Add a required integer array option's example argument
+	    elsif($usage_hash->{OPTTYPE} eq 'integer_array')
 	      {
-		$requireds .= " \"val1 val2 ...\"";
-		$requireds_wo_prim .= " \"val1 val2 ...\"";
+		$requireds .= " <int...>";
+		$requireds_wo_prim .= " <int...>";
+	      }
+	    #Add a required float array option's example argument
+	    elsif($usage_hash->{OPTTYPE} eq 'float_array')
+	      {
+		$requireds .= " <flt...>";
+		$requireds_wo_prim .= " <flt...>";
+	      }
+	    #Add a required string array option's example argument
+	    elsif($usage_hash->{OPTTYPE} eq 'string_array')
+	      {
+		$requireds .= " <str...>";
+		$requireds_wo_prim .= " <str...>";
+	      }
+	    #Add a required enum array option's example argument
+	    elsif($usage_hash->{OPTTYPE} eq 'enum_array')
+	      {
+		my $acc = $usage_hash->{ACCEPTS};
+		if(defined($acc) && ref($acc) eq 'ARRAY' && scalar(@$acc))
+		  {
+		    $acc = join('|',@$acc);
+		    if(length($acc) > 20)
+		      {$acc =~ s/(.{17}).*/$1.../}
+		  }
+		else
+		  {$acc = 'str'}
+		$requireds .= " <$acc...>";
+		$requireds_wo_prim .= " <$acc...>";
+	      }
+	    #Add a required integer array option's example argument
+	    elsif($usage_hash->{OPTTYPE} eq 'integer_array2d')
+	      {
+		$requireds .= " <int...>...";
+		$requireds_wo_prim .= " <int...>...";
+	      }
+	    #Add a required float array option's example argument
+	    elsif($usage_hash->{OPTTYPE} eq 'float_array2d')
+	      {
+		$requireds .= " <flt...>...";
+		$requireds_wo_prim .= " <flt...>...";
+	      }
+	    #Add a required string array option's example argument
+	    elsif($usage_hash->{OPTTYPE} eq 'string_array2d')
+	      {
+		$requireds .= " <str...>...";
+		$requireds_wo_prim .= " <str...>...";
+	      }
+	    #Add a required enum array option's example argument
+	    elsif($usage_hash->{OPTTYPE} eq 'enum_array2d')
+	      {
+		my $acc = $usage_hash->{ACCEPTS};
+		if(defined($acc) && ref($acc) eq 'ARRAY' && scalar(@$acc))
+		  {
+		    $acc = join('|',@$acc);
+		    if(length($acc) > 20)
+		      {$acc =~ s/(.{17}).*/$1.../}
+		  }
+		else
+		  {$acc = 'str'}
+		$requireds .= " <$acc...>...";
+		$requireds_wo_prim .= " <$acc...>...";
 	      }
 	    #Add a required negatable boolean option's negation
 	    elsif($usage_hash->{OPTTYPE} eq 'negbool')
 	      {
 		my $neg = $flag;
-		$neg =~ s/^-+/--no-/;
-		$requireds .= "|$neg";
-		$requireds_wo_prim .= "|$neg";
+		$neg =~ s/^-+/--no/;
+		my $od = ${$GetOptHash->{$usage_hash->{GETOPTKEY}}};
+		my($of);
+		if(!defined($od))
+		  {$of = $flag}
+		elsif($od)
+		  {$of = $neg}
+		else
+		  {$of = $flag}
+		$requireds .= $of;
+		$requireds_wo_prim .= $of;
 	      }
 	    #Add a required count option's example optional argument
 	    elsif($usage_hash->{OPTTYPE} eq 'count')
 	      {
-		$requireds .= " [#]";
-		$requireds_wo_prim .= " [#]";
+		$requireds .= " [<cnt>]";
+		$requireds_wo_prim .= " [<cnt>]";
 	      }
-	    #Add a required scalar option's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'scalar')
+	    #Add a required integer option's example argument
+	    elsif($usage_hash->{OPTTYPE} eq 'integer')
 	      {
-		$requireds .= " value";
-		$requireds_wo_prim .= " value";
+		$requireds .= " <int>";
+		$requireds_wo_prim .= " <int>";
+	      }
+	    #Add a required float option's example argument
+	    elsif($usage_hash->{OPTTYPE} eq 'float')
+	      {
+		$requireds .= " <flt>";
+		$requireds_wo_prim .= " <flt>";
+	      }
+	    #Add a required string option's example argument
+	    elsif($usage_hash->{OPTTYPE} eq 'enum')
+	      {
+		my $acc = $usage_hash->{ACCEPTS};
+		if(defined($acc) && ref($acc) eq 'ARRAY' && scalar(@$acc))
+		  {
+		    $acc = join('|',@$acc);
+		    if(length($acc) > 20)
+		      {$acc =~ s/(.{17}).*/$1.../}
+		    $acc = "<$acc>";
+		  }
+		else
+		  {$acc = 'str'}
+		$requireds .= " $acc";
+		$requireds_wo_prim .= " $acc";
+	      }
+	    #Add a required string option's example argument
+	    elsif($usage_hash->{OPTTYPE} eq 'string')
+	      {
+		$requireds .= " <str>";
+		$requireds_wo_prim .= " <str>";
 	      }
 	    #Add a required unknown option's example argument
 	    elsif($usage_hash->{OPTTYPE} eq 'unk')
 	      {
-		$requireds .= " value";
-		$requireds_wo_prim .= " value";
+		$requireds .= " <val>";
+		$requireds_wo_prim .= " <val>";
 	      }
 	    $first_reqd = 0;
-	  }
-	#Add to the optional options string if we're in extended mode
-	elsif($local_extended)
-	  {
-	    $optionals .= ($first_optl ? '' : ',') . $flag;
-	    $optionals_wo_prim .= ($optionals_wo_prim eq '' ? '' : ',') . $flag
-	      unless($prim);
-	    $first_optl = 0;
 	  }
       }
 
@@ -13062,13 +15192,11 @@ sub getSummaryUsageOptStr
 		       ($primary_inf_exists && !$primary_hidden) ?
 		       "$script " . ($requireds ne '' ? "$requireds " : '') .
 		       "[$optionals]\n" : '');
-    if($local_extended || ($primary_inf_exists && $primary_hidden))
-      {
-	$summary_str .= ($summary_str eq '' ? '' : "\n");
-	$summary_str .= "$script " . ($requireds_wo_prim ne '' ?
-				      "$requireds_wo_prim " : '') .
-					"[$optionals_wo_prim] < input_file\n";
-      }
+    if(($local_extended && $primary_inf_exists) ||
+       ($primary_inf_exists && $primary_hidden))
+      {$summary_str .= "$script " . ($requireds_wo_prim ne '' ?
+				     "$requireds_wo_prim " : '') .
+				       "[$optionals_wo_prim] < input_file\n"}
     $summary_str .= "\n";
 
     return($summary_str);
@@ -13086,13 +15214,16 @@ sub usage
     my $local_extended = scalar(@in) > 1 && defined($in[1]) ? $in[1] :
       (defined($extended) ? $extended : 0);
 
+    unless($processCommandLine_called)
+      {processCommandLine()}
+
     debug({LEVEL => -1},"Value of usage: [$usage].");
 
     #Don't print a usage after quit has been called unless $usage == 1
     if($explicit_quit && $usage != 1)
       {return(0)}
 
-    print(getSummaryUsageOptStr($local_extended));
+    print(($error_mode ? "\n" : ''),getSummaryUsageOptStr($local_extended));
 
     #Obtain the custom user options
     my($short,$long) = customUsage();
@@ -13103,124 +15234,18 @@ sub usage
 	     " for usage.\n")}
     else
       {
-	my $odf = getOutdirFlag();
 	if(!$local_extended)
-	  {
-	    print($short);
-	    print << 'end_print';
-     --extended           OPTIONAL Print extended usage.
-
-end_print
-	  }
+	  {print($short)}
 	else #Advanced options/extended usage output
-	  {
-	    my $defdir = (defined($defaults_dir) ?
-			  $defaults_dir : (sglob('~/.rpst'))[0]);
-	    $defdir = 'undefined' if(!defined($defdir));
-	    print($long);
-	    print << "end_print";
-     --verbose            OPTIONAL Verbose mode/level.  (e.g. --verbose 2)
-     --quiet              OPTIONAL Quiet mode.
-     --overwrite          OPTIONAL Overwrite existing output files.  By
-                                   default, existing output files will not be
-                                   over-written.  Supply twice to safely*
-                                   remove pre-existing output directories (see
-                                   $odf).  Mutually exclusive with
-                                   --skip-existing and --append.
-                                   *Will not remove a directory containing
-                                   manually touched files.
-     --skip-existing      OPTIONAL Skip existing output files.  Mutually
-                                   exclusive with --overwrite and --append.
-     --append             OPTIONAL Append to existing output files.  Mutually
-                                   exclusive with --overwrite and
-                                   --skip-existing.
-     --force              OPTIONAL Prevent script-exit upon critical error and
-                                   continue processing.  Supply twice to
-                                   additionally prevent skipping the processing
-                                   of input files that cause errors.  Use this
-                                   option with extreme caution.  This option
-                                   will not over-ride over-write protection.
-                                   See also --overwrite or --skip-existing.
-     --header,--noheader  OPTIONAL [On] Print commented script version, date,
-                                   and command line call to each output file.
-     --debug              OPTIONAL Debug mode/level.  (e.g. --debug --debug)
-                                   Values less than 0 debug the template code
-                                   that was used to create this script.
-     --error-type-limit   OPTIONAL [5] Limits each type of error/warning to
-                                   this number of outputs.  Intended to
-                                   declutter output.  Note, a summary of
-                                   warning/error types is printed when the
-                                   script finishes, if one occurred or if in
-                                   verbose mode.  0 = no limit.  See also
-                                   --quiet.
-     --version            OPTIONAL Print version info.  Includes template
-                                   version with --extended.
-     --save-as-default    OPTIONAL Save the command line arguments.  Saved
-                                   defaults are printed at the bottom of this
-                                   usage output and used in every subsequent
-                                   call of this script.  Supplying this flag
-                                   replaces current defaults with all options
-                                   that are provided with this flag.  Values
-                                   are stored in [$defdir].
-                                   See --help --extended for changing script
-                                   behavior when no arguments are supplied on
-                                   the command line.
-     --pipeline-mode      OPTIONAL Supply this flag to include the script name
-                                   in errors, warnings, and debug messages.  If
-                                   not supplied, the script will try to
-                                   determine if it is running within a series
-                                   of piped commands or as a part of a parent
-                                   script.
-     --extended           OPTIONAL Print extended usage/help/version/header
-                                   (and errors/warnings where noted).  Supply
-                                   alone for extended usage.  Includes extended
-                                   version in output file headers.
-                                   Incompatible with --noheader.  See --help &
-                                   --version.
-end_print
-	  }
+	  {print($long)}
 
-	#Hidden advanced options - not yet fully implemented
-	if($local_extended > 1)
-	  {
-	    print << "end_print";
-     --collision-mode     OPTIONAL [error]{merge,rename,error} When
-                                   multiple input files output to the same
-                                   output file, this option specifies what to
-                                   do.  Merge mode will concatenate output
-                                   in the common output file.  Rename mode
-                                   (valid only if this script accepts multiple
-                                   types of input files) will create a unique
-                                   output file name by appending a unique
-                                   combination of input file names together
-                                   (with a delimiting dot).  Rename mode will
-                                   throw an error if a unique file name cannot
-                                   be constructed (e.g. when 2 input files of
-                                   the same name in different directories are
-                                   outputting to a common $odf).  Error
-                                   mode causes the script to quit with an error
-                                   if multiple input files are detected to
-                                   output to the same output file.
-
-                                   THIS OPTION IS DEPRECATED AND HAS BEEN
-                                   REPLACED BY SUPPLYING COLLISION MODE VIA
-                                   addOutFileSuffixOption AND addOutfileOption.
-                                   THIS OPTION HOWEVER WILL OVERRIDE THE
-                                   COLLISION MODE OF ALL OUTFILE OPTIONS AND
-                                   APPLY TO FILES THAT ARE NOT DEFINED BY
-                                   addOutFileSuffixOption OR addOutfileOption
-                                   IF OPENED MULTIPLE TIMES UNLESS SET
-                                   EXPLICITLY IN THE openOut CALL.
-end_print
-	  }
-
-	my @user_defaults = getUserDefaults();
+	if($short =~ /^\*/ || $long =~ /^\*/)
+	  {print("* Required.\n")}
 	if(!$local_extended &&
 	   scalar(grep {$_->{REQUIRED}} values(%$outfile_tagteams)))
 	  {print("^ 1 of 2 mutually exclusive options required.\n")}
-	print(scalar(@user_defaults) ?
-	      "Current user defaults: [@user_defaults].\n" :
-	      "No user defaults set.\n");
+	if($short =~ /^~/ || $long =~ /^~/)
+	  {print("~ Required (but has default).\n")}
       }
 
     return(0);
@@ -13230,7 +15255,6 @@ BEGIN
   {
     #Enable export of subs & vars
     require Exporter;
-    $VERSION       = '4.107';
     our @ISA       = qw(Exporter);
     our @EXPORT    = qw(openIn                       openOut
 			closeIn                      closeOut
@@ -13279,7 +15303,7 @@ END
 	if(defined($compile_err) && scalar(@$compile_err) &&
 	   (!defined($command_line_processed) || $command_line_processed < 2))
 	  {print STDERR ("CommandLineInterface: Unable to complete set up.\n")}
-	else
+	elsif(!defined($cleanup_mode) || !$cleanup_mode)
 	  {quit(0)}
       }
   }
@@ -13319,35 +15343,35 @@ CommandLineInterface allows you to instantly give any script a unix-like command
                   AUTHOR  => 'Robert Leach',
                   CONTACT => 'rleach@princeton.edu',
                   COMPANY => 'Princeton University',
-                  LICENSE => 'Copyright 2017',
+                  LICENSE => 'Copyright 2018',
                   HELP    => 'Concatenates pairs of files.');
 
-    my $filetype1 = addInfileOption(GETOPTKEY   => 'i=s',
-                                    REQUIRED    => 1,
-                                    DEFAULT     => undef,
-                                    PRIMARY     => 1,
-                                    SMRY_DESC   => 'First input file type.',
-                                    DETAIL_DESC => 'First input file type.  ' .
+    my $filetype1 = addInfileOption(FLAG       => 'i',
+                                    REQUIRED   => 1,
+                                    DEFAULT    => undef,
+                                    PRIMARY    => 1,
+                                    SHORT_DESC => 'First input file type.',
+                                    LONG_DESC  => 'First input file type.  ' .
                                     'Put at the begining of the output file.',
-                                    FORMAT_DESC => 'Ascii text.');
+                                    FORMAT     => 'Ascii text.');
 
-    my $filetype2 = addInfileOption(GETOPTKEY   => 'j=s',
-                                    REQUIRED    => 1,
-                                    SMRY_DESC   => 'Second input file type.',
-                                    DETAIL_DESC => 'Second input file type.' .
+    my $filetype2 = addInfileOption(FLAG       => 'j',
+                                    REQUIRED   => 1,
+                                    SHORT_DESC => 'Second input file type.',
+                                    LONG_DESC  => 'Second input file type.' .
                                     '  Put at the end of the output file.',
-                                    FORMAT_DESC => 'Ascii text.',
-                                    PAIR_WITH   => $filetype1,
-                                    PAIR_RELAT  => 'ONETOONE');
+                                    FORMAT     => 'Ascii text.',
+                                    PAIR_WITH  => $filetype1,
+                                    PAIR_RELAT => 'ONETOONE');
 
-    my $outftype1 = addOutfileOption(GETOPTKEY     => 'o=s',
+    my $outftype1 = addOutfileOption(FLAG          => 'o',
                                      COLLISIONMODE => 'merge',
-                                     SMRY_DESC     => 'Output file name.',
-                                     DETAIL_DESC   => 'Provide a name for ' .
+                                     SHORT_DESC    => 'Output file name.',
+                                     LONG_DESC     => 'Provide a name for ' .
                                      'the output file.  An output file name ' .
                                      'for each pair of input files may be ' .
                                      'provided (see -i and -j).',
-                                     FORMAT_DESC   => 'Same as the input file',
+                                     FORMAT        => 'Same as the input file',
                                      PAIR_WITH     => $filetype1,
                                      PAIR_RELAT    => 'ONETOONE');
 
@@ -13440,7 +15464,7 @@ Flags to help deal with pre-existing output files, all of which apply to all fil
 
 =item --overwrite         automatically handled
 
-=item --skip-existing     automatically handled
+=item --skip              automatically handled
 
 =item --append            automatically handled
 
@@ -13456,11 +15480,11 @@ These flags help to figure out bugs.
 
 =item --debug             Use debug(). <0 = package debugging
 
-=item --error-type-limit  suppress repeated error/warning types
+=item --error-limit       suppress repeated error/warning types
 
 =item --dry-run           prevents openIn & openOut operations
 
-=item --pipeline-mode     automatic; prepend script name to msgs
+=item --pipeline          automatic; prepend script name to msgs
 
 =back
 
@@ -13472,27 +15496,43 @@ Simply by using CommandLineInterface, your script will have these options availa
 
 =over 12
 
-=item C<add2DArrayOption> GETOPTKEY, GETOPTVAL [, REQUIRED, DEFAULT, HIDDEN, SMRY_DESC, DETAIL_DESC, ACCEPTS]
+=item C<add2DArrayOption> FLAG, VARREF [, TYPE, REQUIRED, DEFAULT, HIDDEN, SHORT_DESC, LONG_DESC, ACCEPTS, DELIMITER]
 
-Add an option/flag to the command line interface that a user can supply on the command line either multiple times, once with space-delimited values, or both.  Each instance of the GETOPTKEY-defined flag on the command line defines a sub-array and the space-delimited values wrapped in quotes will be pushed onto the inner array.  E.g. -a '1 2 3' -a 'a b c' creates the following 2D array: [['1','2','3'],['a','b','c']].
+Add an option/flag to the command line interface that a user can supply on the command line either multiple times, once with multiple values, or both.  Each instance of the FLAG on the command line defines a sub-array and the space-delimited values (wrapped in quotes) will be pushed onto the inner array.  E.g. -a '1 2 3' -a 'a b c' creates the following 2D array: [['1','2','3'],['a','b','c']].
 
-GETOPTKEY is the key that is supplied to Getopt::Long's GetOptions method.  It is required to use '=s' at the end of the key to indicate that the flag expects a string value.  This is so that multiuple values can be supplied to a single flag, space-delimited.
+FLAG is the name or names of the flag the user supplies on the command line (with or without an argument as defined by TYPE).  You can supply a single FLAG or a reference to an array of FLAGs.  Only alpha-numeric characters, dashes, and underscores are permitted.  Single character flags will be prepended with a single dash '-' and multi-character flags will get a double dash '--'.
 
-GETOPTVAL takes a reference to an array onto which values supplied on the command line will be pushed.  This is the value that is supplied to Getopt::Long's GetOptions method.  The reference must be defined before passing it to add2DArrayOption.
+VARREF takes a reference to an array onto which values supplied on the command line will be pushed.  The reference must be defined before passing it to add2DArrayOption.
+
+TYPE can be any of:
+
+    integer - signed or unsigned integer (exponents like 10e10 allowed)
+    float   - float (exponents like 10.0e10 allowed)
+    string  - string
+    enum    - enumeration (values defined using the ACCEPTS array)
+
+If not supplied, the default TYPE is str if ACCEPTS is also not supplied, or enum if ACCEPTS is supplied.
 
 If REQUIRED is a non-zero value (e.g. '1'), the script will quit with an error and a usage message if at least 1 value is not supplied by the user on the command line.  If required is not supplied or set to 0, the flag will be treated as optional.
 
-The DEFAULT parameter is not used to initialize the GETOPTVAL value, but rather is a string simply describing/defining the default in the usage message for this parameter.  Optionally, a reference to an array of references to arrays of scalars may be supplied.  The 2D array will be converted into a string using delimiting paranthases and commas, e.g.: "((1,2),(3,4)),((5),(6,7,8))", when displayed in the usage output's default for the given option.
+The DEFAULT parameter is not used to initialize the VARREF value, but rather is a string simply describing/defining the default in the usage message for this parameter.  Optionally, a reference to an array of references to arrays of scalars may be supplied.  The 2D array will be converted into a string using delimiting paranthases and commas, e.g.: "((1,2),(3,4)),((5),(6,7,8))", when displayed in the usage output's default for the given option.
 
 If HIDDEN is a non-zero value (e.g. '1'), the flag/option created by this method will not be a part of the usage output.  Note that if HIDDEN is non-zero, a DEFAULT must be supplied.
 
-SMRY_DESC is the short version of the usage message for this output file type.  An empty string will cause this option to not be in the short version of the usage message.
+SHORT_DESC is the short version of the usage message for this output file type.  An empty string will cause this option to not be in the short version of the usage message.
 
-DETAIL_DESC is the long version of the usage message for this output file type.  If DETAIL_DESC is not defined/supplied and SMRY_DESC has a non-empty string, SMRY_DESC is copied to DETAIL_DESC.
+LONG_DESC is the long version of the usage message for this output file type.  If LONG_DESC is not defined/supplied and SHORT_DESC has a non-empty string, SHORT_DESC is copied to LONG_DESC.
 
-Note, both SMRY_DESC and DETAIL_DESC have auto-generated formatting which includes whether or not the option is REQUIRED.
+Note, both SHORT_DESC and LONG_DESC have auto-generated formatting which includes whether or not the option is REQUIRED.
 
-ACCEPTS takes a reference to an array of scalar values.  If defined/supplied, the list of acceptable values will be shown in the usage message for this option after the default value and before the description.  This parameter is intended for short lists of discrete values (i.e. enumerations) only.  Descriptions of acceptable value ranges should instead be incorporated into the DETAIL_DESC.
+ACCEPTS takes a reference to an array of scalar values.  If defined/supplied, the list of acceptable values will be shown in the usage message for this option after the default value and before the description.  This parameter is intended for short lists of discrete values (i.e. enumerations) only.  Descriptions of acceptable value ranges should instead be incorporated into the LONG_DESC.
+
+DELIMITER is the character between multiple values supplied to a single FLAG.  Note, if you use a space as your DELIMITER, the arguments must be wrapped in quotes.  Multiple character DELIMITERs are allowed.  Empty values (between multiple instances of contiguous delimiters) are skipped.  A perl regular expression is allowed (e.g. '\s+').  The default is based on TYPE.  Defaults of DELIMITER for each TYPE are:
+
+    integer - Non-number characters (i.e. not 0-9, '+', '-', or 'e' (exponent).
+    float   - Same as int, but decimals are included.
+    string  - No delimiting is done.
+    enum    - Any character not in the ACCEPTS values.
 
 I<EXAMPLE>
 
@@ -13505,13 +15545,14 @@ I<Command>
 I<Code>
 
     my $array2d = [];
-    add2DArrayOption(GETOPTKEY   => 'a=s',
-                     GETOPTVAL   => $array2d,
-                     REQUIRED    => 1,
-                     DEFAULT     => 'none',
-                     HIDDEN      => 0,
-                     SMRY_DESC   => 'A series of numbers.',
-                     DETAIL_DESC => 'A space-delimited series of numbers.');
+    add2DArrayOption(FLAG       => 'a',
+                     VARREF     => $array2d,
+                     TYPE       => 'string',
+                     REQUIRED   => 1,
+                     DEFAULT    => '',
+                     HIDDEN     => 0,
+                     SHORT_DESC => 'A series of numbers.',
+                     LONG_DESC  => 'A space-delimited series of numbers.');
     processCommandLine();
     foreach my $sub_array (@$array2d)
     print(join(' ',@$sub_array),"\n");
@@ -13537,41 +15578,57 @@ I<LIMITATIONS>
 
 There's currently no way to require a minimum, maximum, or exact number of required values - only at least 1.
 
-GETOPTKEY strings such as 'a=i' cannot be used due to the parsing of space-delimited values.
-
 There is not yet a way to pair a 2D array option with input or output files.
 
-The reference supplied to GETOPTVAL must be an array reference.  There is no accommodation for method references, however addOption() can be used to supply a method reference instead.
+The reference supplied to VARREF must be an array reference.  There is no accommodation for method references, however addOption() can be used to supply a method reference instead.
 
 I<ADVANCED>
 
-Note that the GETOPTVAL array variable supplied is not populated until processCommandLine() has been called.  Once processCommandLine() has been called, no further calls to add2DArrayOption() are allowed.
+FLAG strings are used as a key in the hash passed to Getopt::Long's GetOptions method.  As such, a type could be specified in the FLAG string, however since this is an array option with a delimiter, appending a type string in the flag string, such as 'a=i', cannot be used due to the parsing of delimited values.  So using the TYPE parameter is preferable.
+
+VARREF is the value that is supplied as a value in the hash passed to Getopt::Long's GetOptions method.  Note that the VARREF array variable supplied is not populated until processCommandLine() has been called.  Once processCommandLine() has been called, no further calls to add2DArrayOption() are allowed.
 
 If an array is pre-populated with default values, the default is not replaced, but rather is added to.  In order to set a default value, the prgrammer must set the default after the command line has been processed, if the user did not set a value.
 
-=item C<addArrayOption> GETOPTKEY, GETOPTVAL [, REQUIRED, DEFAULT, HIDDEN, SMRY_DESC, DETAIL_DESC, INTERPOLATE, ACCEPTS]
+If REQUIRED is true, but the array reference provided is populated with default values, the option is essentially optional.  Setting REQUIRED to true only forces the user to supply a value if the array reference refers to an empty array.  Note also that if the user provides no options on the command line, a general usage is printed, but if other options are supplied, and error about missing required options is generated.
 
-Add an option/flag to the command line interface that a user can supply on the command line either multiple times, once with space-delimited values (if INTERPOLATE is non-zero), or both, and each value will be pushed onto the GETOPTVAL array reference.
+=item C<addArrayOption> FLAG, VARREF [, TYPE, REQUIRED, DEFAULT, HIDDEN, SHORT_DESC, LONG_DESC, DELIMITER, ACCEPTS]
 
-GETOPTKEY is the key that is supplied to Getopt::Long's GetOptions method.  It is suggested to use '=s' at the end of the key to indicate that the flag expects a string value.  This is so that multiuple values can be supplied to a single flag, space-delimited.
+Add an option/flag to the command line interface that a user can supply on the command line either multiple times, once with multiple values (if DELIMITER is defined), or both, and each value will be pushed onto the VARREF array reference.
 
-GETOPTVAL takes a reference to an array onto which values supplied on the command line will be pushed.  This is the value that is supplied to Getopt::Long's GetOptions method.  The reference must be defined before passing it to addArrayOption.
+FLAG is the name or names of the flag the user supplies on the command line (with or without an argument as defined by TYPE).  You can supply a single FLAG or a reference to an array of FLAGs.  Only alpha-numeric characters, dashes, and underscores are permitted.  Single character flags will be prepended with a single dash '-' and multi-character flags will get a double dash '--'.
+
+VARREF takes a reference to an array onto which values supplied on the command line will be pushed.  The reference must be defined before passing it to addArrayOption.
+
+TYPE can be any of:
+
+    integer - signed or unsigned integer (exponents like 10e10 allowed)
+    float   - signed or unsigned decimal value (exponents like 10.0e10 allowed)
+    string  - string
+    enum    - enumeration (values defined using the ACCEPTS array)
+
+If not supplied, the default TYPE is str if ACCEPTS is also not supplied, or enum if ACCEPTS is supplied.
 
 If REQUIRED is a non-zero value (e.g. '1'), the script will quit with an error and a usage message if at least 1 value is not supplied by the user on the command line.  If required is not supplied or set to 0, the flag will be treated as optional.
 
-The DEFAULT parameter is not used to initialize the GETOPTVAL value, but rather is a scalar (or reference to an array of scalars) simply describing/defining the default in the usage message for this parameter.  Setting the default value if no value is supplied by the user, is a job for the programmer.
+The DEFAULT parameter is not used to initialize the VARREF value, but rather is a scalar (or reference to an array of scalars) simply describing/defining the default in the usage message for this parameter.  Setting the default value if no value is supplied by the user, is a job for the programmer.
 
 If HIDDEN is a non-zero value (e.g. '1'), the flag/option created by this method will not be a part of the usage output.  Note that if HIDDEN is non-zero, a DEFAULT must be supplied.
 
-SMRY_DESC is the short version of the usage message for this output file type.  An empty string will cause this option to not be in the short version of the usage message.
+SHORT_DESC is the short version of the usage message for this output file type.  An empty string will cause this option to not be in the short version of the usage message.
 
-DETAIL_DESC is the long version of the usage message for this output file type.  If DETAIL_DESC is not defined/supplied and SMRY_DESC has a non-empty string, SMRY_DESC is copied to DETAIL_DESC.
+LONG_DESC is the long version of the usage message for this output file type.  If LONG_DESC is not defined/supplied and SHORT_DESC has a non-empty string, SHORT_DESC is copied to LONG_DESC.
 
-Note, both SMRY_DESC and DETAIL_DESC have auto-generated formatting which includes whether or not the option is REQUIRED.
+Note, both SHORT_DESC and LONG_DESC have auto-generated formatting which includes whether or not the option is REQUIRED.
 
-INTERPOLATE indicates whether the values supplied by the flag defined by this method should be interpolated by the shell.  This is what allows multiple values inside quotes to be delimited by spaces.
+DELIMITER is the character between multiple values supplied to a single FLAG.  Note, if you use a space as your DELIMITER, the arguments must be wrapped in quotes.  Multiple character DELIMITERs are allowed.  Empty values (between multiple instances of contiguous delimiters) are skipped.  A perl regular expression is allowed (e.g. '\s+').  The default is based on TYPE.  Defaults of DELIMITER for each TYPE are:
 
-ACCEPTS takes a reference to an array of scalar values.  If defined/supplied, the list of acceptable values will be shown in the usage message for this option after the default value and before the description.  This parameter is intended for short lists of discrete values (i.e. enumerations) only.  Descriptions of acceptable value ranges should instead be incorporated into the DETAIL_DESC.
+    integer - Non-number characters (i.e. not 0-9, '+', '-', or 'e' (exponent).
+    float   - Same as int, but decimals are included.
+    string  - Space.
+    enum    - Any character not in the ACCEPTS values.
+
+ACCEPTS takes a reference to an array of scalar values.  If defined/supplied, the list of acceptable values will be shown in the usage message for this option after the default value and before the description.  This parameter is intended for short lists of discrete values (i.e. enumerations) only.  Descriptions of acceptable value ranges should instead be incorporated into the LONG_DESC.
 
 I<EXAMPLE>
 
@@ -13584,14 +15641,14 @@ I<Command>
 I<Code>
 
     my $array = [];
-    addArrayOption(GETOPTKEY   => 'a=s',
-                   GETOPTVAL   => $array,
-                   REQUIRED    => 1,
-                   DEFAULT     => 'none',
-                   HIDDEN      => 0,
-                   SMRY_DESC   => 'A series of numbers.',
-                   DETAIL_DESC => 'A space-delimited series of numbers.',
-                   INTERPOLATE => 1);
+    addArrayOption(FLAG       => 'a',
+                   VARREF     => $array,
+                   REQUIRED   => 1,
+                   DEFAULT    => '',
+                   HIDDEN     => 0,
+                   SHORT_DESC => 'A series of numbers.',
+                   LONG_DESC  => '   space-delimited series of numbers.',
+                   DELIMITER  => ' ');
     processCommandLine();
     print(join("\n",@$array),"\n");
 
@@ -13620,21 +15677,23 @@ I<LIMITATIONS>
 
 There's currently no way to require a minimum, maximum, or exact number of required values - only at least 1.  This will be addressed when requirement 172 is implemented.
 
-GETOPTKEY strings such as 'a=i' can be used, but disables the ability to use the INTERPOLATE parameter.  Additionally, only options which accept a value can be used.
-
 There is not yet a way to pair an array option with input or output files.  This will be addressed when requirement 15 is implemented.
 
-The reference supplied to GETOPTVAL must be an array reference.  There is no accommodation for method references, however addOption() can be used to supply a method reference instead.
+The reference supplied to VARREF must be an array reference.  There is no accommodation for method references, however addOption() can be used to supply a method reference instead.
 
 If an array is pre-populated with default values, the default is not replaced, but rather is added to.  In order to set a default value, the prgrammer must set the default after the command line has been processed, if the user did not set a value.
 
 I<ADVANCED>
 
-Note that the GETOPTVAL array variable supplied is not populated until processCommandLine() has been called.  Once processCommandLine() has been called, no further calls to addArrayOption() are allowed.
+VARREF is the value that is supplied as a value in the hash that is passed to Getopt::Long's GetOptions method.  Note that the VARREF array variable supplied is not populated until processCommandLine() has been called.  Once processCommandLine() has been called, no further calls to addArrayOption() are allowed.
 
-=item C<addInfileOption> GETOPTKEY [, REQUIRED, DEFAULT, PRIMARY, HIDDEN, SMRY_DESC, DETAIL_DESC, FORMAT_DESC, PAIR_WITH, PAIR_RELAT]
+If REQUIRED is true, but the array reference provided is populated with default values, the option is essentially optional.  Setting REQUIRED to true only forces the user to supply a value if the array reference refers to an empty array.  Note also that if the user provides no options on the command line, a general usage is printed, but if other options are supplied, and error about missing required options is generated.
 
-Adds an input file option to the command line interface.  The flag is defined by the GETOPTKEY, which is a key that you would use in the hash argument to Getopt::Long's GetOptions method.  GETOPTKEY's paired value is created and tracked by CommandLineInterface.  The GETOPTKEY string must end with '=s'.
+=item C<addInfileOption> FLAG [, REQUIRED, DEFAULT, PRIMARY, HIDDEN, SHORT_DESC, LONG_DESC, FORMAT, PAIR_WITH, PAIR_RELAT]
+
+Adds an input file option to the command line interface.
+
+FLAG is the name or names of the flag the user supplies on the command line with file, space-delimited list of files inside quotes, or a glob pattern inside quotes.  You can supply a single FLAG or a reference to an array of FLAGs.  Only alpha-numeric characters, dashes, and underscores are permitted.  Single character flags will be prepended with a single dash '-' and multi-character flags will get a double dash '--'.
 
 The return value is an input file type ID that is later used to obtain the files that the user has supplied on the command line (see getInfile(), getNextFileGroup(), getAllFileGroups()).  Files for each input file type are kept in a 2D array where the outer array is indexed by the number of occurrences of the flag on the command line (e.g. '-i') and the inner array is all the files supplied to that flag instance.  Note, CommandLineInterface globs input files, so to supply multiple files to a single instance of -i, you have to wrap the file names/glob pattern(s) in quotes.
 
@@ -13646,13 +15705,13 @@ There can be only one PRIMARY input file type.  Making an input file type 'PRIMA
 
 If HIDDEN is a non-zero value (e.g. '1'), the flag/option created by this method will not be a part of the usage output.  Note that if HIDDEN is non-zero, a DEFAULT must be supplied.  If HIDDEN is unsupplied, the default will be 0 if the file type is not linked to another file type that is itself HIDDEN.  If the linked file is HIDDEN, the default will be HIDDEN for this option as well.
 
-SMRY_DESC is the short version of the usage message for this file type.  An empty string will cause this option to not be in the short version of the usage message.
+SHORT_DESC is the short version of the usage message for this file type.  An empty string will cause this option to not be in the short version of the usage message.
 
-DETAIL_DESC is the long version of the usage message for this file type.  If DETAIL_DESC is not defined/supplied and SMRY_DESC has a non-empty string, SMRY_DESC is copied to DETAIL_DESC.
+LONG_DESC is the long version of the usage message for this file type.  If LONG_DESC is not defined/supplied and SHORT_DESC has a non-empty string, SHORT_DESC is copied to LONG_DESC.
 
-Note, both SMRY_DESC and DETAIL_DESC have auto-generated formatting which includes details on the REQUIRED and PRIMARY states as well as the flag(s) parsed from GETOPTKEY.
+Note, both SHORT_DESC and LONG_DESC have auto-generated formatting which includes details on the REQUIRED and PRIMARY states as well as the flag(s) parsed from FLAG.
 
-FORMAT_DESC is the description of the input file format that is printed when --help is provided by the user.  The auto-generated details for input format descriptions includes the applicable flag(s) and whether or not the flag is necessary.
+FORMAT is the description of the input file format that is printed when --help is provided by the user.  The auto-generated details for input format descriptions includes the applicable flag(s) and whether or not the flag is necessary.
 
 PAIR_WITH and PAIR_RELAT allow the programmer to require a certain relative relationship with other input (or output) file parameters (already added).  PAIR_WITH takes the input (or output) file type ID (returned by the previous call to addInfileOption() or addOutfileOption()) and PAIR_RELAT takes one of 'ONETOONE', 'ONETOMANY', or 'ONETOONEORMANY'.  For example, if there should be one output file for every group of input files of type $intype1, then PAIR_WITH and PAIR_RELAT should be $intype1 and 'ONETOMANY', respectively.
 
@@ -13670,22 +15729,22 @@ I<Command>
 
 I<Code>
 
-    my $id1 = addInfileOption(GETOPTKEY   => 'i=s',
-                              REQUIRED    => 1,
-                              DEFAULT     => undef,
-                              PRIMARY     => 1,
-                              HIDDEN      => 0,
-                              SMRY_DESC   => 'Input file(s).',
-                              DETAIL_DESC => '1 or more text input files.',
-                              FORMAT_DESC => 'ASCII text.');
-    my $id2 = addInfileOption(GETOPTKEY   => 'j=s',
+    my $id1 = addInfileOption(FLAG       => 'i',
+                              REQUIRED   => 1,
+                              DEFAULT    => undef,
+                              PRIMARY    => 1,
+                              HIDDEN     => 0,
+                              SHORT_DESC => 'Input file(s).',
+                              LONG_DESC  => '1 or more text input files.',
+                              FORMAT     => 'ASCII text.');
+    my $id2 = addInfileOption(FLAG       => 'j',
                               REQUIRED    => 0,
                               DEFAULT     => undef,
                               PRIMARY     => 0,
                               HIDDEN      => 0,
-                              SMRY_DESC   => 'Input file(s).',
-                              DETAIL_DESC => '1 or more tabbed input files.',
-                              FORMAT_DESC => 'Tab delimited ASCII text, 1 ' .
+                              SHORT_DESC  => 'Input file(s).',
+                              LONG_DESC   => '1 or more tabbed input files.',
+                              FORMAT      => 'Tab delimited ASCII text, 1 ' .
                                              'tab per line.  First column ' .
                                              'is a unique ID and the second ' .
                                              'column is a value.',
@@ -13718,25 +15777,35 @@ Multiple values supplied to a PRIMARY file type's flag when STDIN is present cau
 
 PAIR_RELAT can be instructed to only allow 1 instance of an input file type (by supplying the string 'ONE') without needing PAIR_WITH to be defined.
 
-=item C<addOption> GETOPTKEY, GETOPTVAL [, REQUIRED, DEFAULT, HIDDEN, SMRY_DESC, DETAIL_DESC, ACCEPTS]
+=item C<addOption> FLAG, VARREF [, TYPE, REQUIRED, DEFAULT, HIDDEN, SHORT_DESC, LONG_DESC, ACCEPTS]
 
 This method allows the programmer to create simple options on the command line.  The values of user-supplied options are available after processCommandLine() is called.
 
-GETOPTKEY is the key supplied in the GetOptions hash.  See `perldoc Getopt::Long` for a description of what a valid key value is, but in short, this is the flag name (e.g. 'variable') followed by a description of the value it takes (e.g. '=s' for a string value, or fully defined: 'variable=s').  The user supplies the flag and its value, as defined in this string, on the command line (e.g. `--variable 5`).
+FLAG is the name or names of the flag the user supplies on the command line (with or without an argument as defined by TYPE).  You can supply a single FLAG or a reference to an array of FLAGs.  Only alpha-numeric characters, dashes, and underscores are permitted.  Single character flags will be prepended with a single dash '-' and multi-character flags will get a double dash '--'.
 
-GETOPTVAL is a reference to the perl variable where the user's supplied value will be stored (e.g. $variable).
+VARREF is a reference to the perl variable where the user's supplied value will be stored (e.g. $variable).
 
-REQUIRED indicates whether the option is required on the command line when the user runs the script.  If it is not supplied, the user will either get an error (if other options were supplied) to indicate the missing required options, or the usage message if not options were supplied at all.
+TYPE can be any of the following:
 
-Supply a DEFAULT value for automatic inclusion in the usage message for this option.  This only affects the usage message.  The value referenced by GETOPTVAL is not altered to get this value.  The value referenced by GETOPTVAL should already be set to its default value before processCommandLine is called.  Though it may seem redundant, the programmer may have long or complex defaults that depend on other parameters, thus the displayed default string might be more succinctly described as 'auto' or described in the option description.
+    bool    - FLAG does not take an argument and sets VARREF to 1 if supplied.
+    negbool - A 'negatable' FLAG that does not take an argument.  The user can supply the flag as-is, which sets VARREF to 1, or they can supply --no<FLAG> to set VARREF to 0.  Usage will show the flag which is the opposite of the value referred to in VARREF.  If the value referred to by VARREF is undefined, the usage will show both flags.
+    integer - signed or unsigned integer (exponents like 10e10 allowed)
+    float   - signed or unsigned decimal value (exponents like 10.0e10 allowed)
+    string  - string
+    enum    - enumeration where the argument can be one of a set of acceptable values defined by ACCEPTS.
+    count   - A 'count' FLAG that can either be set with an integer argument or incremented by multiple instances of FLAG without an argument.  Do not mix FLAGs with and without arguments.
+
+REQUIRED indicates whether the option is required on the command line when the user runs the script.  If it is not supplied, the user will either get an error (if other options were supplied) to indicate the missing required options, or the usage message if no options were supplied at all.
+
+Supply a DEFAULT value for automatic inclusion in the usage message for this option.  This only affects the usage message.  The value referenced by VARREF is not altered to get this value.  The value referenced by VARREF should already be set to its default value before processCommandLine is called.  Though it may seem redundant, the programmer may have long or complex defaults that depend on other parameters, thus the displayed default string might be more succinctly described as 'auto' or described in the option description.
 
 If HIDDEN is set to a non-zero value, the option will not be included in the usage message.
 
-SMRY_DESC is the short version of the description of this option.  If set to undefined or an empty string, this option will not appear in the short usage message.  The short usage message is what the user will see if they run the script with no options.
+SHORT_DESC is the short version of the description of this option.  If set to undefined or an empty string, this option will not appear in the short usage message.  The short usage message is what the user will see if they run the script with no options.
 
-DETAIL_DESC is the long version of the description of this option.  If set to undefined or an empty string, this option will be set to a warning that the programmer has not provided a description of this option.  The long usage message is what the user will see if they run the script with only the --extended flag.
+LONG_DESC is the long version of the description of this option.  If set to undefined or an empty string, this option will be set to a warning that the programmer has not provided a description of this option.  The long usage message is what the user will see if they run the script with only the --extended flag.
 
-ACCEPTS takes a reference to an array of scalar values.  If defined/supplied, the list of acceptable values will be shown in the usage message for this option after the default value and before the description.  This parameter is intended for short lists of discrete values (i.e. enumerations) only.  Descriptions of acceptable value ranges should instead be incorporated into the DETAIL_DESC.
+ACCEPTS takes a reference to an array of scalar values.  If defined/supplied, the list of acceptable values will be shown in the usage message for this option after the default value and before the description.  This parameter is intended for short lists of discrete values (i.e. enumerations) only.  Descriptions of acceptable value ranges should instead be incorporated into the LONG_DESC.
 
 I<EXAMPLE>
 
@@ -13749,15 +15818,15 @@ I<Command>
 I<Code>
 
     my $answer = 'no';
-    addOption(GETOPTKEY => 'exhaustive=s',
-              GETOPTVAL => \$answer,
-              REQUIRED  => 1,
-              DEFAULT   => 'no',
-              HIDDEN    => 0,
-              SMRY_DESC => 'Whether or not to calculate exhaustively.',
-              DETAIL_DESC => 'Whether or not to calculate exhaustively.  ' .
-                             'maybe=flip a coin.',
-              ACCEPTS     => ['yes','no','maybe']);
+    addOption(FLAG       => 'exhaustive',
+              VARREF     => \$answer,
+              REQUIRED   => 1,
+              DEFAULT    => 'no',
+              HIDDEN     => 0,
+              SHORT_DESC => 'Whether or not to calculate exhaustively.',
+              LONG_DESC  => 'Whether or not to calculate exhaustively.  ' .
+                            'maybe=flip a coin.',
+              ACCEPTS    => ['yes','no','maybe']);
     processCommandLine();
     print("$answer\n");
 
@@ -13777,8 +15846,9 @@ None.
 
 I<ADVANCED>
 
-GETOPTVAL may be a reference to a method.  See `perldoc Getopt::Long` for more information and details.
+VARREF may be a reference to a method.  See `perldoc Getopt::Long` for more information and details.
 
+If REQUIRED is true, but the reference provided is populated with a default value, the option is essentially optional.  Setting REQUIRED to true only forces the user to supply a value if the reference refers to an undefined or empty variable.  Note also that if the user provides no options on the command line, a general usage is printed, but if other options are supplied, and error about missing required options is generated.
 
 =item C<addOptions> GETOPTHASH [, REQUIRED, OVERWRITE, RENAME]
 
@@ -13802,8 +15872,8 @@ I<Code>
 
     my $e_int = 3;
     my $k_str = 'default';
-    addOptions({'e=i' => \$e_int,
-                'k=s' => \$k_str});
+    addOptions(GETOPTHASH => {'e=i' => \$e_int,
+                              'k=s' => \$k_str});
     processCommandLine();
     print("$k_str : $e_int\n");
 
@@ -13829,11 +15899,13 @@ OVERWRITE deactivates a default option that you wish to handle yourself.  The ke
 
 RENAME: [in development/experimental] If a reference to a value in the GetOptions hash already exists, delete and remake the key-value pair using the associated key.
 
-=item C<addOutdirOption> GETOPTKEY [, REQUIRED, DEFAULT, HIDDEN, SMRY_DESC, DETAIL_DESC]
+If REQUIRED is true, but the reference provided is populated with a default value, the option is essentially optional.  Setting REQUIRED to true only forces the user to supply a value if the reference refers to an undefined or empty variable.  Note also that if the user provides no options on the command line, a general usage is printed, but if other options are supplied, and error about missing required options is generated.
 
-Adds an output directory option to the command line interface.  All output files generated through the addOutfileSuffixOption() and addOutfileOption() methods will be put in the output directory if it is supplied.  The entire path (if any) is replaced with a path to the supplied output directory.  If an outdir is not provided by the user, the supplied path of the outfile or the input file (to which an extension is added) is where the output file will go.
+=item C<addOutdirOption> FLAG [, REQUIRED, DEFAULT, HIDDEN, SHORT_DESC, LONG_DESC]
 
-The flag is defined by the GETOPTKEY, which is a key that you would use in the hash argument to Getopt::Long's GetOptions method.  GETOPTKEY's paired value is created and tracked by CommandLineInterface.  The GETOPTKEY string must end with '=s'.
+Adds an output directory option to the command line interface.  All output files generated through the addOutfileSuffixOption() and addOutfileOption() methods will be put in the output directory if it is supplied.  The entire path (if any) is replaced with a path to the supplied output directory.  If an outdir is not provided by the user, the supplied path of the outfile or the input file (to which a suffix is added) is where the output file will go.
+
+FLAG is the name or names of the flag the user supplies on the command line with a directory argument.  FLAG can be a single scalar value or a reference to an array of FLAGs.  Only alpha-numeric characters, dashes, and underscores are permitted.  Single character flags will be prepended with a single dash '-' and multi-character flags will get a double dash '--'.
 
 No return value.
 
@@ -13849,11 +15921,11 @@ A DEFAULT output directory can be provided.  If the user does not supply an outp
 
 To create an output directory with an immutable, always-present value (e.g. 'output') that the user should not see as an option in the usage or help output, set HIDDEN to a non-zero value.
 
-SMRY_DESC is the short version of the usage message for this output directory option.  An empty string will cause this option to not be in the short version of the usage message.
+SHORT_DESC is the short version of the usage message for this output directory option.  An empty string will cause this option to not be in the short version of the usage message.
 
-DETAIL_DESC is the long version of the usage message for this output directory option.  If DETAIL_DESC is not defined/supplied and SMRY_DESC has a non-empty string, SMRY_DESC is copied to DETAIL_DESC.
+LONG_DESC is the long version of the usage message for this output directory option.  If LONG_DESC is not defined/supplied and SHORT_DESC has a non-empty string, SHORT_DESC is copied to LONG_DESC.
 
-Note, both SMRY_DESC and DETAIL_DESC have auto-generated formatting which includes details on the REQUIRED state as well as the flag(s) parsed from GETOPTKEY.
+Note, both SHORT_DESC and LONG_DESC have auto-generated formatting which includes details on the REQUIRED state as well as the flag(s) parsed from FLAG.
 
 All calls to addOutdirOption() must occur before any/all calls to processCommandLine(), nextFileCombo(), getInfile, getNextFileGroup(), openOut(), openIn(), and getAllFileGroups().  If you wish to put calls to the add*Option methods at the bottom of the script, you must put them in a BEGIN block.
 
@@ -13869,13 +15941,13 @@ I<Command>
 
 I<Code>
 
-    addOutdirOption(GETOPTKEY   => 'outdir=s',
-                    REQUIRED    => 0,
-                    DEFAULT     => undef,
-                    HIDDEN      => 0,
-                    SMRY_DESC   => 'Output directory.',
-                    DETAIL_DESC => 'Output directory.  Will be created if ' .
-                                   'it does not already exist.');
+    addOutdirOption(FLAG       => 'outdir',
+                    REQUIRED   => 0,
+                    DEFAULT    => undef,
+                    HIDDEN     => 0,
+                    SHORT_DESC => 'Output directory.',
+                    LONG_DESC  => 'Output directory.  Will be created if ' .
+                                  'it does not already exist.');
 
 I<Output>
 
@@ -13909,9 +15981,9 @@ An alternative usage is to supply as many directories as match the number of fil
 
 One could also supply an output directory for each and every input file.
 
-=item C<addOutfileOption> GETOPTKEY [, COLLISIONMODE, REQUIRED, PRIMARY, DEFAULT, SMRY_DESC, DETAIL_DESC, FORMAT_DESC, HIDDEN, PAIR_WITH, PAIR_RELAT]
+=item C<addOutfileOption> FLAG [, COLLISIONMODE, REQUIRED, PRIMARY, DEFAULT, SHORT_DESC, LONG_DESC, FORMAT, HIDDEN, PAIR_WITH, PAIR_RELAT]
 
-Adds an output file option to the command line interface.  The flag is defined by the GETOPTKEY, which is a key that you would use in the hash argument to Getopt::Long's GetOptions method.  GETOPTKEY's paired value is created and tracked by CommandLineInterface.  The GETOPTKEY string must end with '=s'.
+FLAG is the name or names of the flag the user supplies on the command line with a file argument.  FLAG can be a single scalar value or a reference to an array of FLAGs.  Only alpha-numeric characters, dashes, and underscores are permitted.  Single character flags will be prepended with a single dash '-' and multi-character flags will get a double dash '--'.
 
 The return value is an output file type ID that is later used to obtain the output file names constructed from the output file names and output directory name(s) that the user has supplied on the command line (see getOutfile() and getNextFileGroup()).
 
@@ -13931,13 +16003,13 @@ A DEFAULT output file can be provided.  If there is no DEFAULT, output will go t
 
 To construct output file names with an immutable, always-present output file name (e.g. 'output.log') that the user should not see as an option in the usage or help output, set HIDDEN to a non-zero value.  If HIDDEN is unsupplied, the default will be 0 if the file type is not linked to another file type that is itself HIDDEN.  If the linked file is HIDDEN, the default will be HIDDEN for this option as well.
 
-SMRY_DESC is the short version of the usage message for this output file type.  An empty string will cause this option to not be in the short version of the usage message.
+SHORT_DESC is the short version of the usage message for this output file type.  An empty string will cause this option to not be in the short version of the usage message.
 
-DETAIL_DESC is the long version of the usage message for this output file type.  If DETAIL_DESC is not defined/supplied and SMRY_DESC has a non-empty string, SMRY_DESC is copied to DETAIL_DESC.
+LONG_DESC is the long version of the usage message for this output file type.  If LONG_DESC is not defined/supplied and SHORT_DESC has a non-empty string, SHORT_DESC is copied to LONG_DESC.
 
-Note, both SMRY_DESC and DETAIL_DESC have auto-generated formatting which includes details on the REQUIRED state as well as the flag(s) parsed from GETOPTKEY.
+Note, both SHORT_DESC and LONG_DESC have auto-generated formatting which includes details on the REQUIRED state as well as the flag(s) parsed from FLAG.
 
-FORMAT_DESC is the description of the output file format that is printed when --help is provided by the user.  The auto-generated details for output format descriptions includes the applicable flag(s).
+FORMAT is the description of the output file format that is printed when --help is provided by the user.  The auto-generated details for output format descriptions includes the applicable flag(s).
 
 PAIR_WITH and PAIR_RELAT allow the programmer to require a certain relative relationship with other input (or output) file parameters (already added).  PAIR_WITH takes the input (or output) file type ID (returned by the previous call to addInfileOption() or addOutfileOption()) and PAIR_RELAT takes one of 'ONETOONE', 'ONETOMANY', or 'ONETOONEORMANY'.  For example, if there should be one output file for every group of input files of type $intype1, then PAIR_WITH and PAIR_RELAT should be $intype1 and 'ONETOMANY', respectively.
 
@@ -13953,23 +16025,23 @@ I<Command>
 
 I<Code>
 
-    my $id1 = addInfileOption(GETOPTKEY   => 'i=s',
-                              REQUIRED    => 1,
-                              DEFAULT     => undef,
-                              PRIMARY     => 1,
-                              SMRY_DESC   => 'Input file(s).',
-                              DETAIL_DESC => '1 or more text input files.',
-                              FORMAT_DESC => 'ASCII text.');
-    my $oid = addOutfileOption(GETOPTKEY   => 'j=s',
-                               REQUIRED    => 0,
-                               PRIMARY     => 1,
-                               DEFAULT     => undef,
-                               HIDDEN      => 0,
-                               SMRY_DESC   => 'Output file.',
-                               DETAIL_DESC => 'ASCII Text output file.',
-                               FORMAT_DESC => 'Tab delimited ASCII text.',
-                               PAIR_WITH   => $id1,
-                               PAIR_RELAT  => 'ONETOMANY');
+    my $id1 = addInfileOption(FLAG       => 'i',
+                              REQUIRED   => 1,
+                              DEFAULT    => undef,
+                              PRIMARY    => 1,
+                              SHORT_DESC => 'Input file(s).',
+                              LONG_DESC  => '1 or more text input files.',
+                              FORMAT     => 'ASCII text.');
+    my $oid = addOutfileOption(FLAG       => 'j',
+                               REQUIRED   => 0,
+                               PRIMARY    => 1,
+                               DEFAULT    => undef,
+                               HIDDEN     => 0,
+                               SHORT_DESC => 'Output file.',
+                               LONG_DESC  => 'ASCII Text output file.',
+                               FORMAT     => 'Tab delimited ASCII text.',
+                               PAIR_WITH  => $id1,
+                               PAIR_RELAT => 'ONETOMANY');
 
 I<Output>
 
@@ -13992,15 +16064,17 @@ I<ADVANCED>
 
 A COLLISIONMODE of 'rename' handles conflicting output file names by appending the input file names they are associated with.  All of the files in the file set returned by the nextFileCombo() iterator are evaluated, and the fewest number of input file names are concatenated together with the output file name as is needed to make the output file names unique.
 
-=item C<addOutfileSuffixOption> GETOPTKEY, FILETYPEID [, GETOPTVAL, COLLISIONMODE, REQUIRED, PRIMARY, DEFAULT, HIDDEN, SMRY_DESC, DETAIL_DESC, FORMAT_DESC]
+=item C<addOutfileSuffixOption> FLAG, FILETYPEID [, VARREF, COLLISIONMODE, REQUIRED, PRIMARY, DEFAULT, HIDDEN, SHORT_DESC, LONG_DESC, FORMAT]
 
-Adds an output file suffix option to the command line interface.  The flag is defined by the GETOPTKEY, which is a key that you would use in the hash argument to Getopt::Long's GetOptions method.  GETOPTKEY's paired value is created and tracked by CommandLineInterface.  The GETOPTKEY string must end with '=s'.
+Adds an output file suffix option to the command line interface.
+
+FLAG is the name or names of the flag the user supplies on the command line with a suffix argument.  FLAG can be a single scalar value or a reference to an array of FLAGs.  Only alpha-numeric characters, dashes, and underscores are permitted.  Single character flags will be prepended with a single dash '-' and multi-character flags will get a double dash '--'.
 
 The return value is an output file suffix type ID that is later used to obtain the output file names constructed from the input file names and output directory name(s) that the user has supplied on the command line (see getOutfile() and getNextFileGroup()).  Only one suffix is allowed per flag on the command line.  Note, CommandLineInterface appends only.
 
 FILETYPEID is the ID of the input file type returned by addInfileOption() indicating the files to which the suffix provided by the user on the command line will be appended.
 
-Since output file names are constructed automatically and retrieved by getOutfile(), the GETOPTVAL option is not required (and is in fact discouraged).  But if you want to be able to obtain the suffix to construct custom file names (which note, will not have the full overwrite protection provided by CommandLineInterface), you can provide a reference to a scalar so that after the command line is processed, you will have the suffix provided by the user.  Note also that DEFAULT is what is used as the suffix when the user does not provide one.  The pre-existing value of GETOPTVAL is ignored.
+Since output file names are constructed automatically and retrieved by getOutfile(), the VARREF option is not required (and is in fact discouraged).  But if you want to be able to obtain the suffix to construct custom file names (which note, will not have the full overwrite protection provided by CommandLineInterface), you can provide a reference to a scalar so that after the command line is processed, you will have the suffix provided by the user.  Note also that DEFAULT is what is used as the suffix when the user does not provide one.  The pre-existing value of VARREF is ignored.
 
 COLLISIONMODE is an advanced feature that determines how to handle situations where 2 or more combinations of input files end up generating output into the same output file.
 
@@ -14018,13 +16092,13 @@ A DEFAULT output file suffix can be provided.  If the user does not supply a suf
 
 To construct output file names with an immutable, always-present suffix (e.g. '.log') that the user should not see as an option in the usage or help output, set HIDDEN to a non-zero value.  If HIDDEN is unsupplied, the default will be 0 if the file type is not linked to another file type that is itself HIDDEN.  If the linked file is HIDDEN, the default will be HIDDEN for this option as well.
 
-SMRY_DESC is the short version of the usage message for this output file type.  An empty string will cause this option to not be in the short version of the usage message.
+SHORT_DESC is the short version of the usage message for this output file type.  An empty string will cause this option to not be in the short version of the usage message.
 
-DETAIL_DESC is the long version of the usage message for this output file type.  If DETAIL_DESC is not defined/supplied and SMRY_DESC has a non-empty string, SMRY_DESC is copied to DETAIL_DESC.
+LONG_DESC is the long version of the usage message for this output file type.  If LONG_DESC is not defined/supplied and SHORT_DESC has a non-empty string, SHORT_DESC is copied to LONG_DESC.
 
-Note, both SMRY_DESC and DETAIL_DESC have auto-generated formatting which includes details on the REQUIRED and PRIMARY states as well as the flag(s) parsed from GETOPTKEY.
+Note, both SHORT_DESC and LONG_DESC have auto-generated formatting which includes details on the REQUIRED and PRIMARY states as well as the flag(s) parsed from FLAG.
 
-FORMAT_DESC is the description of the output file format that is printed when --help is provided by the user.  The auto-generated details for output format descriptions includes the applicable flag(s).
+FORMAT is the description of the output file format that is printed when --help is provided by the user.  The auto-generated details for output format descriptions includes the applicable flag(s).
 
 All calls to addOutfileSuffixOption() must occur before any/all calls to processCommandLine(), nextFileCombo(), getOutfile, getNextFileGroup(), openIn(), openOut(), and getAllFileGroups().  If you wish to put calls to the add*Option methods at the bottom of the script, you must put them in a BEGIN block.
 
@@ -14038,25 +16112,29 @@ I<Command>
 
 I<Code>
 
-    my $id1 = addInfileOption(GETOPTKEY   => 'i=s',
-                              REQUIRED    => 1,
-                              DEFAULT     => undef,
-                              PRIMARY     => 1,
-                              SMRY_DESC   => 'Input file(s).',
-                              DETAIL_DESC => '1 or more text input files.',
-                              FORMAT_DESC => 'ASCII text.');
-    my $oid = addOutfileSuffixOption(GETOPTKEY   => 'o=s',
-                                     FILETYPEID  => $id1,
-                                     GETOPTVAL   => undef,
-                                     REQUIRED    => 0,
-                                     PRIMARY     => 1,
-                                     DEFAULT     => undef,
-                                     HIDDEN      => 0,
-                                     SMRY_DESC   => 'Outfile extension.',
-                                     DETAIL_DESC => 'Extension appended to file submitted via -i.',
-                                     FORMAT_DESC => 'Tab delimited ASCII text, 1 tab per line.  ' .
-                                                    'First column is a unique ID and the second ' .
-                                                    'column is a value.');
+    my $id1 = addInfileOption(FLAG       => 'i',
+                              REQUIRED   => 1,
+                              DEFAULT    => undef,
+                              PRIMARY    => 1,
+                              SHORT_DESC => 'Input file(s).',
+                              LONG_DESC  => '1 or more text input files.',
+                              FORMAT     => 'ASCII text.');
+    my $oid = addOutfileSuffixOption(FLAG       => 'o',
+                                     FILETYPEID => $id1,
+                                     VARREF     => undef,
+                                     REQUIRED   => 0,
+                                     PRIMARY    => 1,
+                                     DEFAULT    => undef,
+                                     HIDDEN     => 0,
+                                     SHORT_DESC => 'Outfile suffix.',
+                                     LONG_DESC  => ('Suffix appended to file '.
+                                                    'submitted via -i.'),
+                                     FORMAT     => ('Tab delimited ASCII ' .
+                                                    'text, 1 tab per line.  ' .
+                                                    'First column is a ' .
+                                                    'unique ID and the  ' .
+                                                    'secondcolumn is a ' .
+                                                    'value.');
 
 I<Output>
 
@@ -14084,7 +16162,7 @@ Note that addOutfileOption() is a wrapper for a hidden and specially treated cal
 
 A COLLISIONMODE of 'rename' handles conflicting output file names by compounding input file names.  This requires multiple types of input files.  All of the files in the file set advanced to by the nextFileCombo() iterator are evaluated and the fewest number of input file names are concatenated together as is needed to make the output file names unique.
 
-=item C<addOutfileTagteamOption> GETOPTKEY_SUFF, GETOPTKEY_FILE, FILETYPEID [, PAIR_RELAT, GETOPTVAL, REQUIRED, PRIMARY, FORMAT_DESC, DEFAULT, DEFAULT_IS_FILE, HIDDEN_SUFF, HIDDEN_FILE, SMRY_DESC_SUFF, SMRY_DESC_FILE, DETAIL_DESC_SUFF, DETAIL_DESC_FILE, COLLISIONMODE_SUFF, COLLISIONMODE_FILE]
+=item C<addOutfileTagteamOption> FLAG_SUFF, FLAG_FILE, FILETYPEID (or PAIR_WITH) [, PAIR_RELAT, VARREF, REQUIRED, PRIMARY, FORMAT, DEFAULT, DEFAULT_IS_FILE, HIDDEN_SUFF, HIDDEN_FILE, SHORT_DESC_SUFF, SHORT_DESC_FILE, LONG_DESC_SUFF, LONG_DESC_FILE, COLLISIONMODE_SUFF, COLLISIONMODE_FILE]
 
 Adds an output file suffix option and an output file option to the command line interface.  The resulting 2 options are mutually exclusive and allow the user to either specify a full output file name or an output file suffix (appended to an input file name) for the same generated output.
 
@@ -14094,19 +16172,19 @@ Note, the interface will create a default outfile tagteam by if addOutfileOption
 
 Note, this method is essentially a wrapper to both of the addOutfileOption() and addOutfileSuffixOption() methods, thus for each parameter below, please refer to that method's parameter description..
 
-GETOPTKEY_SUFF & GETOPTKEY_FILE - See addOutfileSuffixOption's & addOutfileOption's GETOPTKEY parameter (respectively).
+FLAG_SUFF & FLAG_FILE - See addOutfileSuffixOption's & addOutfileOption's FLAG parameter (respectively).
 
 FILETYPEID - See addOutfileSuffixOption's FILETYPEID & addOutfileOption's PAIR_WITH parameters.
 
 PAIR_RELAT - See addOutfileOption's PAIR_RELAT parameter.
 
-GETOPTVAL - See addOutfileSuffixOption's GETOPTVAL parameter.
+VARREF - See addOutfileSuffixOption's VARREF parameter.
 
 REQUIRED - See addOutfileSuffixOption's & addOutfileOption's REQUIRED parameter.
 
 PRIMARY - See addOutfileSuffixOption's & addOutfileOption's PRIMARY parameter.
 
-FORMAT_DESC - See addOutfileSuffixOption's & addOutfileOption's FORMAT_DESC parameter.
+FORMAT - See addOutfileSuffixOption's & addOutfileOption's FORMAT parameter.
 
 DEFAULT - See addOutfileSuffixOption's DEFAULT parameter.
 
@@ -14114,9 +16192,9 @@ DEFAULT_IS_FILE - If this is a non-zero value, the DEFAULT parameter (above) is 
 
 HIDDEN_SUFF & HIDDEN_FILE - See addOutfileSuffixOption's & addOutfileOption's HIDDEN parameter (respectively).  Briefly - whether or not the option is hidden in the usage output.
 
-SMRY_DESC_SUFF & SMRY_DESC_FILE - See addOutfileSuffixOption's & addOutfileOption's SMRY_DESC parameter (respectively).
+SHORT_DESC_SUFF & SHORT_DESC_FILE - See addOutfileSuffixOption's & addOutfileOption's SHORT_DESC parameter (respectively).
 
-DETAIL_DESC_SUFF & DETAIL_DESC_FILE - See addOutfileSuffixOption's & addOutfileOption's DETAIL_DESC parameter (respectively).
+LONG_DESC_SUFF & LONG_DESC_FILE - See addOutfileSuffixOption's & addOutfileOption's LONG_DESC parameter (respectively).
 
 COLLISIONMODE_SUFF & COLLISIONMODE_FILE - See addOutfileSuffixOption's & addOutfileOption's COLLISIONMODE parameter (respectively).
 
@@ -14139,22 +16217,25 @@ I<Command>
 
 I<Code>
 
-    my $id1 = addInfileOption(GETOPTKEY   => 'i=s',
-                              REQUIRED    => 1,
-                              DEFAULT     => undef,
-                              PRIMARY     => 1,
-                              SMRY_DESC   => 'Input file(s).',
-                              DETAIL_DESC => '1 or more text input files.',
-                              FORMAT_DESC => 'ASCII text.');
-    my $oid = addOutfileTagteamOption(GETOPTKEY_SUFF     => 'o=s',
-                                      GETOPTKEY_FILE     => 'outfile=s',
-                                      FILETYPEID         => $id1,
-                                      PRIMARY            => 1,
-                                      FORMAT_DESC        => 'Tab delimited.',
-                                      SMRY_DESC_SUFF     => 'Outfile suffix.',
-                                      SMRY_DESC_FILE     => 'Outfile.',
-                                      DETAIL_DESC_SUFF   => 'Extension appended to file submitted via -i.',
-                                      DETAIL_DESC_FILE   => 'Outfile.  See --help for format.');
+    my $id1 = addInfileOption(FLAG       => 'i',
+                              REQUIRED   => 1,
+                              DEFAULT    => undef,
+                              PRIMARY    => 1,
+                              SHORT_DESC => 'Input file(s).',
+                              LONG_DESC  => '1 or more text input files.',
+                              FORMAT     => 'ASCII text.');
+    my $oid = addOutfileTagteamOption(FLAG_SUFF       => 'o',
+                                      FLAG_FILE       => 'outfile',
+                                      FILETYPEID      => $id1,
+                                      PRIMARY         => 1,
+                                      FORMAT          => 'Tab delimited.',
+                                      SHORT_DESC_SUFF => 'Outfile suffix.',
+                                      SHORT_DESC_FILE => 'Outfile.',
+                                      LONG_DESC_SUFF  => ('Suffix appended ' .
+                                                          'to file submitted '.
+                                                          'via -i'),
+                                      LONG_DESC_FILE => 'Outfile.  See ' .
+                                                        '--help for format.');
 
 I<Output>
 
@@ -14188,7 +16269,7 @@ The output file ID that is returned is actually a tagteam ID.  When getOutfile()
 
 The default COLLISIONMODE_* is different for the 2 types of options.  The default mode for the suffix option is 'error'.  I.e. If 2 file names are constructed with the same name/path, a fatal error occurs, preventing the script from processing any files.  The default mode for the create outfile option is 'merge', meaning if an output file name is supplied multiple times, the output is aggregated in that file (not overwritten).
 
-You can actually call addOutfileTagteamOption() once with no parameters to create the default output file options as long as addOutfileOption() and addOutfileSuffixOption() have not been called without any parameters.  If either addOutfileOption() or addOutfileSuffixOption() have not been called before processCommandLine() is called, they are called without any options and made into a tagteam with the first outfile option of the opposing type.  For example, if you call addOutfileSuffixOption('o=s') and never call addOutfileOption(), it is automatically called with no parameters and made into a tagteam with the -o option you explicitly created.  There is currently no way to prevent this automatic option creation, but if you do not want to allow a user to supply output files by one or the other method, you can create a hidden version of that option.
+You can actually call addOutfileTagteamOption() once with no parameters to create the default output file options as long as addOutfileOption() and addOutfileSuffixOption() have not been called without any parameters.  If either addOutfileOption() or addOutfileSuffixOption() have not been called before processCommandLine() is called, they are called without any options and made into a tagteam with the first outfile option of the opposing type.  For example, if you call addOutfileSuffixOption() and never call addOutfileOption(), it is automatically called with no parameters and made into a tagteam with the -o option you explicitly created.  There is currently no way to prevent this automatic option creation, but if you do not want to allow a user to supply output files by one or the other method, you can create a hidden version of that option.
 
 FILETYPEID can actually be an optional parameter is there has only been 1 call to addInfileOption().  If there have been multiple input file options created, the FILETYPEID is required.
 
@@ -14310,7 +16391,7 @@ The following default options affect the behavior of this method:
 
     --debug             Prints debug messages.
     --quiet             Suppress all error, warning, verbose, & debug messages.
-    --pipeline-mode     Prepends script name to errors, warnings, & debugs.
+    --pipeline          Prepends script name to errors, warnings, & debugs.
 
 I<LIMITATIONS>
 
@@ -14326,7 +16407,7 @@ See C<warning>.
 
 =item C<flushStderrBuffer> [FORCE]
 
-This method flushes any debug, error, warning, or verbose messages that might be in the buffer, if the flags linked to those messages (e.g. --verbose, --debug, --error-type-limit) have been rpocessed and their associated class variables defined.  This method is called automatically, thus it you never need to call it.  It's only useful when debugging fatal errors that occur before processCommandLine() is called.
+This method flushes any debug, error, warning, or verbose messages that might be in the buffer, if the flags linked to those messages (e.g. --verbose, --debug, --error-limit) have been rpocessed and their associated class variables defined.  This method is called automatically, thus it you never need to call it.  It's only useful when debugging fatal errors that occur before processCommandLine() is called.
 
 Standard error messages only get buffered if they are generated before the command line arguments have been processed.  The reason for this is to wait until flags such as --quiet have been processed so that CommandLineInterface knows whether it should print its buffer or suppress it.  processCommandLine() calls flushStderrBuffer().
 
@@ -14359,7 +16440,7 @@ I<ASSOCIATED FLAGS>
 The following default options affect the behavior of this method:
 
     --quiet             Suppress all error, warning, verbose, & debug messages.
-    --error-type-limit  Suppress some errors & warnings.  See error()/warning()
+    --error-limit       Suppress some errors & warnings.  See error()/warning()
     --verbose           Prints status.  See verbose() and verboseOverMe()
     --debug             Prints debug messages.  See debug()
 
@@ -14392,7 +16473,7 @@ I<Command>
 
 I<Code>
 
-    my $fid = addInfileOption(GETOPTKEY => 'i=s');
+    my $fid = addInfileOption(FLAG => 'i');
     processCommandLine();
     foreach my $inf_group (getAllFileGroups())
       {print(join(' ',@$inf_group),"\n")}
@@ -14418,7 +16499,7 @@ I<LIMITATIONS>
 
 This method can only be used to retrieve input files, not output files, nor is there yet a way to retrieve outfile stubs or suffixes.  Until these functions have been implemented, it is highly recommended to use the nextFileCombo() iterator in combination with getInfile() and getOutfile() instead of this method.
 
-This method does not skip any input files that may be associated with existing output files when --skip-existing is provided.
+This method does not skip any input files that may be associated with existing output files when --skip is provided.
 
 I<ADVANCED>
 
@@ -14502,7 +16583,7 @@ I<Command>
 
 I<Code>
 
-    my $fid = addInfileOption(GETOPTKEY => 'i=s');
+    my $fid = addInfileOption(FLAG => 'i');
     processCommandLine();
     print(join("\n",getFileGroupSizes()),"\n");
 
@@ -14527,7 +16608,7 @@ I<LIMITATIONS>
 
 This method can only be used to retrieve a number of input files per flag for a single input file type, not for output files.
 
-This method does not skip any input files that may be associated with existing output files when --skip-existing is provided.
+This method does not skip any input files that may be associated with existing output files when --skip is provided.
 
 I<ADVANCED>
 
@@ -14659,7 +16740,7 @@ I<ASSOCIATED FLAGS>
 
 The following default options affect the behavior of this method:
 
-    --skip-existing     Skip file set w/ existing outfiles. See nextFileCombo()
+    --skip              Skip file set w/ existing outfiles. See nextFileCombo()
 
 Default file options that are added if none defined (which also affect the behavior of this method):
 
@@ -14694,13 +16775,17 @@ What this means is that you cannot as of yet process the ONETOMANY 'one' file ou
 
 =back
 
-=item C<getLine> HANDLE
+=item C<getLine> HANDLE VERBOSELEVEL VERBOSEFREQ
 
-In SCALAR context, returns the next line of the file connected to HANDLE (see openIn() or open()).
+In SCALAR context, returns the next line of the file connected to HANDLE (see openIn()).
 
 In LIST context, returns all lines (or all remaining lines).
 
 The advantage of using getLine over <INP> is that it recognizes carriage returns (\r) and off combinations of them with newlines (\n).
+
+VERBOSELEVEL determines how many verbose flags the user must supply before a verbose message about the current line number being read will be printed to STDERR.  Default value is 2.
+
+VERBOSEFREQ is a number that indicates how many lines to read between verbose message printings.  E.g. The value '100' will print a verbose messages every 100th line read.
 
 I<EXAMPLE>
 
@@ -14767,7 +16852,7 @@ I<Command>
 
 I<Code>
 
-    my $fid = addInfileOption(GETOPTKEY => 'i=s');
+    my $fid = addInfileOption(FLAG => 'i');
     processCommandLine();
     while(my $inf_group = getNextFileGroup())
       {print(join(' ',@$inf_group),"\n")}
@@ -14795,7 +16880,7 @@ This method can only be used to retrieve input files, not output files, thus it 
 
 There is currently no way as of yet to reset this iterator explicitly, though it automatically resets after having returned an undefined value indicating that no more file groups are present.  A reset method will be provided when requirement 173 is implemented.
 
-This method does not skip any input files that may be associated with existing output files when --skip-existing is provided.  --skip-existing functionality is implemented in the openOut() method.
+This method does not skip any input files that may be associated with existing output files when --skip is provided.  --skip functionality is implemented in the openOut() method.
 
 I<ADVANCED>
 
@@ -14803,7 +16888,7 @@ Note, when the iterator has nothing more to return, it returns an undefined valu
 
 =item C<getNumFileGroups> [FILETYPEID*]
 
-This method returns the number of times a flag defined by addInfileOption was provided by the user on the command line.
+This method returns the number of times a flag defined by addInfileOption was provided by the user on the command line.  If the input file type is PRIMARY and input is detected on standard in, the number returned accounts for it as if there was a flag supplied.
 
 FILETYPEID is the ID returned by addInfileOption().  Supply it to specify the type of input files supplied by the flag defined by addInfileOption().
 
@@ -14822,7 +16907,7 @@ I<Command>
 
 I<Code>
 
-    my $fid = addInfileOption(GETOPTKEY => 'i=s');
+    my $fid = addInfileOption(FLAG => 'i');
     processCommandLine();
     print(getNumFileGroups(),"\n");
 
@@ -14846,7 +16931,7 @@ I<LIMITATIONS>
 
 This method can only be used to retrieve a number of input file flags for a single input file type, not for output files.
 
-This method does not skip any input file groups that may be associated with existing output files when --skip-existing is provided.
+This method does not skip any input file groups that may be associated with existing output files when --skip is provided.
 
 I<ADVANCED>
 
@@ -14887,7 +16972,7 @@ I<ASSOCIATED FLAGS>
 
 The following default options affect the behavior of this method:
 
-    --skip-existing     Skip file set w/ existing outfiles. See nextFileCombo()
+    --skip              Skip file set w/ existing outfiles. See nextFileCombo()
 
 Default file options that are added if none defined (which also affect the behavior of this method):
 
@@ -15090,27 +17175,21 @@ I<Code>
 
 I<Output>
 
-    
+
     example.pl version 1.0a
     Created: 11/28/2016
     Last Modified: Fri Feb 10 09:55:47 2017
-    
+
     * WHAT IS THIS: This script does x and y.
     * INPUT FORMAT:   The author of this script has not provided a format
-      -i,             description for this input file type.  Please add a
-      --input-file,   description using the addInfileOption method.
-      --stdin-stub,
-      --stub,*
+      -i,--infile,    description for this input file type.  Please add a
+      --stub,*        description using the addInfileOption method.
     * OUTPUT FORMAT:  The author of this script has not provided a format
       -o,             description for this input file type.  Please add a
-      --outfile-      description using one of the addOutfileOption or
-      extension,      addOutfileSuffixOption methods.
-      --outfile-
-      suffix,
-      --outfile,
-      --output-file
-    
-    
+      --suffix        description using one of the addOutfileOption or
+                      addOutfileSuffixOption methods.
+
+
 
 =back
 
@@ -15141,7 +17220,7 @@ This method guesses whether the script is running from within another script or 
 
 It returns 1 if it thinks it is not being run as part of a pipeline.  It returns 0 if it thinks it is being run manually & by itself.
 
-Pipeline mode modifications to messages can be explicitly set by the user by supplying --pipeline-mode or --no-pipeline-mode.
+Pipeline mode modifications to messages can be explicitly set by the user by supplying --pipeline or --no-pipeline.
 
 inPipeline() is not exported by default, thus you must either supply it in your `use CommandLineInterface qw(... inPipeline);` statement or call it using the package name: `CommandLineInterface::inPipeline();`.
 
@@ -15185,7 +17264,7 @@ I<ASSOCIATED FLAGS>
 
 The following default option does not affect the behavior of this method, but rather affects whether the method is called automatically:
 
-    --pipeline-mode     Prepends script name to errors, warnings, & debugs.
+    --pipeline          Prepends script name to errors, warnings, & debugs.
 
 I<LIMITATIONS>
 
@@ -15193,7 +17272,7 @@ This method is experimental and should not be relied upon for serious logic deci
 
 I<ADVANCED>
 
-This method is used to set a class variable which a user can set explicitly by supplying either --pipeline-mode or --no-pipeline-mode.  If the user does not supply either of those flags, inPipeline is called only once to set the class variable.  It is called the first time a debug, warning, or error message is printed.  It uses pgrep and lsof and parses the output to determine whether there exist any sibling processes with the same parent process or if the parent process is reading a script input file.
+This method is used to set a class variable which a user can set explicitly by supplying either --pipeline or --no-pipeline.  If the user does not supply either of those flags, inPipeline is called only once to set the class variable.  It is called the first time a debug, warning, or error message is printed.  It uses pgrep and lsof and parses the output to determine whether there exist any sibling processes with the same parent process or if the parent process is reading a script input file.
 
 =item C<isDebug>
 
@@ -15512,7 +17591,7 @@ I<ASSOCIATED FLAGS>
 
 The following default options affect the behavior of this method:
 
-    --skip-existing     Skips file sets if 1 or more output files exists.
+    --skip              Skips file sets if 1 or more output files exists.
 
 Default file options that are added if none defined (which also affect the behavior of this method):
 
@@ -15572,7 +17651,7 @@ I<ASSOCIATED FLAGS>
 The following default options affect the behavior of this method:
 
     --quiet             Suppress all errors, warnings, & debugs.  See quiet()
-    --error-type-limit  Suppress some errors & warnings.  See error()/warning()
+    --error-limit       Suppress some errors & warnings.  See error()/warning()
     --verbose           Prints open message.  See verbose()
     --debug             Prints debug messages.  See debug()
 
@@ -15677,7 +17756,7 @@ The following default options affect the behavior of this method:
     --verbose           Print close message.  See verbose() and verboseOverMe()
     --debug             Prints debug messages.  See debug()
     --overwrite         Overwrites existing output files.
-    --skip-existing     Skip file set w/ existing outfiles. See nextFileCombo()
+    --skip              Skip file set w/ existing outfiles. See nextFileCombo()
     --append            Append to existing outfiles.
     --dry-run           Skip all directory and outfile creation steps.
     --force             Prevent quit upon critical errors.
@@ -15735,7 +17814,7 @@ I<Code>
 I<Output>
 
     ERROR1: Something bad happened
-    
+
     Done.  STATUS: [EXIT-CODE: 4 ERRORS: 1 WARNINGS: 0 TIME: 0s] SUMMARY:
     	1 ERROR LIKE: [ERROR1: Something bad happened]
     	Scroll up to inspect full errors/warnings in-place.
@@ -15756,7 +17835,7 @@ Exit code must be supplied.  There's no way to not print the message about the e
 
 Output is not buffered (in case the class variables are not defined for --verbose, --debug, etc.).
 
-If --error-type-limit is set to 0, the format and content of the output will be sub-optimal.  Use --quiet instead.
+If --error-limit is set to 0, the format and content of the output will be sub-optimal.  Use --quiet instead.
 
 I<ADVANCED>
 
@@ -15785,8 +17864,9 @@ I<Command>
 I<Code>
 
     my $string = '';
-    addOption(GETOPTKEY => 'j=s',
-              GETOPTVAL => \$string);
+    addOption(FLAG   => 'j',
+              VARREF => \$string,
+              TYPE   => 'string');
     processCommandLine();
     print($string);
 
@@ -15803,12 +17883,12 @@ processCommandLine uses/sets every default option provided by CommandLineInterfa
 The following default options affect the behavior of this method:
 
     --quiet             Suppress all error, warning, verbose, & debug messages.
-    --error-type-limit  Suppress some errors & warnings.  See error()/warning()
+    --error-limit       Suppress some errors & warnings.  See error()/warning()
     --verbose           Prints status.  See verbose() and verboseOverMe()
-    --pipeline-mode     Prepends script name to errors, warnings, & debugs.
+    --pipeline          Prepends script name to errors, warnings, & debugs.
     --debug             Prints debug messages.  See debug()
     --overwrite         Overwrites existing output files.
-    --skip-existing     Skip file set w/ existing outfiles. See nextFileCombo()
+    --skip              Skip file set w/ existing outfiles. See nextFileCombo()
     --append            Append to existing outfiles.
     --dry-run           Skip all directory and outfile creation steps.
     --force             Prevent quit upon critical errors.
@@ -15861,7 +17941,7 @@ I<Code>
 
 I<Output>
 
-    
+
     Done.  STATUS: [EXIT-CODE: 1 ERRORS: 0 WARNINGS: 0 TIME: 0s]
 
 =back
@@ -15933,13 +18013,13 @@ I<ADVANCED>
 
 n/a
 
-=item C<setDefaults> [HEADER, ERRLIMIT, COLLISIONMODE, DEFRUNMODE, DEFSDIR]
+=item C<setDefaults> [HEADER, ERRLIMIT, COLLISIONMODE, DEFRUNMODE, DEFSDIR, UNPROCFILEWARN]
 
 Use this method to set default values for some command line flags that CommandLineInterface provides (or doesn't provide).
 
 HEADER sets --header.  Can be 0 or 1.  See headerRequested().  Default is 0.
 
-ERRLIMIT sets --error-type-limit.  Unsigned integer.  See error() and warning().  Default is 5.  0 is unlimited.
+ERRLIMIT sets --error-limit.  Unsigned integer.  See error() and warning().  Default is 5.  0 is unlimited.
 
 COLLISIONMODE is an advanced feature that determines what the script does when outfile names conflict/collide.  Possible values are:
 
@@ -15979,6 +18059,8 @@ See notes in ADVANCED about how required options with default values or how requ
 
 DEFSDIR is the user defaults directory (used by all scripts that use CommandLineInterface).  If the user saves some parameters as defaults (e.g. `--verbose --save-as-default`), a file containing the defaults for the specific script is saved in this directory.
 
+Set UNPROCFILEWARN to 0 to turn off warnings about unprocessed input/output file sets when your script exits (successfully).  A file set is a group of input files that are processed together (see PAIR_WITH parameter of addInfileOption and addOutfileOption).  A file set is considered processed when the set is iterated (either explicitly by calling nextFileCombo() or implicitly by calling getInfile(), getOutfile(), or getOutdir() (on the same file type ID)).  Warnings about unprocessed file sets can usually be avoided by either looping, like `while(nextFileCombo())` or by calling quit(ERRNO => 1).  The only time you should need to set UNPROCFILEWARN to 0 is when a valid/successful outcome of a script involves not retrieving all files supplied on the command line.
+
 I<EXAMPLE>
 
 =over 4
@@ -16002,7 +18084,7 @@ I<ASSOCIATED FLAGS>
 
 The following default options are affected by the behavior of this method:
 
-    --error-type-limit  Suppress some errors & warnings.  See error()/warning()
+    --error-limit       Suppress some errors & warnings.  See error()/warning()
     --header            Print commented header to outfiles.  See getHeader()
     --save-as-default   Save current options for inclusion in every run.
 
@@ -16025,7 +18107,7 @@ If all required options have default values (either hard-coded or user-saved), t
 
 The user will not be allowed to save the --run flag, thus if you want the script to be able to run without the user supplying any options, you must set DEFRUNMODE to 'run'.
 
-=item C<setScriptInfo> [VERSION, CREATED, HELP]
+=item C<setScriptInfo> [VERSION, CREATED, HELP, AUTHOR, CONTACT, COMPANY, LICENSE, DETAILED_HELP]
 
 This is the first method that should be called and is where you set information that a user can retrieve using the --help and --version flags.  This information is also used when the --header flag is supplied to create a header that includes the script version and creation date.
 
@@ -16034,6 +18116,16 @@ VERSION is a free-form string you can use to set a version number that will be p
 CREATED is a free-form string you can use to set a creation date that will be printed when --help or --version --extended is supplied.  It is also included in file headers when --header is supplied.
 
 HELP is the text that is included in the --help output after the "WHAT IS THIS" bullet at the top of the help output.
+
+AUTHOR is the name or names of the author of the script.
+
+CONTACT is the contact information (e.g. email address) of the point(s) of contact or author(s) of the script.
+
+COMPANY is where the script was developed.
+
+LICENSE is a string indicating the license type.
+
+DETAILED_HELP is what is printed if the user runs the script with the --help and --extended flags together.
 
 I<EXAMPLE>
 
@@ -16095,8 +18187,8 @@ I<Command>
 I<Code>
 
     my $custom_handled_files = [];
-    addOption(GETOPTKEY => 'j=s',
-              GETOPTVAL => sub {push(@$custom_handled_files,[sglob($_[1])])});
+    addOption(FLAG   => 'j',
+              VARREF => sub {push(@$custom_handled_files,[sglob($_[1])])});
     processCommandLine();
     print(join("\n",map {join(' ',@$_)} @$custom_handled_files));
 
@@ -16123,7 +18215,7 @@ n/a
 
 usage() is called automatically when the command line arguments are processed (see processCommandLine(), whose initial call is triggered by numerous methods).  usage() prints a formatted message about available options in the script.
 
-Descriptions of options printed by usage() are set by the various add*Option methods, such as addOption(), addArrayOption(), add2DArrayOption(), addInfileOption(), addOutfileOption(), addOutfileSuffixOption(), and addOutdirOption().  addOptions() is excluded from this list since it is supplied only as a quick conversion method for existing scripts that already use Getopt::Long.  Each of these methods has a GETOPTKEY, REQUIRED, DEFAULT, SMRY_DESC, and DETAIL_DESC argument, along with other case-specific arguments (such as PRIMARY, HIDDEN, ACCEPTS, FORMAT_DESC, and INTERPOLATE) that affect the content of the usage message.
+Descriptions of options printed by usage() are set by the various add*Option methods, such as addOption(), addArrayOption(), add2DArrayOption(), addInfileOption(), addOutfileOption(), addOutfileSuffixOption(), and addOutdirOption().  addOptions() is excluded from this list since it is supplied only as a quick conversion method for existing scripts that already use the Getopt::Long module.  Each of these methods has a FLAG, REQUIRED, DEFAULT, SHORT_DESC, and LONG_DESC argument, along with other case-specific arguments (such as TYPE, PRIMARY, HIDDEN, ACCEPTS, FORMAT, and DELIMITER) that affect the content of the usage message.
 
 usage() outputs a usage message in 3 modes: an error mode, a short summary mode, and an extended/detailed mode.  The default mode is the short summary mode.  Error mode only prints a sample command with a list of acceptable short flags.  The detailed mode is triggered by supplying --extended as the only option supplied on the command line.
 
@@ -16131,7 +18223,7 @@ usage() outputs a usage message in 3 modes: an error mode, a short summary mode,
 
 ERROR_MODE is specified by a non-zero value and over-rides the EXTENDED mode.
 
-The default short summary mode uses the SMRY_DESC values specified in the add*Option methods.  If the value is undefined or an empty string, the option is not included in the short usage summary.  The first shortest flag specified in the GETOPTKEY values supplied to the add*Option methods is what is reported in both the ERROR_MODE and in the short usage summary mode.  The EXTENDED mode reports all flag values specified in the GETOPTKEY string supplied to the add*Option methods as well as the DETAIL_DESC.
+The default short summary mode uses the SHORT_DESC values specified in the add*Option methods.  If the value is undefined or an empty string, the option is not included in the short usage summary.  The first shortest flag specified in the FLAG values supplied to the add*Option methods is what is reported in both the ERROR_MODE and in the short usage summary mode.  The EXTENDED mode reports all flag values specified in the FLAG string supplied to the add*Option methods as well as the LONG_DESC.
 
 There are 3 columns in the short summary and extended modes: flags, required/optional, and the description.  These modes also include a sample command and a reporting of whatever user defaults have been set using the --save-as-default option.  The first part of the description contains the default value enclosed in square brackets '[]'.  If an option has an ACCEPTS value set, those values will appear after the default, surrounded by curly braces.  Note, descriptions for input and output files should refer to the --help output for file formats.
 
@@ -16155,14 +18247,14 @@ I<Code>
 
 I<Output>
 
-    
+
     example.pl -i "input file(s)" [...]
 
          -i                   OPTIONAL [stdin] Input file(s).
-         -o                   OPTIONAL [none] Outfile extension (appended to -i).
+         -o                   OPTIONAL [none] Outfile suffix (appended to -i).
          --help               OPTIONAL Print general info and file formats.
          --extended           OPTIONAL Print extended usage.
-    
+
     No user defaults set.
 
 =back
@@ -16242,7 +18334,7 @@ The following default options affect the behavior of this method:
 
     --quiet             Suppress all error, warning, verbose, & debug messages.
     --verbose           Prints status.  See verbose() and verboseOverMe()
-    --pipeline-mode     Prepends script name to errors, warnings, & debugs.
+    --pipeline          Prepends script name to errors, warnings, & debugs.
 
 I<LIMITATIONS>
 
@@ -16283,7 +18375,7 @@ I<Output>
 #It's hard to represent real-time appearance, but when the script completes,
 #the final output will look like this:
 
-    Done                 
+    Done
 
 =back
 
@@ -16293,7 +18385,7 @@ The following default options affect the behavior of this method:
 
     --quiet             Suppress all error, warning, verbose, & debug messages.
     --verbose           Prints status.  See verbose() and verboseOverMe()
-    --pipeline-mode     Prepends script name to errors, warnings, & debugs.
+    --pipeline          Prepends script name to errors, warnings, & debugs.
 
 I<LIMITATIONS>
 
@@ -16344,8 +18436,8 @@ I<ASSOCIATED FLAGS>
 The following default options affect the behavior of this method:
 
     --quiet             Suppress all error, warning, verbose, & debug messages.
-    --error-type-limit  Suppress some errors & warnings.
-    --pipeline-mode     Prepends script name to errors, warnings, & debugs.
+    --error-limit       Suppress some errors & warnings.
+    --pipeline          Prepends script name to errors, warnings, & debugs.
     --debug             Prepends call trace.  See debug()
 
 I<LIMITATIONS>
@@ -16354,9 +18446,9 @@ The call trace currently indicates method name and line number, but does not yet
 
 I<ADVANCED>
 
-The number supplied to --error-type-limit indicates how many times each instance of a call to error() may be called before its output is suppressed.  The first time its output is suppressed a suppression warning message is printed to STDERR.  `--error-type-limit 0` turns off error suppression.
+The number supplied to --error-limit indicates how many times each instance of a call to error() may be called before its output is suppressed.  The first time its output is suppressed a suppression warning message is printed to STDERR.  `--error-limit 0` turns off error suppression.
 
---pipeline-mode is detected automatically by detection of sibling processes (assumed to be involved in a pipe of input or output) or by the fact that the parent prcess is not a shell/tty.  Explicitly setting --pipeline-mode or --no-pipeline-mode turns off automatic detection.
+--pipeline is detected automatically by detection of sibling processes (assumed to be involved in a pipe of input or output) or by the fact that the parent prcess is not a shell/tty.  Explicitly setting --pipeline or --no-pipeline turns off automatic detection.
 
 If --debug is supplied on the command line once, error messages will contain the calling block name (i.e. method name) and the originating line number of where the error/warning was called.  If --debug is supplied more than once, a full call trace after the error number and before the error message is included.  Call traces from left to right proceed from child/last call to parent/first caller methods.
 
@@ -16388,8 +18480,8 @@ If you have an input file type that has a 1:M or 1:1orM relationship with anothe
 
 BAD EXAMPLE:
 
-my $fidi = addInfileOption('i=s');
-my $fidj = addInfileOption(GETOPTKEY  => 'j=s',
+my $fidi = addInfileOption('i');
+my $fidj = addInfileOption(FLAG       => 'j',
                            PAIR_WITH  => $fidj,
                            PAIR_RELAT => 'ONETOMANY');
 while(nextFileCombo())
@@ -16411,8 +18503,8 @@ On the other hand, you can write your code in a way that processes single files 
 
 GOOD EXAMPLE:
 
-my $fidi = addInfileOption('i=s');
-my $fidj = addInfileOption(GETOPTKEY  => 'j=s',
+my $fidi = addInfileOption('i');
+my $fidj = addInfileOption(FLAG       => 'j',
                            PAIR_WITH  => $fidj,
                            PAIR_RELAT => 'ONETOONEORMANY');
 my $jprocessed = {};
