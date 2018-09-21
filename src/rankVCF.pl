@@ -22,7 +22,7 @@ setScriptInfo(VERSION => $VERSION,
               AUTHOR  => 'Robert William Leach',
               CONTACT => 'rleach@princeton.edu',
               COMPANY => 'Princeton University',
-              LICENSE => 'Copyright 2017',
+              LICENSE => 'Copyright 2018',
               HELP    => << 'END_HELP'
 
 This script sorts and (optionally) filters the rows/variants of a VCF file (containing data for 2 or more samples) based on the differences in the variant data between samples or sample groups.  "Difference" is determined by either the genotype call or allelic frequency (with a gap size threshold).  The the pair of samples or sample groups used to represent the difference for a variant row is the one leading to the greatest difference in consistent genotype or average allelic frequencies (i.e. observation ratios, e.g. AO/DP) of the same variant state.
@@ -524,7 +524,7 @@ while(nextFileCombo())
 	      }
 
 	    #Print the new header
-	    $outputs->{HEADER_LINES} .= "$_\n";
+	    $outputs->{HEADER_LINES} .= "#$_\n";
 
 	    next;
 	  }
@@ -724,7 +724,9 @@ while(nextFileCombo())
     if(scalar(@{$outputs->{ROW_DATA}}))
       {
 	openOut(*OUT,$outputFile);
-	openOut(*VCFO,$vcfoutFile);
+	openOut(HANDLE => *VCFO,
+		FILE   => $vcfoutFile,
+		HEADER => 0);
 
 	if(defined($vcfoutFile))
 	  {print VCFO ($outputs->{HEADER_LINES})}
