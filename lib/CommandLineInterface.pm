@@ -7327,14 +7327,6 @@ sub processCommandLine
     #Create the output directories
     mkdirs(@$outdirs_array);
 
-    #If standard output is to a redirected file and the header flag has been
-    #specified and there exists an undefined outfile suffix (which means that
-    #output will go to STDOUT, print the header to STDOUT
-    if($header && !isStandardOutputToTerminal() &&
-       scalar(grep {!defined($_)} map {@$_} grep {defined($_)}
-	      @$outfile_suffix_array))
-      {print STDOUT (getHeader())}
-
     #Really done with command line processing
     $command_line_processed = 2;
 
@@ -11468,22 +11460,6 @@ sub openOut
 	debug({LEVEL=>-1},"Actually selecting STDOUT");
         select(STDOUT) if($select);
 
-        #If this is the first time encountering the STDOUT open
-        if(!defined($open_out_handles) ||
-           !exists($open_out_handles->{*STDOUT}))
-          {
-            verbose('[STDOUT] Opened for all output.') unless($local_quiet);
-
-            #Store info. about the run as a comment at the top of the output
-            #file if STDOUT has been redirected to a file and it wasn't already
-	    #output via processCommandLine.  processCommandLine does it is the
-	    #global $header variable is true.  If it's false, but the local
-	    #version of the header variable was explicitly supplied, then print
-	    #the header here
-            if(!isStandardOutputToTerminal() && ($local_header && !$header))
-              {print(getHeader())}
-          }
-
 	#Reject/ignore the handle that was passed in.  STDOUT will be opened
 	#instead
 	if($file_handle ne *STDOUT)
@@ -11494,6 +11470,27 @@ sub openOut
 	    $rejected_out_handles->{$file_handle}->{QUIET} = $local_quiet;
 	    $rejected_out_handles->{$file_handle}->{FILES}->{STDOUT} = 0;
 	  }
+
+        #If this is the first time encountering the STDOUT open
+        if(!defined($open_out_handles) ||
+           !exists($open_out_handles->{*STDOUT}))
+          {
+            verbose('[STDOUT] Opened for all output.') unless($local_quiet);
+
+            #Store info. about the run as a comment at the top of the output
+            #file if STDOUT has been redirected to a file and it wasn't already
+	    #output via processCommandLine.  processCommandLine used to do this
+	    #and there was a check here to only print a header if it was
+	    #explicitly supplied.  This was to avoid multiple primary output
+	    #types from printing multiple headers. That logic has been moved
+	    #here because the print in processCommandLine was getting buffered
+	    #and placed randomly into the outfile among other data
+            if(!isStandardOutputToTerminal() && $local_header)
+              {
+		my $tfh = (defined($file_handle) ? $file_handle : *STDOUT);
+		print $tfh (getHeader());
+	      }
+          }
 
 	$file_handle = *STDOUT;
 
@@ -11568,11 +11565,11 @@ sub openOut
 	verbose("[$output_file] Opened output file.")
 	  if(!$local_quiet && $status);
 
-	#Store info about the run as a comment at the top of the output
-	print $file_handle (getHeader()) if($local_header);
-
 	#Select the output file handle
 	select($file_handle) if($select);
+
+	#Store info about the run as a comment at the top of the output
+	print $file_handle (getHeader()) if($local_header);
       }
 
     #If we succeeded and there was a selection made, clean up other selection
@@ -12095,6 +12092,7 @@ sub getHeader
     $version_str =~ s/\n(?!#|\z)/\n#/sg;
 
     my $host = exists($ENV{HOST}) ? $ENV{HOST} : `hostname`;
+    chomp($host);
 
     $header_str = "$version_str\n" .
       '#User: ' . $ENV{USER} . "\n" .
@@ -14469,7 +14467,7 @@ sub getUsageFlags
 		 my $f  = $_;
 		 my $nf = $_;
 		 $nf =~ s/^-+//;
-		 $nf = "--no$nf";
+		 $nf = "--no-$nf";
 		 my $def = ${$GetOptHash->{$usghash->{GETOPTKEY}}};
 		 if(!defined($def))
 		   {($f,$nf)}
@@ -14562,6 +14560,7 @@ sub displayDefault
         #Empty string defaults for these types make no sense and imply the
         #default is undefined, so don't display square brackets
         if($usage_hash->{OPTTYPE} =~ /file/ ||
+           $usage_hash->{OPTTYPE} =~ /suffix/ ||
            $usage_hash->{OPTTYPE} =~ /integer/ ||
            $usage_hash->{OPTTYPE} =~ /float/ ||
            $usage_hash->{OPTTYPE} =~ /enum/ ||
@@ -14870,9 +14869,11 @@ sub alignCols
 			$dashwrap = $commawrap = $spacewrap = $current;
 
 			#Try to break up the current cell value at the last
-			#dash, if one exists that's not the first series of
-			#dashes on the line and not followed by a dash
-			$dashwrap =~ s/(.*[^\-]-)(?!-)\S{1,20}$/$1/;
+			#dash, if one exists that's between letters of a
+			#reasonable-long word (don't break on really-long words,
+			#which might be aligned DNA or some other block of
+			#characters)
+			$dashwrap =~ s/(.*[a-zA-Z]-)(?=[a-zA-Z])\S{1,20}$/$1/;
 
 			#Try to break up the current cell value at the last
 			#comma, if one exists that's not the first series of
