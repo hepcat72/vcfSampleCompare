@@ -98,7 +98,7 @@ my $format_index            = 8;
 my $sample_name_start_index = $format_index + 1;
 
 my $vcf_type_id =
-  addInfileOption(GETOPTKEY   => 'i|vcf-file|input-file',
+  addInfileOption(GETOPTKEY   => 'i|vcf-file',
 		  REQUIRED    => 1,
 		  PRIMARY     => 1,
 		  DEFAULT     => undef,
@@ -123,7 +123,7 @@ END_FORMAT
 my $vcf_oid =
   addOutfileSuffixOption(GETOPTKEY   => 'o|vcf-outfile-suffix',
 			 PRIMARY     => 0,
-			 DEFAULT     => 'no output',
+			 DEFAULT     => undef,
 			 SMRY_DESC   => 'VCF outfile suffix (appended to -i).',
 			 FORMAT_DESC => ('The output file is the same format ' .
 					 'as the input VCF files, except ' .
@@ -229,13 +229,13 @@ addOption(GETOPTKEY   => 'f|filter',
 	  TYPE        => 'negbool',
 	  GETOPTVAL   => \$filter,
 	  DEFAULT     => $filter,
-	  SMRY_DESC   => ('Filter variant rows whose sample groups do not ' .
-			  'differ (enough).'),
-	  DETAIL_DESC => ('Filter variant rows whose sample group pairs do ' .
-			  'not meet thresholds defined by either `--genotype ' .
-			  '--min-group-size <int>` or `--nogenotype ' .
-			  '--min-group-size <int> --separation-gap ' .
-			  '<float>`.  When --genotype is supplied, the ' .
+	  SMRY_DESC   => ("Filter or don't filter variant rows whose sample " .
+			  "groups do not differ (enough)."),
+	  DETAIL_DESC => ("Filter or don't filter variant rows whose sample " .
+			  'group pairs do not meet thresholds defined by ' .
+			  'either `--genotype --min-group-size <int>` or ' .
+			  '`--nogenotype --min-group-size <int> --separation-' .
+			  'gap <float>`.  When --genotype is supplied, the ' .
 			  'genotype calls in all samples in each minimum ' .
 			  'group must not have any common genotype calls and ' .
 			  'meet the minimum size requirement.  When ' .
@@ -642,9 +642,9 @@ while(nextFileCombo())
 	my $anything_passed = 0;
 	my $group_pair_rule = 0;
 	my $rank_data       = [];
-	my $best_score      = 0;
+	my $best_score      = -1;
 	my $best_dp         = 0;
-	my $best_pair       = '';
+	my $best_pair       = '.';
 	foreach my $pair_index (grep {$_ % 2 == 0} (0..$#tmp_sample_groups))
 	  {
 	    $group_pair_rule++;
@@ -736,13 +736,20 @@ while(nextFileCombo())
 		   "STATE(S)_USED\tPAIR1_MEMBERS\tPAIR1_SCORE_DATA\t",
 		   "PAIR2_MEMBERS\tPAIR2_SCORE_DATA\n");
 
-	foreach my $ordered_rec (sort {$b->{RANK} <=> $a->{RANK} ||
-					 $b->{AVEDP} <=> $a->{AVEDP}}
+	foreach my $ordered_rec (sort {compareWhenZero($b->{AVEDP},$a->{AVEDP})
+					 || compareDec($b->{RANK},$a->{RANK}) ||
+					   $b->{AVEDP} <=> $a->{AVEDP}}
 				 @{$outputs->{ROW_DATA}})
 	  {
 	    #Print the VCF output
 	    if(defined($vcfoutFile))
 	      {print VCFO ($ordered_rec->{VCF_LINE})}
+
+	    #Code for debugging
+	    my $teststate =
+	      join(':',map {$_->{STATE}} @{$ordered_rec->{RANK_DATA}});
+	    if($teststate =~ /\d/ && intRound($ordered_rec->{AVEDP}) == 0)
+	      {warning("AVEDP of 0 when state has a value: [$teststate].")}
 
 	    #Print the rank info
 	    print OUT (join("\t",($ordered_rec->{CHROM},$ordered_rec->{POS},
@@ -795,6 +802,19 @@ while(nextFileCombo())
       }
   }
 
+
+#If one or the other value is zero, sort by their values, otherwise return 0 to
+#allow the sort to be based on the next thing
+sub compareWhenZero
+  {
+    my $left  = $_[0];
+    my $right = $_[1];
+
+    if($left == 0 || $right == 0)
+      {return($left <=> $right)}
+
+    return(0);
+  }
 
 sub growAPair
   {
@@ -1214,6 +1234,20 @@ sub sigdec
     return($dec);
   }
 
+#This allows us to equate decimal values when sorting.  Just supply 2 decimal
+#values.  If the allotment of digits is the same, 0 is returned, otherwise the
+#result of <=>
+sub compareDec
+  {
+    my $left  = $_[0];
+    my $right = $_[1];
+
+    if($left eq $right)
+      {return(0)}
+
+    return($left <=> $right);
+  }
+
 sub intRound
   {
     my $num = $_[0];
@@ -1291,6 +1325,13 @@ sub getBestScoringData
     my $data1   = [];
     my $data2   = [];
 
+    my $g1sum = 0;
+    foreach my $sample (@$group1)
+      {$g1sum += $sample_info->{$sample}->{DP}}
+    my $g2sum = 0;
+    foreach my $sample (@$group2)
+      {$g2sum += $sample_info->{$sample}->{DP}}
+
     my $dpsum = 0;
     foreach my $sample (@$group1,@$group2)
       {$dpsum += $sample_info->{$sample}->{DP}}
@@ -1362,6 +1403,13 @@ sub getBestScoringData
 	      }
 	  }
       }
+
+    if($g1sum == 0 || $g2sum == 0)
+      {return({RANK    => 0,
+	       AVEDP   => 0,
+	       STATE   => '.',
+	       SCORES1 => $data1,
+	       SCORES2 => $data2})}
 
     return({RANK    => $score,
 	    AVEDP   => $avedp,
@@ -1805,218 +1853,6 @@ sub expandSampleInfo
       }
 
     return($expanded_sample_info,$ao_keys);
-  }
-
-sub rank
-  {
-    my @lines = @{$_[0]};
-    return(sort
-	   {
-	     #If we can parse the number of hits, the allelic support over
-	     #total read ratio, and the sample names that passed the filtering
-	     if($a=~/^(\d+)[^\t]+\t([^\t]+)\t([^\t]+)/)
-	       {
-		 my $ah       = $1; #number of 'a' hits
-		 my $arats    = $2; #Comma delimited 'a' string of either SNP
-                                    #support ratios or SV evidence, depending
-                                    #on record type
-		 my $asamps   = $3; #Comma delimited 'a' sample names
-		 my @anums    = split(/,/,$arats);
-		 my $amode    = ($arats =~ /SU|SR|PE/ ? 'SV' :
-				 ($arats =~ /\d+\/\d+/ ? 'SNP' :
-				  ($arats eq '' ? 'SNP' : 'ERROR')));
-
-		 #SNP metrics
-		 my $anumsum  = 0;  #Support ratio numerator sum
-		 my $adensum  = 0;  #Support ratio denominator sum
-		 my $asup     = 0;
-
-		 #SV metric
-		 my $asusup   = 0;
-		 my $asrsup   = 0;
-		 my $apesup   = 0;
-		 my $abothsup = 0;
-
-		 if($amode eq 'SNP')
-		   {
-		     foreach my $arat (@anums)
-		       {
-			 my($anum,$aden) = split(/\//,$arat);
-			 $anumsum += $anum;
-			 $adensum += $aden;
-		       }
-		     $asup = $anumsum / $adensum;
-		   }
-		 elsif($amode eq 'SV')
-		   {
-		     foreach my $arat (@anums)
-		       {
-			 my $asr = 0;
-			 my $ape = 0;
-			 if($arat =~ /SU(\d+)/)
-			   {$asusup += $1}
-			 if($arat =~ /SR(\d+)/)
-			   {$asr = $1}
-			 if($arat =~ /PE(\d+)/)
-			   {$ape += $1}
-			 if($asr && $ape)
-			   {$abothsup += $asr + $ape}
-			 $asrsup += $asr;
-			 $apesup += $ape;
-		       }
-		   }
-		 else
-		   {
-		     error("Unable to parse variant metrics.",
-			   {DETAIL => ('Expecting a comma delimited list of ' .
-				       'numeric fractions or coded read ' .
-				       'counts (e.g. SU1/PE2/SR3) in the ' .
-				       'second column.')});
-		   }
-
-		 if($b =~ /^(\d+)[^\t]+\t([^\t]+)\t([^\t]+)/)
-		   {
-		     my $bh       = $1; #number of 'b' hits
-		     my $brats    = $2; #Comma delimited 'b' ratios string
-		     my $bsamps   = $3; #Comma delimited 'b' sample names
-		     my @bnums    = split(/,/,$brats);
-		     my $bmode    = ($brats =~ /SU|SR|PE/ ? 'SV' :
-				     ($brats =~ /\d+\/\d+/ ? 'SNP' :
-				      ($brats eq '' ? 'SNP' : 'ERROR')));
-
-		     #SNP metrics
-		     my $bnumsum  = 0;
-		     my $bdensum  = 0;
-		     my $bsup     = 0;
-
-		     #SV metric
-		     my $bsusup   = 0;
-		     my $bsrsup   = 0;
-		     my $bpesup   = 0;
-		     my $bbothsup = 0;
-
-		     if($bmode eq 'SNP')
-		       {
-			 foreach my $brat (@bnums)
-			   {
-			     my($bnum,$bden) = split(/\//,$brat);
-			     $bnumsum += $bnum;
-			     $bdensum += $bden;
-			   }
-			 $bsup = $bnumsum / $bdensum;
-		       }
-		     elsif($bmode eq 'SV')
-		       {
-			 foreach my $brat (@bnums)
-			   {
-			     my $bsr = 0;
-			     my $bpe = 0;
-			     if($brat =~ /SU(\d+)/)
-			       {$bsusup += $1}
-			     if($brat =~ /SR(\d+)/)
-			       {$bsr = $1}
-			     if($brat =~ /PE(\d+)/)
-			       {$bpe += $1}
-			     if($bsr && $bpe)
-			       {$bbothsup += $bsr + $bpe}
-			     $bsrsup += $bsr;
-			     $bpesup += $bpe;
-			   }
-		       }
-		     else
-		       {
-			 error("Unable to parse variant metrics.",
-			       {DETAIL => ('Expecting a comma delimited ' .
-					   'list of numeric fractions or ' .
-					   'coded read counts (e.g. ' .
-					   'SU1/PE2/SR3) in the second ' .
-					   'column.')});
-		       }
-
-		     #This is the end result - logic for sorting
-		     if($amode ne $bmode)
-		       {
-			 if($amode eq 'SV') #and bmode is SNP
-			   {
-			     #Sometimes SU isn't shown in the results (if the
-			     #user specified a different value for the other
-			     #cutoffs at the command line), but one or both of
-			     #the splits or discordants will definitely be
-			     #there.
-			     my $bsvsup =
-			       ($bsusup ? $bsusup : $bsrsup + $bpesup);
-
-			     #Number of hits
-			     $bh <=> $ah ||
-
-			       #All support for the SV versus all support for
-			       #the SNP
-			       $bsvsup <=> $anumsum ||
-
-				 #SV support from both discordants and splits
-				 #or support from total, splits, or discordants
-				 $bbothsup <=> $anumsum ||
-				    $bsusup <=> $anumsum ||
-				      $bsrsup <=> $anumsum ||
-					$bpesup <=> $anumsum ||
-
-					  #Or finally - sample name
-					  $asamps cmp $bsamps;
-			   }
-			 else #amode is SNP and bmode is SV
-			   {
-			     #Sometimes SU isn't shown in the results (if the
-			     #user specified a different value for the other
-			     #cutoffs at the command line), but one or both of
-			     #the splits or discordants will definitely be
-			     #there.
-			     my $asvsup =
-			       ($asusup ? $asusup : $asrsup + $apesup);
-
-			     #Number of hits
-			     $bh <=> $ah ||
-
-			       #All support for the SV versus all support for
-			       #the SNP
-			       $bnumsum <=> $asvsup ||
-
-				 #SV support from both discordants and splits
-				 #or support from total, splits, or discordants
-				 $bnumsum <=> $abothsup ||
-				    $bnumsum <=> $asusup ||
-				      $bnumsum <=> $asrsup ||
-					$bnumsum <=> $apesup ||
-
-					  #Or finally - sample name
-					  $asamps cmp $bsamps;
-			   }
-		       }
-		     else
-		       {
-			 #Note - using both SNP and SV metrics here does not
-			 #matter - the other type will be all 0s
-
-			 #Number of hits
-			 $bh <=> $ah ||
-
-			   #SNP support ratios or depth
-			   $bsup <=> $asup || $bdensum <=> $adensum ||
-
-			     #SV support from both discordants and splits
-			     #or support from total, splits, or discordants
-			     $bbothsup <=> $abothsup || $bsusup <=> $asusup ||
-			       $bsrsup <=> $asrsup || $bpesup <=> $apesup ||
-
-				 #Or finally - sample name
-				 $asamps cmp $bsamps;
-		       }
-		   }
-		 else
-		   {-1}
-	       }
-	     else
-	       {-1}
-	   } grep {/^\d/} @lines);
   }
 
 sub max
