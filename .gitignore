@@ -2,7 +2,6 @@
 MYMETA*
 Makefile
 *blib
-t
 galaxy
 .DS_Store
 src/#*#
