@@ -407,14 +407,14 @@ sub setScriptInfo
     $script_license        = $infohash{LICENSE};
     $advanced_help         = $infohash{'DETAIL|DETAILED_HELP'};
 
-    $script_version_number =~ s/^\n+//;
-    $help_summary          =~ s/^\n+//;
-    $created_on_date       =~ s/^\n+//;
-    $script_author         =~ s/^\n+//;
-    $script_contact        =~ s/^\n+//;
-    $script_company        =~ s/^\n+//;
-    $script_license        =~ s/^\n+//;
-    $advanced_help         =~ s/^\n+//;
+    $script_version_number =~ s/^\n+// if(defined($script_version_number));
+    $help_summary          =~ s/^\n+// if(defined($help_summary));
+    $created_on_date       =~ s/^\n+// if(defined($created_on_date));
+    $script_author         =~ s/^\n+// if(defined($script_author));
+    $script_contact        =~ s/^\n+// if(defined($script_contact));
+    $script_company        =~ s/^\n+// if(defined($script_company));
+    $script_license        =~ s/^\n+// if(defined($script_license));
+    $advanced_help         =~ s/^\n+// if(defined($advanced_help));
   }
 
 sub getRelationStr
@@ -12242,10 +12242,13 @@ sub makeCheckOutputs
 
     debug({LEVEL => -2},"Called.");
 
-    eval('use Data::Dumper;1') if($DEBUG < 0);
-
-    debug({LEVEL=>-99},"Stub sets:\n",Dumper($stub_sets),"\nSuffixes:\n",
-          Dumper($suffixes),"\nCollide modes:\n",Dumper($collide_modes),"\n");
+    if($DEBUG < 0 && eval('use Data::Dumper;1'))
+      {
+	#if(eval('use Data::Dumper;1');
+	debug({LEVEL=>-99},"Stub sets:\n",Dumper($stub_sets),"\nSuffixes:\n",
+	      Dumper($suffixes),"\nCollide modes:\n",Dumper($collide_modes),
+	      "\n");
+      }
 
     #Build the is_index_unique array
     foreach my $stub_set (@$stub_sets)
