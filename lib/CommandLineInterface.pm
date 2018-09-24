@@ -304,8 +304,8 @@ sub _init
     $default_tagteam_added        = 0;
     $default_infile_opt           = 'i|infile=s';
     $default_outfile_suffix_opt   = 'o|suffix=s';
-    $default_outfile_opt          = 'out|outfile=s';
-    $default_outdir_opt           = 'outdir|directory=s';
+    $default_outfile_opt          = 'outfile=s';
+    $default_outdir_opt           = 'outdir=s';
     $default_outfile_id           = undef;
     $default_outfile_suffix_id    = undef;
     $file_group_num               = [];
@@ -406,6 +406,15 @@ sub setScriptInfo
     $script_company        = $infohash{COMPANY};
     $script_license        = $infohash{LICENSE};
     $advanced_help         = $infohash{'DETAIL|DETAILED_HELP'};
+
+    $script_version_number =~ s/^\n+//;
+    $help_summary          =~ s/^\n+//;
+    $created_on_date       =~ s/^\n+//;
+    $script_author         =~ s/^\n+//;
+    $script_contact        =~ s/^\n+//;
+    $script_company        =~ s/^\n+//;
+    $script_license        =~ s/^\n+//;
+    $advanced_help         =~ s/^\n+//;
   }
 
 sub getRelationStr
@@ -2864,11 +2873,8 @@ sub createSuffixOutfileTagteam
     #references and required messages).
     my $flags = ($hidden == 1 && $of_usage->{HIDDEN} ?
 		 [] : [@{$of_usage->{OPTFLAG}}]);
-    @$flags = grep {$_ ne '*'} @$flags;
     if($hidden != 1 || !$sf_usage->{HIDDEN})
       {push(@$flags,@{$sf_usage->{OPTFLAG}})}
-    if($primary && scalar(grep {$_ eq '*'} @$flags) == 0)
-      {push(@$flags,'*')}
 
     my $type = (!$hidden ? 'tagteam' : ($of_usage->{HIDDEN} ?
 					'suffix' : 'outfile'));
@@ -3412,6 +3418,7 @@ sub addOption
     my $accepts         = $in[8]; #e.g. ['yes','no','maybe']
     my $advanced        = $in[9]; #Advanced options print when extended >= 2
     my $internal_array  = $in[10];#For internal use only
+    my $internal_delim  = $in[11];#For internal use only
 
     #Trim leading & trailing hard returns and white space characters (from
     #possibly having used '<<' to define these values)
@@ -3546,7 +3553,8 @@ sub addOption
 	       $type,
 	       0,
 	       $advanced,
-	       $internal_array);
+	       $internal_array,
+	       $internal_delim);
   }
 
 #Checks the validity of values (ignores undefs because they're handled by the
@@ -3753,13 +3761,9 @@ sub validateEnum
 	  }
 	elsif(scalar(grep {$_ eq $value} @$accepts) == 0)
 	  {
-	    #Exception (TODO: remove deprecated collision mode flag)
-	    unless($flag eq '--collision-mode' && $value eq '')
-	      {
-		error("Unrecognized value [$value] supplied to [$flag].  Must ",
-		      "be one of: [",join(',',@$accepts),"].");
-		$status = 0;
-	      }
+	    error("Unrecognized value [$value] supplied to [$flag].  Must be ",
+		  "one of: [",join(',',@$accepts),"].");
+	    $status = 0;
 	  }
       }
     else
@@ -4029,7 +4033,8 @@ sub addArrayOption
 	      $detail_desc,
 	      $accepts,
 	      $advanced,
-	      $get_opt_ref);
+	      $get_opt_ref,
+	      $delimiter);
   }
 
 #Returns a single character that will work as a delimiter because it matches
@@ -4331,7 +4336,8 @@ sub add2DArrayOption
 	      $detail_desc,
 	      $accepts,
 	      $advanced,
-	      $get_opt_ref);
+	      $get_opt_ref,
+	      $delimiter);
   }
 
 sub requireGeneralOption
@@ -6343,6 +6349,16 @@ sub addBuiltinOptions
 				  'exclusive with --overwrite and --skip.'));
 
     #long_descs - hidden
+    my $cd = (#Case 1: User default (set via --save-args)
+	      defined($user_collide_mode) ? '' :
+	      (#Case 2: Programmer default (set via setDefaults)
+	       defined($def_collide_mode) ? '' :
+	       #Case 3: Default depends on out type
+	       "\n\n* The default differs based on whether the output file " .
+	       "is specified by an outfile suffix (in which case the " .
+	       "default is [$def_collide_mode_suff]) or by a full output " .
+	       "file name (in which case the default is " .
+	       "[$def_collide_mode_outf])."));
     my $collision_long = join('',('DEPRECATED.  When multiple input files ',
 				  'output to the same output file, this ',
 				  'option specifies what to do.  Merge mode ',
@@ -6360,17 +6376,17 @@ sub addBuiltinOptions
 				  'directory).  Error mode causes the script ',
 				  'to quit with an error if multiple input ',
 				  'files are detected to output to the same ',
-				  "output file.\n\nTHIS OPTION IS DEPRECATED ",
-				  'AND HAS BEEN REPLACED BY SUPPLYING ',
-				  'COLLISION MODE VIA addOutFileSuffixOption ',
-				  'AND addOutfileOption.  THIS OPTION ',
-				  'HOWEVER WILL OVERRIDE THE COLLISION MODE ',
-				  'OF ALL OUTFILE OPTIONS AND APPLY TO FILES ',
-				  'THAT ARE NOT DEFINED BY ',
-				  'addOutFileSuffixOption OR ',
-				  'addOutfileOption IF OPENED MULTIPLE TIMES ',
-				  'UNLESS SET EXPLICITLY IN THE openOut ',
-				  'CALL.'));
+				  "output file.${cd}\n\nTHIS OPTION IS ",
+				  'DEPRECATED AND HAS BEEN REPLACED BY ',
+				  'SUPPLYING COLLISION MODE VIA ',
+				  'addOutFileSuffixOptionAND ',
+				  'addOutfileOption.  THIS OPTION HOWEVER ',
+				  'WILL OVERRIDE THE COLLISION MODE OF ALL ',
+				  'OUTFILE OPTIONS AND APPLY TO FILES THAT ',
+				  'ARE NOT DEFINED BY addOutFileSuffixOption ',
+				  'OR addOutfileOption IF OPENED MULTIPLE ',
+				  'TIMES UNLESS SET EXPLICITLY IN THE ',
+				  'openOut CALL.'));
 
     addOption(FLAG       => 'verbose',
 	      VARREF     => \$verbose,
@@ -6506,7 +6522,13 @@ sub addBuiltinOptions
 	      VARREF     => \$user_collide_mode,
 	      TYPE       => 'enum',
 	      REQUIRED   => 0,
-	      DEFAULT    => getCollisionMode(),
+	      DEFAULT    => (#Case 1: User default (set via --save-args)
+			     defined($user_collide_mode) ? $user_collide_mode :
+			     (#Case 2: Programmer default (set via setDefaults)
+			      defined($def_collide_mode) ? $def_collide_mode :
+			      #Case 3: Default depends on out type
+			      "$def_collide_mode_suff|$def_collide_mode_outf*")
+			    ),
 	      HIDDEN     => 1,
 	      SHORT_DESC => '',
 	      LONG_DESC  => $collision_long,
@@ -7018,7 +7040,6 @@ sub getOptions
     $verbose             = 0       unless(defined($verbose));
     $force               = 0       unless(defined($force));
     $header              = 0       unless(defined($header));
-    $user_collide_mode   = ''      unless(defined($user_collide_mode));
     $extended            = 0       unless(defined($extended));
     $error_limit_default = 5       unless(defined($error_limit_default));
     $error_limit         = $error_limit_default unless(defined($error_limit));
@@ -9913,7 +9934,7 @@ sub getFileSets
                                   #that is applied to all outfile suffixes.)
     my $outfile_stub = defined($default_stub) ? $default_stub : 'STDIN';
 
-    #eval {use Data::Dumper;1} if($DEBUG < 0);
+    #eval('use Data::Dumper;1') if($DEBUG < 0);
 
     debug({LEVEL => -1},"Collision mode sent in: [",
 	  (defined($_[3]) ?
@@ -9923,7 +9944,8 @@ sub getFileSets
 						       $_ : 'undef'} @$tm) :
 				       'undef')} @{$_[3]}) .
 	    ')') : 'undef'),"].  Global collide mode: [",getCollisionMode(),
-	  "].  User over-ridden collision-mode: [$user_collide_mode].  ",
+	  "].  User over-ridden collision-mode: [",
+	  (defined($user_collide_mode) ? $user_collide_mode : 'undef'),"].  ",
 	  "Programmer global collision-mode: [",
 	  (defined($def_collide_mode) ? $def_collide_mode : 'undef'),"]");
 
@@ -10839,7 +10861,7 @@ sub getCollisionMode
 	if($command_line_processed)
 	  {
 	    #If the user set the collision mode using --collision-mode
-	    if(defined($user_collide_mode) && $user_collide_mode ne '')
+	    if(defined($user_collide_mode))
 	      {return($user_collide_mode)}
 	    #Else if the mode was defined in the call
 	    elsif(defined($supplied_mode))
@@ -10902,7 +10924,7 @@ sub getCollisionMode
 	#Else if the user (or programmer) has set the collide mode explicitly
 	##TODO: This will change with requirement 114.  Also see comments in
 	##      requirement 219
-	elsif(defined($user_collide_mode) && $user_collide_mode ne '')
+	elsif(defined($user_collide_mode))
 	  {return($user_collide_mode)}
 	#Else if the command line has been processed
 	elsif($command_line_processed)
@@ -12220,7 +12242,7 @@ sub makeCheckOutputs
 
     debug({LEVEL => -2},"Called.");
 
-    eval {use Data::Dumper;1} if($DEBUG < 0);
+    eval('use Data::Dumper;1') if($DEBUG < 0);
 
     debug({LEVEL=>-99},"Stub sets:\n",Dumper($stub_sets),"\nSuffixes:\n",
           Dumper($suffixes),"\nCollide modes:\n",Dumper($collide_modes),"\n");
@@ -12733,7 +12755,7 @@ sub getMatchedSets
 			                                   #container array
 			 }];
 
-    #eval {use Data::Dumper;1} if($DEBUG < 0);
+    #eval('use Data::Dumper;1') if($DEBUG < 0);
 
     #debug("Initial group with default candidate: ",
     #	  Dumper($synced_groups->[-1]->{GROUP}),"There are [",
@@ -13296,8 +13318,7 @@ sub processDefaultOptions
 	quit(-64);
       }
 
-    if(defined($user_collide_mode) && $user_collide_mode ne '' &&
-       $user_collide_mode !~ /^[mer]/i)
+    if(defined($user_collide_mode) && $user_collide_mode !~ /^[mer]/i)
       {
 	error("Invalid --collision-mode: [$user_collide_mode].  Acceptable ",
 	      "values are: [merge, rename, or error].  Check usage for an ",
@@ -13327,7 +13348,8 @@ sub processDefaultOptions
     verbose({LEVEL => 2},'Skip Existing:  [on].')           if($skip_existing);
     verbose({LEVEL => 2},'Append:         [on].')           if($append);
     verbose({LEVEL => 2},"Dry run mode:   [$dry_run].")     if($dry_run);
-    verbose({LEVEL => 2},"Collision mode: [$user_collide_mode].")if($user_collide_mode);
+    verbose({LEVEL => 2},"Collision mode: [$user_collide_mode].")
+      if(defined($user_collide_mode));
     verbose({LEVEL => 2},"Error level:    [$error_limit].")
       if($error_limit != $error_limit_default);
   }
@@ -13987,6 +14009,15 @@ end_print
 			      "dash character ('-') as an argument, which ",
 			      'stands for either "read from STDIN" or "write ',
 			      'to STDOUT", depending on the file flag type.  ',
+			      (!defined($primary_infile_type) ? '' :
+			       "Infile option " .
+			       getInfileFlag($primary_infile_type) . " will " .
+			       "recognize input on standard in automatically " .
+			       "and thus does not require a dash to be " .
+			       "supplied" .
+			       (getNumInfileTypes() < 2 ? '.  ' :
+				' (unless a dash is supplied to one of the ' .
+				'other infile options).  ')),
 			      'Only one infile option can read from STDIN in ',
 			      'one run.  Any file type argument can be ',
 			      'supplied a BSD glob pattern (inside quotes).'))],
@@ -14024,35 +14055,53 @@ end_print
 			      '"STDIN".'))],
 		    [11,1],[0,1,1],[0,0,0]);
 	$legend .=
-	  alignCols(['STDIN','=',
-		     join('',('If "STDIN" is listed among an input file ',
-			      "option's flags, it means that if input on ",
-			      'standard in is detected, it will be treated as ',
-			      "an input file of this option's type.  Only 1 ",
-			      'input file option can read from STDIN.  If ',
-			      'there is no redirection on standard in, the ',
-			      'script will not wait for manual input from the ',
-			      'terminal.'))],
+	  alignCols(['< <file>','=',
+		     join('',('If a redirect (i.e. "<") is shown among an ',
+			      "option's flags, it means that it can read from ",
+			      'standard in (but if no input is detected, the ',
+			      'script will not wait for input).  Only 1 ',
+			      'input file option can read from STDIN.'))],
 		    [11,1],[0,1,1],[0,0,0]) . "\n";
 	$legend .=
-	  alignCols(['','','STDIN & -f <stub>','=',
-		     join('',('-f reads from STDIN by default & a stub can ',
+	  alignCols(['','','-f <stub> < <file>','=',
+		     join('',('-f has the built-in ability to read from STDIN ',
+			      '(without the need to supply "-") & a stub can ',
 			      'optionally be supplied to name the input ',
 			      'file.'))],
-		    [11,1,17,1],[0,1,1,1,1],[0,0,0,0,0]);
+		    [11,1,18,1],[0,1,1,1,1],[0,0,0,0,0]);
 	$legend .=
-	  alignCols(['','','STDIN & -f -','=',
-		     join('',('STDIN can be directed to this file type ',
-			      "instead of the default by supplying '-f -'.  ",
-			      'Note, no stub can (yet) be set for infile ',
-			      'options that do not read from STDIN by ',
-			      'default.'))],
-		    [11,1,17,1],[0,1,1,1,1],[0,0,0,0,0]) . "\n";
+	  alignCols(['','','-f - < <file>','=',
+		     join('',('Any file option has the ability to read from ',
+			      'standard input if a dash is supplied to the ',
+			      'flag as an argument, but note no stub can ',
+			      '(yet) be set for the input file name when a ',
+			      'dash is required.'))],
+		    [11,1,18,1],[0,1,1,1,1],[0,0,0,0,0]) . "\n";
+	$legend .=
+	  alignCols(['STDIN','=',
+		     join('',('"STDIN" may be mentioned in numerous places.  ',
+			      'Only one input file type can take standard in ',
+			      'at a time.  If an input file type has the ',
+			      'built-in ability to read from standard input, ',
+			      'a flag option will be presented as `< ',
+			      '<file>`.  You can choose to send standard in ',
+			      'to other input file types by supplying a dash ',
+			      'as the file argument.  Note there is a ',
+			      'difference between the built-in ability to ',
+			      'read standard input and reading from STDIN ',
+			      'being a default.  If the default value is ',
+			      '"STDIN", the script will wait for user input ',
+			      'if no file was provided.  The built-in ability ',
+			      'to read from STDIN however will not wait for ',
+			      'user input if no file is provided and no input ',
+			      'is detected on standard in (i.e. no redirected ',
+			      'input).  See "<file>" for more details.'))],
+		    [11,1],[0,1,1],[0,0,0]);
 	$legend .=
 	  alignCols(['STDOUT','=',
-		     join('',('If "STDOUT" is listed among an output file ',
-			      "option's (or suffix option's) flags, it means ",
-			      'that output goes to standard out by default ',
+		     join('',('If "STDOUT" is listed as a default for an ',
+			      'output file or outfile suffix, it means that ',
+			      'output will go to standard out by default ',
 			      '(when no file name or suffix is defined).'))],
 		    [11,1],[0,1,1],[0,0,0]);
 
@@ -14361,8 +14410,12 @@ sub getWindowWidth
     if(!defined($window_width))
       {
 	$window_width = $window_width_def;
-	eval('use Term::ReadKey;1') || return($window_width);
-	$window_width = (GetTerminalSize())[0];
+	#If the output is piped, or to a file, return the default
+	if(isStandardOutputToTerminal())
+	  {
+	    eval('use Term::ReadKey;1') || return($window_width);
+	    $window_width = (GetTerminalSize())[0];
+	  }
 	return($window_width);
       }
     return($window_width);
@@ -14370,7 +14423,7 @@ sub getWindowWidth
 
 sub getUsageFlagColWidths
   {
-    my $max_flag_col_width   = 22;
+    my $max_flag_col_width   = 24;
     my $short_flag_col_width = 0;
     my $long_flag_col_width  = 0;
 
@@ -14379,7 +14432,7 @@ sub getUsageFlagColWidths
 				       ($_->{ADVANCED} && !$_->{HIDDEN} &&
 					$extended > 1)} @$usage_array)
       {
-	my $short_flags =  getUsageFlags($usage_hash,1);
+	my $short_flags = getUsageFlags($usage_hash,1);
 	my $long_flags  = getUsageFlags($usage_hash);
 
 	if(defined($usage_hash->{SUMMARY}) && $usage_hash->{SUMMARY} ne '' &&
@@ -14467,7 +14520,11 @@ sub getUsageFlags
 		 my $f  = $_;
 		 my $nf = $_;
 		 $nf =~ s/^-+//;
-		 $nf = "--no-$nf";
+		 #If flag is 1 character or already has dashes, prepend w/ dash
+		 if($nf =~ /-/ || length($nf) == 1)
+		   {$nf = "--no-$nf"}
+		 else
+		   {$nf = "--no$nf"}
 		 my $def = ${$GetOptHash->{$usghash->{GETOPTKEY}}};
 		 if(!defined($def))
 		   {($f,$nf)}
@@ -14486,18 +14543,20 @@ sub getUsageFlags
 	       {"$_<flt>"}
 	     elsif($usghash->{OPTTYPE} eq 'enum')
 	       {"$_<$en>"}
+
 	     elsif($usghash->{OPTTYPE} eq 'string_array' ||
 		   $usghash->{OPTTYPE} eq 'string_array2d')
-	       {"$_<str$dl...>..."}
+	       {"$_<str$dl>..."}
 	     elsif($usghash->{OPTTYPE} eq 'integer_array' ||
 		   $usghash->{OPTTYPE} eq 'integer_array2d')
-	       {"$_<int$dl...>..."}
+	       {"$_<int$dl>..."}
 	     elsif($usghash->{OPTTYPE} eq 'float_array' ||
 		   $usghash->{OPTTYPE} eq 'float_array2d')
-	       {"$_<flt$dl...>..."}
+	       {"$_<flt$dl>..."}
 	     elsif($usghash->{OPTTYPE} eq 'enum_array' ||
 		   $usghash->{OPTTYPE} eq 'enum_array2d')
-	       {"$_<{$en}$dl...>..."}
+	       {"$_<{$en}$dl>..."}
+
 	     elsif($usghash->{OPTTYPE} eq 'infile' ||
 		   $usghash->{OPTTYPE} eq 'outfile')
 	       {"$_<file*...>..."}
@@ -14511,10 +14570,10 @@ sub getUsageFlags
 
 	     #Append stdin & stub/dash for primary/non-primary input files
 	     ($usghash->{OPTTYPE} eq 'infile' ?
-	      ($usghash->{PRIMARY} ? "\nSTDIN\nSTDIN & " .
-	       getDefaultFlag($usghash->{OPTFLAG}) . ' <stub>' :
-	       "\nSTDIN & " . getDefaultFlag($usghash->{OPTFLAG}) .
-	       ' -') : '') .
+	      ($usghash->{PRIMARY} ? "\n< <file>\n" .
+	       getDefaultFlag($usghash->{OPTFLAG}) . ' <stub> < <file>' :
+	       "\n" . getDefaultFlag($usghash->{OPTFLAG}) .
+	       ' - < <file>') : '') .
 
 		 ($usghash->{HIDDEN} ? "\n[HIDDEN-OPTION]" : '');
 
@@ -14876,14 +14935,26 @@ sub alignCols
 			$dashwrap =~ s/(.*[a-zA-Z]-)(?=[a-zA-Z])\S{1,20}$/$1/;
 
 			#Try to break up the current cell value at the last
-			#comma, if one exists that's not the first series of
-			#commas on the line and not followed by a comma
-			$commawrap =~ s/(.*[^,],)(?!,)\S.*/$1/;
+			#comma, if one exists and is not followed by any of the
+			#following: close-bracket, comma, quote, colon, dot, or
+			#semicolon
+			my $nowrapcomma = '[\.,\'";:\{\[\(\<]';
+			$commawrap =~ s/(.*[^,],)(?!$nowrapcomma)\S.*/$1/;
 
-			#Try to break up the current cell value at the last
-			#space, if one exists that's not followed by something
-			#that looks longer than a real word
-			$spacewrap =~ s/\s+\S{1,20}$//;
+			#Unless the string ends with spaces
+			unless($spacewrap =~ s/\s+$//)
+			  {
+			    #Try to break up the current cell value at the last
+			    #space, if one exists that's not followed by
+			    #something that looks longer than a real word or a
+			    #line- or thought-ending character, like a period,
+			    #close-bracket, colon, comma, semicolon, exclamation
+			    #point - or event what may be considered a footnote,
+			    #like asterisk, up-arrow, or tilde.
+			    my $nowrapspc = '[\.,;:\)\]\}\>\!\*\^\~]';
+			    $spacewrap =~
+			      s/(.*\S)\s+((?!$nowrapspc)\S.{0,20})$/$1/;
+			  }
 
 			#If both were trimmed
 			if(length($dashwrap) < length($current) &&
@@ -15242,11 +15313,10 @@ sub usage
 
 	if($short =~ /^\*/ || $long =~ /^\*/)
 	  {print("* Required.\n")}
-	if(!$local_extended &&
-	   scalar(grep {$_->{REQUIRED}} values(%$outfile_tagteams)))
-	  {print("^ 1 of 2 mutually exclusive options required.\n")}
 	if($short =~ /^~/ || $long =~ /^~/)
 	  {print("~ Required (but has default).\n")}
+	if($short =~ /^\^/ || $long =~ /^\^/)
+	  {print("^ 1 of 2 mutually exclusive options required.\n")}
       }
 
     return(0);
@@ -17184,7 +17254,7 @@ I<Output>
     * WHAT IS THIS: This script does x and y.
     * INPUT FORMAT:   The author of this script has not provided a format
       -i,--infile,    description for this input file type.  Please add a
-      --stub,*        description using the addInfileOption method.
+      --stub          description using the addInfileOption method.
     * OUTPUT FORMAT:  The author of this script has not provided a format
       -o,             description for this input file type.  Please add a
       --suffix        description using one of the addOutfileOption or
