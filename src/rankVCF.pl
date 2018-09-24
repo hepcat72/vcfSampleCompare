@@ -90,7 +90,6 @@ END_AHELP
 
 setDefaults(HEADER        => 1,
 	    ERRLIMIT      => 3,
-	    COLLISIONMODE => 'error',
 	    DEFRUNMODE    => 'usage',
 	    DEFSDIR       => undef);
 
@@ -98,7 +97,7 @@ my $format_index            = 8;
 my $sample_name_start_index = $format_index + 1;
 
 my $vcf_type_id =
-  addInfileOption(GETOPTKEY   => 'i|vcf-file',
+  addInfileOption(GETOPTKEY   => 'i',
 		  REQUIRED    => 1,
 		  PRIMARY     => 1,
 		  DEFAULT     => undef,
@@ -121,7 +120,7 @@ END_FORMAT
 		 );
 
 my $vcf_oid =
-  addOutfileSuffixOption(GETOPTKEY   => 'o|vcf-outfile-suffix',
+  addOutfileSuffixOption(GETOPTKEY   => 'o',
 			 PRIMARY     => 0,
 			 DEFAULT     => undef,
 			 SMRY_DESC   => 'VCF outfile suffix (appended to -i).',
@@ -131,7 +130,7 @@ my $vcf_oid =
 					 'filtered.'));
 
 my $sum_oid =
-  addOutfileSuffixOption(GETOPTKEY   => 'u|summary-outfile-suffix',
+  addOutfileSuffixOption(GETOPTKEY   => 'u',
 			 PRIMARY     => 1,
 			 DEFAULT     => undef,
 			 SMRY_DESC   => ('Summary outfile suffix (appended ' .
@@ -182,12 +181,12 @@ END_DETAIL
 
 my $group_diff_mins = [];
 addArrayOption(GETOPTKEY   => 'd|min-group-size',
-	       TYPE        => 'integer',
 	       GETOPTVAL   => $group_diff_mins,
+	       TYPE        => 'integer',
+	       DELIMITER   => '\D+',
 	       DEFAULT     => 'all',
-	       SMRY_DESC   => ('The minimum number of samples required to ' .
-			       'differ from the partner group (to get a high ' .
-			       'rank).'),
+	       SMRY_DESC   => ('Minimum number of samples to use in a group ' .
+			       'to determine difference with its partner.'),
 	       DETAIL_DESC => << 'END_DETAIL'
 
 Each sample group defined by -s is accompanied by a (minimum) number of samples in that group with which to compute the maximum difference against its partner group.  Each instance of -s should have a -d value supplied.  The order of the -d values should correspond to the order of the -s sample groups they apply to.  The default for each group is the group size, but a smaller number can bespecified.  The purpose is best shown by example.  If you have 5 mutant samples and 3 replicate wildtype samples, you may want to find variants where 1 or more mutants differ from all 3 wildtype samples, thus -d for the mutant group would be '1' and -d for the wildtype group would be '3'.  In order to produce meaningful results, one group in each pair of groups must get a value that is larger than half the group size.  See --help --extended for details on how this affects variant sorting, sample group growing, and filtering.
@@ -216,22 +215,21 @@ addOption(GETOPTKEY   => 'g|genotype',
 	  TYPE        => 'negbool',
 	  GETOPTVAL   => \$genotype,
 	  DEFAULT     => $genotype,
-	  SMRY_DESC   => ("Use or don't use genotype calls."),
-	  DETAIL_DESC => ("Use or don't use the genotype call (i.e. the 'GT' " .
-			  'value in the FORMAT string) for sorting rows, ' .
-			  'growing sample groups, and filtering rows (see ' .
-			  '--filter).  If --nogenotype is supplied, only ' .
-			  'allelic frequencies will be used for these ' .
-			  'functions.  See --help --extended for details.'));
+	  SMRY_DESC   => ("Do not use genotype calls (use allelic frequency)."),
+	  DETAIL_DESC => ("Do not use the genotype call (i.e. the 'GT' " .
+			  'value in the FORMAT string) for sorting & ' .
+			  'filtering rows, or growing sample groups.  See ' .
+			  '--nogrow and --nofilter.  See --help --extended ' .
+			  'for details.'));
 
 my $filter = 1;
 addOption(GETOPTKEY   => 'f|filter',
 	  TYPE        => 'negbool',
 	  GETOPTVAL   => \$filter,
 	  DEFAULT     => $filter,
-	  SMRY_DESC   => ("Filter or don't filter variant rows whose sample " .
-			  "groups do not differ (enough)."),
-	  DETAIL_DESC => ("Filter or don't filter variant rows whose sample " .
+	  SMRY_DESC   => ("Do not filter variant rows whose sample groups " .
+			  "do not differ (enough)."),
+	  DETAIL_DESC => ("Do not filter variant rows whose sample " .
 			  'group pairs do not meet thresholds defined by ' .
 			  'either `--genotype --min-group-size <int>` or ' .
 			  '`--nogenotype --min-group-size <int> --separation-' .
@@ -249,18 +247,19 @@ addOption(GETOPTKEY   => 'w|grow',
 	  TYPE        => 'negbool',
 	  GETOPTVAL   => \$grow,
 	  DEFAULT     => $grow,
-	  SMRY_DESC   => ('Add as many samples to sample groups as possible.'),
-	  DETAIL_DESC => ('If the --min-group-size is less than the actual ' .
-			  'sample group size, keep adding samples to the ' .
-			  'minimum groups (from its remaining members) as ' .
-			  'long as (if --nogenotype is supplied) the ' .
-			  'difference in average observation ratios between ' .
-			  'the groups is greater than -a or (if --genotype ' .
-			  'is supplied) the genotype call is the same as ' .
-			  'current members and different from all partner ' .
-			  'group genotypes.  Note, this may lower the sort ' .
-			  'order of a variant/row when --nogenotype is ' .
-			  'supplied.'));
+	  SMRY_DESC   => ('Do not add as many samples to sample groups as ' .
+			  'possible.'),
+	  DETAIL_DESC => ('If the -d is less than the actual sample group ' .
+			  'size, by default, the script will keep adding ' .
+			  'samples to the minimum groups (from its remaining ' .
+			  'members) as long as (if --nogenotype is supplied) ' .
+			  'the difference in average observation ratios ' .
+			  'between the groups is greater than -a or (if ' .
+			  '--genotype is supplied) the genotype call is the ' .
+			  'same as current members and different from all ' .
+			  'partner group genotypes.  Note, this may lower ' .
+			  'the sort order of a variant/row when --nogenotype ' .
+			  'is supplied.'));
 
 processCommandLine();
 
