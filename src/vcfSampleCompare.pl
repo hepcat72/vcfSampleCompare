@@ -25,7 +25,7 @@ setScriptInfo(VERSION => $VERSION,
               LICENSE => 'Copyright 2018',
               HELP    => << 'END_HELP'
 
-This script sorts and (optionally) filters the rows/variants of a VCF file (containing data for 2 or more samples) based on the differences in the variant data between samples or sample groups.  "Difference" is determined by either the genotype call or allelic frequency (with a gap size threshold).  The the pair of samples or sample groups used to represent the difference for a variant row is the one leading to the greatest difference in consistent genotype or average allelic frequencies (i.e. observation ratios, e.g. AO/DP) of the same variant state.
+This script sorts and (optionally) filters the rows/variants of a VCF file (containing data for 2 or more samples) based on the differences in the variant data between samples or sample groups.  Degree of "difference" is determined by either the ratio of group-specific genotype calls over group size or the difference in average allelic frequency (with a gap size threshold).  The the pair of samples or sample groups used to represent the difference for a variant row is the one leading to the greatest difference in consistent genotype or average allelic frequencies (i.e. observation ratios, e.g. AO/DP) of the same variant state.
 
 See --help --extended for more details.
 
@@ -146,17 +146,29 @@ my $sum_oid =
 
 Tab delimited file describing the sorting, filtering, and differing sample groups.  The columns of the file are:
 
-    Chromosome - The chromosome on which the variant is located.
-    Position - The position starting from 1 where the variant is located.
-    Reference Value - The value the reference has in the variant position.
-    Sort Value - The value the sorting of the file is based on, which is the maximum "Pair Sort Value".
-    Pair Number - A colon-delimited list of numbers indicating the pair of sample groups the sort and filtering is based on.
-    Pair Sort Value - This is a colon-delimited list of each pair's maximum difference between sample group 1 & 2.
-    Most Differing Variant State - A colon-delimited list of each pair's most differing variant value (e.g. SNP value 'A') which the sort value is based on (because it differs the most between the 2 sample groups in the corresponding pair).  E.g. One group's samples have 'A' and the other group's samples have something *other than an 'A'*.
-    Sample Group 1 Members - A colon-delimited list of each pair's comma-delimited group 1 sample names that were used to produce the sort value by determining their maximum difference.  E.g. For 2 pairs, the value might be: "s1,s2:s6,s7".
-    Sample Group 1 Values - A colon-delimited list of pairs' group 1 comma-delimited values that were used to compute the corresponding "Pair Sort Value".  These may be a series of 0's and 1's indicating whether the sample's genotype is unique to group 1 or they are the observation ratios (in the form "numerator/denominator") of the selected variant state, chosen to differ most between sample groups.
-    Sample Group 2 Members - A colon-delimited list of each pair's comma-delimited group 2 sample names that were used to produce the sort value by determining their maximum difference.  E.g. For 2 pairs, the value might be: "s3,s4,s5:s8,s9,s10".
-    Sample Group 2 Values - A colon-delimited list of pairs' group 2 comma-delimited values that were used to compute the corresponding "Pair Sort Value".  These may be a series of 0's and 1's indicating whether the sample's genotype is unique to group 1 or they are the observation ratios (in the form "numerator/denominator") of the selected variant state, chosen to differ most between sample groups.
+* Chromosome - The chromosome on which the variant is located.
+* Position - The position starting from 1 where the variant is located.
+* Reference Value - The value the reference has in the variant position.
+* Alternate Value(s) - The value(s) observed in the samples in the variant position.
+* Best Sample Group Pair Number - The sample group pair's number (numbered from left to right, as they were supplied on the command line) for the pair that resulted in the biggest difference in variant states between the sample groups.
+* Best Score - The value the sorting of the file is based on, which is the maximum "Pair Score".
+* Best Average Read Depth - The average read depth of the samples in both sample groups of the pair with the best score.
+* Pair Number - A colon-delimited list of numbers indicating the pair of sample groups the sort and filtering is based on.
+* Pair Score - A colon-delimited list of each pair's maximum difference between sample group 1 & 2.
+* Pair Average Read Depth - A colon-delimited list of each pair's average read depth of the samples in both sample groups.
+* State(s) Used - The variant states used to calculate the pair score.  The state used can be 0 (the value of the variant at the variant position in the reference), or a number indicating which of the alternate observations produced the best score.  E.g. if in --nogenotype mode and the state '0' was used to compute the scores (indicating the reference state), then the average observation ratio of each group will be close to either N/N (i.e. the same as the reference) and the other group will be close to 0/N (i.e. different from the reference).  In --genotype mode, there are 2 sets of variant state values (i.e. genotype calls) separated by a semicolon.  If there are multiple genotype calls in a sample group, they will be delimited with a "+".
+* Sample Group 1 Members - A colon-delimited list of each pair's comma-delimited group 1 sample names that were used to produce the sort value by determining their maximum difference.  E.g. For 2 pairs, the value might be: "s1,s2:s6,s7".
+* Sample Group 1 Values - A colon-delimited list of pairs' group 1 comma-delimited values that were used to compute the corresponding "Pair Sort Value".  These may be a series of 0's and 1's indicating whether the sample's genotype is unique to group 1 or they are the observation ratios (in the form "numerator/denominator") of the selected variant state, chosen to differ most between sample groups.
+* Sample Group 2 Members - A colon-delimited list of each pair's comma-delimited group 2 sample names that were used to produce the sort value by determining their maximum difference.  E.g. For 2 pairs, the value might be: "s3,s4,s5:s8,s9,s10".
+* Sample Group 2 Values - A colon-delimited list of pairs' group 2 comma-delimited values that were used to compute the corresponding "Pair Sort Value".  These may be a series of 0's and 1's indicating whether the sample's genotype is unique to group 1 or they are the observation ratios (in the form "numerator/denominator") of the selected variant state, chosen to differ most between sample groups.
+
+Example:
+
+    #CHROM	POS	ID	REF	ALT	BEST_PAIR	BEST_SEP_SCORE	BEST_AVEDP	PAIR_NUM	PAIR_SEP_SCORE	PAIR_AVEDP	STATE(S)_USED	PAIR1_MEMBERS	PAIR1_SCORE_DATA	PAIR2_MEMBERS	PAIR2_SCORE_DATA
+    Chromosome	3413302	.	T	C	1	1	6	1	1	6	1	wtsmpl	2/2	smpl1,smpl2,smpl3	0/9,0/9,0/4
+    Chromosome	4904909	.	T	C	1	1	5	1	1	5	1	wtsmpl	2/2	smpl1,smpl2,smpl3	0/5,0/7,0/7
+    Chromosome	747041	.	ACCAGCTGGAAAAGGCTGGCGTGAGC	AC	1	1	5	1	1	5	1	wtsmpl	0/7	smpl2,smpl3	5/5,3/3
+    Chromosome	3778741	.	T	C	1	1	5	1	1	5	1	wtsmpl	0/7	smpl1	3/3
 
 END_FORMAT
 			);
