@@ -6,3 +6,4 @@ galaxy
 .DS_Store
 src/#*#
 src/.#*
+t/got/*
