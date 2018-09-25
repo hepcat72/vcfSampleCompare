@@ -7,3 +7,4 @@ galaxy
 src/#*#
 src/.#*
 t/got/*
+t/inputs/in1.vcf-bak
