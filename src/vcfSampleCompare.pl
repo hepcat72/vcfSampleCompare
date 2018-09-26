@@ -737,7 +737,8 @@ while(nextFileCombo())
 	openOut(*OUT,$outputFile);
 	openOut(HANDLE => *VCFO,
 		FILE   => $vcfoutFile,
-		HEADER => 0);
+		HEADER => 0,
+		SELECT => 0);
 
 	if(defined($vcfoutFile))
 	  {print VCFO ($outputs->{HEADER_LINES})}
