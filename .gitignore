@@ -6,5 +6,6 @@ galaxy
 .DS_Store
 src/#*#
 src/.#*
-t/got/*
+t/got/TEST*
 t/inputs/in1.vcf-bak
+t/command.txt
