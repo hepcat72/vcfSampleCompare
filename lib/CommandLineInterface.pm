@@ -2040,7 +2040,8 @@ sub addOutfileSuffixOption
 			   #If there are at least 2 input file types, also
 			   #require the FILETYPEID
 			   (scalar(@$input_files_array) < 2 ?
-			    qw(GETOPTKEY) : qw(GETOPTKEY FILETYPEID)) : ()],
+			    qw(FLAG|GETOPTKEY) :
+			    qw(FLAG|GETOPTKEY FILETYPEID)) : ()],
 			  [@_]);
     debug({LEVEL => -1},"Params sent in AFTER: [",
 	  join(',',map {defined($_) ? $_ : 'undef'} @in),"].");
@@ -3161,7 +3162,7 @@ sub addOutdirOption
     my @in = getSubParams([qw(FLAG|GETOPTKEY REQUIRED DEFAULT HIDDEN
 			      SMRY|SMRY_DESC|SHORT_DESC
 			      DETAIL|DETAIL_DESC|LONG_DESC FLAGLESS ADVANCED)],
-			  [scalar(@_) ? qw(GETOPTKEY) : ()],
+			  [scalar(@_) ? qw(FLAG|GETOPTKEY) : ()],
 			  [@_]);
     my $get_opt_str = $in[0]; #e.g. 'outdir=s'
     my $required    = $in[1]; #Is outdir required?: 0 (false) or non-0 (true)
@@ -4727,15 +4728,12 @@ sub getInfile
     #OR allow file_type_id to be optional when called in list context
     ##TODO: Create an iterator to cycle through the types when no type ID is
     ##      supplied.  See requirement 181
-    if(!defined($file_type_id) &&
-       ((scalar(@$input_files_array) - scalar(keys(%$outfile_types_hash))) ==
-	1 || wantarray))
+    if(!defined($file_type_id) && (getNumInfileTypes() == 1 || wantarray))
       {
 	#Even if we're returning a list, we'll set a file that will
 	#unnecessarily go through a conditional below to check for validity -
 	#just so this sub will work in both contexts
-	$file_type_id = (grep {!exists($outfile_types_hash->{$_})}
-			 (0..$#{$input_files_array}))[0];
+	$file_type_id = (getInfileIndexes())[0];
 
 	if(!defined($file_type_id))
 	  {
@@ -4773,7 +4771,7 @@ sub getInfile
       }
 
     my @return_files = ();
-    if(wantarray)
+    if(wantarray && !defined($file_type_id))
       {
 	##TODO: Reconsider this in such a way that the user knows the type of
 	##   each file returned. Cannot use position here since we are grepping
@@ -4785,7 +4783,7 @@ sub getInfile
 	    (0..$#{$input_files_array});
       }
 
-    return(wantarray ? @return_files :
+    return(wantarray && !defined($file_type_id) ? @return_files :
 	   $input_file_sets->[$file_set_num]->[$file_type_id]);
   }
 
@@ -5924,6 +5922,12 @@ sub getDefaultPrimaryLinkedInfileID
     my $suffix_usage_hash  = getDefaultPrimaryOutUsageHash(1);
     my $suffix_id = (defined($suffix_usage_hash) ?
 		     $suffix_usage_hash->{FILEID} : undef);
+    debug({LEVEL => -1},"Suffix ID selected as default primary: [",
+	  (defined($suffix_id) ? $suffix_id : 'undef'),
+	  "] which belongs to [",
+	  (defined($suffix_id) ? getOutfileSuffixFlag($suffix_id,-1) :
+	   'undef'),"] and [",($suffix_usage_hash->{PRIMARY} ?
+			       'is' : 'is not'),"] primary.");
     my $linked_index2 = (defined($suffix_id) ?
 			 $suffix_id_lookup->[$suffix_id]->[0] : undef);
 
@@ -5938,6 +5942,9 @@ sub getDefaultPrimaryLinkedInfileID
     else
       {$primary_linked_index = $linked_index2}
 
+    debug({LEVEL => -1},"Returning primary linked index: ",
+	  "[$primary_linked_index] for infile type [",
+	  getInfileFlag($primary_linked_index),"].");
     return($primary_linked_index);
   }
 
@@ -5970,7 +5977,31 @@ sub getDefaultPrimaryInfileID
 sub getNumInfileTypes
   {
     my $ifa = (defined($_[0]) ? $_[0] : $input_files_array);
-    return(scalar(@$ifa) - scalar(keys(%$outfile_types_hash)));
+
+    #getFileSets, called at the bottom of processCommandLine (just before
+    #$command_line_processed is set to 2) adds an outdirs array to the
+    #input_files_array, thus if any outdirs exist, we must subtract 1 from the
+    #total
+
+    return(scalar(@$ifa)                            #Num file types
+	   - scalar(keys(%$outfile_types_hash))     #Num outfile types
+	   - ($command_line_processed == 2 && scalar(@$outdirs_array) ? 1 : 0));
+  }
+
+sub getInfileIndexes
+  {
+    my $ifa = (defined($_[0]) ? $_[0] : $input_files_array);
+
+    #getFileSets, called at the bottom of processCommandLine (just before
+    #$command_line_processed is set to 2) adds an outdirs array to the
+    #input_files_array, thus if any outdirs exist, we must subtract 1 from the
+    #total
+
+    my $indexes =
+      [grep {!exists($outfile_types_hash->{$_})}
+       (0..($#{$input_files_array} - ($command_line_processed == 2 &&
+				      scalar(@$outdirs_array) ? 1 : 0)))];
+    return(wantarray ? @$indexes : $indexes);
   }
 
 sub getNumSuffixTypes
@@ -7726,15 +7757,12 @@ sub getNextFileGroup
     #OR allow file_type_id to be optional when called in list context
     ##TODO: Create an iterator to cycle through the types when no type ID is
     ##      supplied.  See requirement 181.
-    if(!defined($file_type_id) &&
-       ((scalar(@$input_files_array) - scalar(keys(%$outfile_types_hash))) ==
-	1 || wantarray))
+    if(!defined($file_type_id) && (getNumInfileTypes() == 1 || wantarray))
       {
 	#Even if we're returning a list, we'll set a file that will
 	#unnecessarily go through a conditional below to check for validity -
 	#just so this sub will work in both contexts
-	$file_type_id = (grep {!exists($outfile_types_hash->{$_})}
-			 (0..$#{$input_files_array}))[0];
+	$file_type_id = (getInfileIndexes())[0];
 
 	if(!defined($file_type_id))
 	  {
@@ -7774,15 +7802,12 @@ sub resetFileGroupIterator
     #OR allow file_type_id to be optional when called in list context
     ##TODO: Create an iterator to cycle through the types when no type ID is
     ##      supplied.  See requirement 181.
-    if(!defined($file_type_id) &&
-       ((scalar(@$input_files_array) - scalar(keys(%$outfile_types_hash))) ==
-	1 || wantarray))
+    if(!defined($file_type_id) && (getNumInfileTypes() == 1 || wantarray))
       {
 	#Even if we're returning a list, we'll set a file that will
 	#unnecessarily go through a conditional below to check for validity -
 	#just so this sub will work in both contexts
-	$file_type_id = (grep {!exists($outfile_types_hash->{$_})}
-			 (0..$#{$input_files_array}))[0];
+	$file_type_id = (getInfileIndexes())[0];
 
 	if(!defined($file_type_id))
 	  {
@@ -7810,15 +7835,12 @@ sub getAllFileGroups
     #OR allow file_type_id to be optional when called in list context
     ##TODO: Create an iterator to cycle through the types when no type ID is
     ##      supplied.  See requirement 181.
-    if(!defined($file_type_id) &&
-       ((scalar(@$input_files_array) - scalar(keys(%$outfile_types_hash))) ==
-	1 || wantarray))
+    if(!defined($file_type_id) && (getNumInfileTypes() == 1 || wantarray))
       {
 	#Even if we're returning a list, we'll set a file that will
 	#unnecessarily go through a conditional below to check for validity -
 	#just so this sub will work in both contexts
-	$file_type_id = (grep {!exists($outfile_types_hash->{$_})}
-			 (0..$#{$input_files_array}))[0];
+	$file_type_id = (getInfileIndexes())[0];
 
 	if(!defined($file_type_id))
 	  {
@@ -7846,15 +7868,12 @@ sub getNumFileGroups
     #OR allow file_type_id to be optional when called in list context
     ##TODO: Create an iterator to cycle through the types when no type ID is
     ##      supplied.  See requirement 181.
-    if(!defined($file_type_id) &&
-       ((scalar(@$input_files_array) - scalar(keys(%$outfile_types_hash))) ==
-	1 || wantarray))
+    if(!defined($file_type_id) && (getNumInfileTypes()  == 1 || wantarray))
       {
 	#Even if we're returning a list, we'll set a file that will
 	#unnecessarily go through a conditional below to check for validity -
 	#just so this sub will work in both contexts
-	$file_type_id = (grep {!exists($outfile_types_hash->{$_})}
-			 (0..$#{$input_files_array}))[0];
+	$file_type_id = (getInfileIndexes())[0];
 
 	if(!defined($file_type_id))
 	  {
@@ -7886,14 +7905,12 @@ sub getFileGroupSizes
     ##TODO: Create an iterator to cycle through the types when no type ID is
     ##      supplied.  See requirement 181.
     if(!defined($file_type_id) &&
-       ((scalar(@$input_files_array) - scalar(keys(%$outfile_types_hash))) ==
-	1 || wantarray))
+       (getNumInfileTypes() == 1 || wantarray))
       {
 	#Even if we're returning a list, we'll set a file that will
 	#unnecessarily go through a conditional below to check for validity -
 	#just so this sub will work in both contexts
-	$file_type_id = (grep {!exists($outfile_types_hash->{$_})}
-			 (0..$#{$input_files_array}))[0];
+	$file_type_id = (getInfileIndexes())[0];
 
 	if(!defined($file_type_id))
 	  {
@@ -11051,7 +11068,7 @@ sub mkdirs
 		    if(!(-w $dir))
 		      {push(@unwritable,$dir)}
 		    #Else if we are in overwrite mode
-		    elsif($local_overwrite)
+		    elsif($local_overwrite && isDebug())
 		      {warning('The --overwrite flag will not empty or ',
 			       'delete existing output directories.  If ',
 			       'you wish to delete existing output ',
@@ -11451,21 +11468,36 @@ sub openOut
     else
       {
 	debug({LEVEL=>-1},"No select.");
-	my $selected_handle = select();
+	my $selected_handle = '*' . select();
 	my($selected_file);
 	if(exists($open_out_handles->{$selected_handle}))
 	  {
 	    $selected_file = $open_out_handles->{$selected_handle}->{CURFILE};
-	    warning("Only 1 output handle can be selected at a time.  Not ",
-		    "selecting handle for output file [$output_file] because ",
-		    "an open selected handle exists for file ",
-		    "[$selected_file].");
+	    warning("Only 1 output handle can be selected at a time.",
+		    {DETAIL =>
+		     join('',("Not selecting handle for output file ",
+			      "[$output_file] because an open selected ",
+			      "handle exists [$selected_handle] for file ",
+			      "[$selected_file].  A code edit to add `SELECT ",
+			      "=> 0` to the call to openOut using file ",
+			      "handle [$file_handle]."))});
 	  }
 	else
-	  {warning("Only 1 output handle can be selected at a time.  Not ",
-		   "selecting handle for output file [$output_file] because ",
-		   "an untracked file handle [$selected_handle] has been ",
-		   "selected.")}
+	  {
+	    debug("Rejected outfile handles: [",
+		  join(',',keys(%$rejected_out_handles)),"].\n",
+		  "Open outfile handles: [",
+		  join(',',keys(%$open_out_handles)),"].",{LEVEL => -1});
+	    warning("Only 1 output handle can be selected at a time.",
+		    {DETAIL =>
+		     join('',("Not selecting handle for output file ",
+			      "[$output_file] because an untracked file ",
+			      "handle [$selected_handle] has been ",
+			      "selected.  A code edit to either not call ",
+			      "`select($selected_handle)` or to add `SELECT ",
+			      "=> 0` to the call to openOut using file ",
+			      "handle [$file_handle]."))});
+	  }
 	$select = 0;
       }
 
@@ -15695,12 +15727,7 @@ LONG_DESC is the long version of the usage message for this output file type.  I
 
 Note, both SHORT_DESC and LONG_DESC have auto-generated formatting which includes whether or not the option is REQUIRED.
 
-DELIMITER is the character between multiple values supplied to a single FLAG.  Note, if you use a space as your DELIMITER, the arguments must be wrapped in quotes.  Multiple character DELIMITERs are allowed.  Empty values (between multiple instances of contiguous delimiters) are skipped.  A perl regular expression is allowed (e.g. '\s+').  The default is based on TYPE.  Defaults of DELIMITER for each TYPE are:
-
-    integer - Non-number characters (i.e. not 0-9, '+', '-', or 'e' (exponent).
-    float   - Same as int, but decimals are included.
-    string  - Space.
-    enum    - Any character not in the ACCEPTS values.
+DELIMITER is the character between multiple values supplied to a single FLAG.  Note, if you use a space as your DELIMITER, the arguments must be wrapped in quotes.  Multiple character DELIMITERs are allowed.  Empty values (between multiple instances of contiguous delimiters) are skipped.  A perl regular expression is allowed (e.g. '\s+').  The default is based on TYPE.  There is no default delimiter for addArrayOption() (though there is for add2DArrayOption()).  Without supplying a delimiter, each value must be submitted with a flag.  If you do provide a delimiter, multiple flags are still allowed, but all values are pushed onto the same array from left to right, as they appear in order on the command line.
 
 ACCEPTS takes a reference to an array of scalar values.  If defined/supplied, the list of acceptable values will be shown in the usage message for this option after the default value and before the description.  This parameter is intended for short lists of discrete values (i.e. enumerations) only.  Descriptions of acceptable value ranges should instead be incorporated into the LONG_DESC.
 
@@ -15760,6 +15787,8 @@ If an array is pre-populated with default values, the default is not replaced, b
 I<ADVANCED>
 
 VARREF is the value that is supplied as a value in the hash that is passed to Getopt::Long's GetOptions method.  Note that the VARREF array variable supplied is not populated until processCommandLine() has been called.  Once processCommandLine() has been called, no further calls to addArrayOption() are allowed.
+
+The DELIMITER will be shown in the script's usage in the flags column, inside the argument, between the argument type and an ellipsis, e.g. "--flag <int ...>".  In this case, the delimiter is a space.  If a multi-character delimiter is provided, the flag column will appear as "--flag <int...>" and an addendum will be appended to the LONG_DESC.  If a perl regular expression is used, a representative DELIMITER will be shown in the flags column, if an arbitrary example will be used and an addendum placed in the description.
 
 If REQUIRED is true, but the array reference provided is populated with default values, the option is essentially optional.  Setting REQUIRED to true only forces the user to supply a value if the array reference refers to an empty array.  Note also that if the user provides no options on the command line, a general usage is printed, but if other options are supplied, and error about missing required options is generated.
 
