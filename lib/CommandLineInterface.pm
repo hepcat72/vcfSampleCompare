@@ -26,7 +26,8 @@ use strict;
 use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev);
 use File::Glob ':glob';
 
-our $VERSION = '4.133';
+our
+  $VERSION = '4.133';
 our($compile_err);
 
 #Basic script info
@@ -12276,10 +12277,14 @@ sub makeCheckOutputs
 
     if($DEBUG < 0 && eval('use Data::Dumper;1'))
       {
-	#if(eval('use Data::Dumper;1');
-	debug({LEVEL=>-99},"Stub sets:\n",Dumper($stub_sets),"\nSuffixes:\n",
-	      Dumper($suffixes),"\nCollide modes:\n",Dumper($collide_modes),
-	      "\n");
+	my $sd = '';
+	my $td = '';
+	my $cd = '';
+	eval('use Data::Dumper;$sd = Dumper($suffixes);1');
+	eval('use Data::Dumper;$td = Dumper($stub_sets);1');
+	eval('use Data::Dumper;$cd = Dumper($collide_modes);1');
+	debug({LEVEL=>-99},"Stub sets:\n$td\nSuffixes:\n",
+	      "$sd\nCollide modes:\n$cd\n");
       }
 
     #Build the is_index_unique array
