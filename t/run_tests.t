@@ -1633,8 +1633,7 @@ sub debug3
       }
     elsif(scalar(grep {ref($_) ne 'ARRAY' || scalar(@$_) != 2} @$got_array))
       {
-	use Data::Dumper;
-	error("Got file array is invalid.\n",Dumper($expected_array));
+	error("Got file array is invalid.\n");
 	return();
       }
     #return() if($local_test_status || !$self_debug);
