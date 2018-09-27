@@ -5,7 +5,7 @@
 
 use strict;
 use warnings;
-use lib '../lib';           #BEGIN block chdirs to t/
+use lib (-e '../lib' ? '../lib' : 'lib'); #Can run from repo dir or t dir
 use CommandLineInterface;
 use File::Basename;
 
@@ -15,7 +15,7 @@ use File::Basename;
 
 my($num_tests,$available_starts,$available_ranges,$changed_dir,$script,
    $test_script);
-my $perl_call_def   = 'perl -I../lib';
+my $perl_call_def   = 'perl -I../lib';  #BEGIN block chdirs to t/
 my $test_script_def = '../src/vcfSampleCompare.pl';
 my $outd            = 'got';  #Main test directory to store test output
 my $test_num        = 0;
