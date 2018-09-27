@@ -18,11 +18,11 @@ WriteMakefile
 		       'CommandLineInterface' => 4.133},
    EXE_FILES       => [ map { "src/$_" } @scripts ],
    TEST_REQUIRES   => {
-		       'Test::More' => 1.302138,
+		       'Test::More'           => 0.98,
 		       'strict'               => 1.07,
 		       'warnings'             => 1.13,
 		       'CommandLineInterface' => 4.133,
-		       'lib'                  => 0.64,
-		       'File::Basename'       => 2.85,
+		       'lib'                  => 0.63,
+		       'File::Basename'       => 2.84,
 		      },
   );
