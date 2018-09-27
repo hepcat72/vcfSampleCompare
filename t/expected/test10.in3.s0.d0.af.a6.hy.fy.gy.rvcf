@@ -1,0 +1,16 @@
+#vcfSampleCompare.pl Version 2.000
+# Created: 6/22/2017
+# Last modified: Thu Sep 27 11:49:47 2018
+# Author: Robert William Leach
+# Contact: rleach@princeton.edu
+# Company: Princeton University
+# License: Copyright 2018
+#User: robleach
+#Time: Thu Sep 27 11:49:47 2018
+#Host: gen-rlmacbook
+#PID: 42450
+#Directory: /Users/robleach/pub/vcfSampleCompare/t
+#Command: /usr/bin/perl ../src/vcfSampleCompare.pl --nogenotype -a 0.6 --filter --grow inputs/lest2.vcf --outdir got/TEST10 -u .in3.s0.d0.af.a6.hy.fy.gy.rvcf -o .in3.s0.d0.af.a6.hy.fy.gy.vcf
+
+#CHROM	POS	ID	REF	ALT	BEST_PAIR	BEST_SEP_SCORE	BEST_AVEDP	PAIR_NUM	PAIR_SEP_SCORE	PAIR_AVEDP	STATE(S)_USED	PAIR1_MEMBERS	PAIR1_SCORE_DATA	PAIR2_MEMBERS	PAIR2_SCORE_DATA
+chr1	1659220	6	N	<DUP>	1	0.8910	490	1	0.8910	490	0	195	97/890	213	90/90
