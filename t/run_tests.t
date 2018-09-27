@@ -1688,7 +1688,7 @@ sub testaf4
 			   "testing has a roblem or not.  There's probably a ",
 			   'different not accounted for in the setting of ',
 			   'test_result and the building of the values passed ',
-			   'to debug3.'})}
+			   'to debug3.'))})}
 
 	debug3($expected,$gotarray,$test_status,$test_cmd);
       }
