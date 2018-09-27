@@ -769,18 +769,22 @@ while(nextFileCombo())
 				  $ordered_rec->{ALT},$ordered_rec->{BEST_PAIR},
 				  sigdec($ordered_rec->{RANK},4),
 				  intRound($ordered_rec->{AVEDP}))),"\t",
+
 		       #Next column's a colon-delimited list of passing rule 
 		       #numbers
 		       join(':',map {$_->{RULE_NUM}}
 			    @{$ordered_rec->{RANK_DATA}}),"\t",
+
 		       #Next column is a colon-delimited list of each rule's
 		       #score
 		       join(':',map {sigdec($_->{SCORE},4)}
 			    @{$ordered_rec->{RANK_DATA}}),"\t",
+
 		       #Next column is a colon-delimited list of each rule's
 		       #sub-score (which is the average DP (read depth))
 		       join(':',map {intRound($_->{SUBSCORE},4)}
 			    @{$ordered_rec->{RANK_DATA}}),"\t",
+
 		       #Next column's a colon-delimited list of each rule's
 		       #state(s).  For 'nogenotype', states are a single
 		       #nucleotide character.  For genotype, states are 2 lists
@@ -788,18 +792,22 @@ while(nextFileCombo())
 		       #are delimited by "+" and groups are delimited by ";"
 		       join(':',map {$_->{STATE}} @{$ordered_rec->{RANK_DATA}}),
 		       "\t",
+
 		       #Next column is a colon-delimited list of each rule's
 		       #comma-delimited list of samples in group 1
 		       join(':',(map {join(',',@{$_->{SAMPLES1}})}
 				 @{$ordered_rec->{RANK_DATA}})),"\t",
+
 		       #Next column is a colon-delimited list of each rule's
 		       #comma-delimited list of scores in group 1
 		       join(':',(map {join(',',@{$_->{SCORES1}})}
 				 @{$ordered_rec->{RANK_DATA}})),"\t",
+
 		       #Next column is a colon-delimited list of each rule's
 		       #comma-delimited list of samples in group 2
 		       join(':',(map {join(',',@{$_->{SAMPLES2}})}
 				 @{$ordered_rec->{RANK_DATA}})),"\t",
+
 		       #Next column is a colon-delimited list of each rule's
 		       #comma-delimited list of scores in group 2
 		       join(':',(map {join(',',@{$_->{SCORES2}})}
