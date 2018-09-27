@@ -732,22 +732,22 @@ while(nextFileCombo())
 
     closeIn(*IN);
 
+    openOut(*OUT,$outputFile);
+    openOut(HANDLE => *VCFO,
+	    FILE   => $vcfoutFile,
+	    HEADER => 0,
+	    SELECT => 0);
+
+    if(defined($vcfoutFile))
+      {print VCFO ($outputs->{HEADER_LINES})}
+
+    print OUT ("#CHROM\tPOS\tID\tREF\tALT\tBEST_PAIR\tBEST_SEP_SCORE\t",
+	       "BEST_AVEDP\tPAIR_NUM\tPAIR_SEP_SCORE\tPAIR_AVEDP\t",
+	       "STATE(S)_USED\tPAIR1_MEMBERS\tPAIR1_SCORE_DATA\t",
+	       "PAIR2_MEMBERS\tPAIR2_SCORE_DATA\n");
+
     if(scalar(@{$outputs->{ROW_DATA}}))
       {
-	openOut(*OUT,$outputFile);
-	openOut(HANDLE => *VCFO,
-		FILE   => $vcfoutFile,
-		HEADER => 0,
-		SELECT => 0);
-
-	if(defined($vcfoutFile))
-	  {print VCFO ($outputs->{HEADER_LINES})}
-
-	print OUT ("#CHROM\tPOS\tID\tREF\tALT\tBEST_PAIR\tBEST_SEP_SCORE\t",
-		   "BEST_AVEDP\tPAIR_NUM\tPAIR_SEP_SCORE\tPAIR_AVEDP\t",
-		   "STATE(S)_USED\tPAIR1_MEMBERS\tPAIR1_SCORE_DATA\t",
-		   "PAIR2_MEMBERS\tPAIR2_SCORE_DATA\n");
-
 	foreach my $ordered_rec (sort {compareWhenZero($b->{AVEDP},$a->{AVEDP})
 					 || compareDec($b->{RANK},$a->{RANK}) ||
 					   $b->{AVEDP} <=> $a->{AVEDP}}
@@ -813,13 +813,13 @@ while(nextFileCombo())
 		       join(':',(map {join(',',@{$_->{SCORES2}})}
 				 @{$ordered_rec->{RANK_DATA}})),"\n");
 	  }
-
-	if(defined($vcfoutFile))
-	  {print VCFO ($outputs->{COMMENT_LINES})}
-
-	closeOut(*VCFO);
-	closeOut(*OUT);
       }
+
+    if(defined($vcfoutFile))
+      {print VCFO ($outputs->{COMMENT_LINES})}
+
+    closeOut(*VCFO);
+    closeOut(*OUT);
   }
 
 
