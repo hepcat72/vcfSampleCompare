@@ -646,11 +646,13 @@ $reqnum = '4';
 $inf1     = 'inputs/fbse1.vcf';
 
 my $tdir  = "$outd/TEST$test_num";
-my $outf1 = "$tdir/" . basename($inf1) . ".in1.s1.s3.d1.d1.af.a6.nh.fy.gy.rvcf";
-my $outf2 = "$tdir/" . basename($inf1) . ".in1.s1.s3.d1.d1.af.a6.nh.fy.gy.vcf";
+my $rvcf  = ".in1.s1.s3.d1.d1.af.a6.nh.fy.gy.rvcf";
+my $vcf   = ".in1.s1.s3.d1.d1.af.a6.nh.fy.gy.vcf";
+my $outf1 = "$tdir/" . basename($inf1) . $rvcf;
+my $outf2 = "$tdir/" . basename($inf1) . $vcf;
 
-$expf1    = "expected/test$test_num.in1.s1.s3.d1.d1.af.a6.nh.fy.gy.rvcf";
-my $expf2 = "expected/test$test_num.in1.s1.s3.d1.d1.af.a6.nh.fy.gy.vcf";
+$expf1    = "expected/test$test_num$rvcf";
+my $expf2 = "expected/test$test_num$vcf";
 
 
 testaf4(#Test description
@@ -677,9 +679,7 @@ testaf4(#Test description
 	#Options to supply to the test script on command line in 1 string.
 	#Be sure to specify in & out files, but no redirection.
 	"-a 0.6 --noheader -s gDNA-PA14 -d 1 -s '205w3 205w2 205w1' -d 1 " .
-	"--nogenotype --filter --grow $inf1 --outdir '$tdir' -u " .
-	".in1.s1.s3.d1.d1.af.a6.nh.fy.gy.rvcf -o " .
-	".in1.s1.s3.d1.d1.af.a6.nh.fy.gy.vcf",
+	"--nogenotype --filter --grow $inf1 --outdir '$tdir' -u $rvcf -o $vcf",
 
 	#Names of files expected to NOT be created. Supply undef if not testing.
 	[],
@@ -718,11 +718,13 @@ $reqnum = '4';
 $inf1  = 'inputs/fbse1.vcf';
 
 $tdir  = "$outd/TEST$test_num";
-$outf1 = "$tdir/" . basename($inf1) . ".in1.s1.s3.d1.d1.gt.nh.fy.gy.rvcf";
-$outf2 = "$tdir/" . basename($inf1) . ".in1.s1.s3.d1.d1.gt.nh.fy.gy.vcf";
+$rvcf  = ".in1.s1.s3.d1.d1.gt.nh.fy.gy.rvcf";
+$vcf   = ".in1.s1.s3.d1.d1.gt.nh.fy.gy.vcf";
+$outf1 = "$tdir/" . basename($inf1) . $rvcf;
+$outf2 = "$tdir/" . basename($inf1) . $vcf;
 
-$expf1 = "expected/test$test_num.in1.s1.s3.d1.d1.gt.nh.fy.gy.rvcf";
-$expf2 = "expected/test$test_num.in1.s1.s3.d1.d1.gt.nh.fy.gy.vcf";
+$expf1 = "expected/test$test_num$rvcf";
+$expf2 = "expected/test$test_num$vcf";
 
 
 testaf4(#Test description
@@ -747,9 +749,7 @@ testaf4(#Test description
 
 	#Options to supply to the test script on command line in 1 string
 	"--noheader -s gDNA-PA14 -d 1 -s '205w3 205w2 205w1' -d 1 --genotype " .
-	"--filter --grow $inf1 --outdir '$tdir' -u " .
-	".in1.s1.s3.d1.d1.gt.nh.fy.gy.rvcf -o " .
-	".in1.s1.s3.d1.d1.gt.nh.fy.gy.vcf",
+	"--filter --grow $inf1 --outdir '$tdir' -u $rvcf -o $vcf",
 
 	#Names of files expected to NOT be created. Supply undef if not testing.
 	[],
@@ -766,6 +766,146 @@ testaf4(#Test description
 	#Patterns expected in string output for o1, o2, ...  Supply undef if not
 	#testing.
 	[undef,undef],
+
+	#Patterns not expected in string output for stdout & stderr.  Supply
+	#undef if not testing.
+        undef,'(ERROR|WARNING)\d+:',
+	#Patterns not expected in string output for o1, o1, ...  Supply undef if
+	#not testing.
+        [undef,undef],
+
+	#Exit code (0 = success, 1 = error: means any non-0 value is expected)
+	0);
+
+
+TEST9:
+
+#Describe the test
+$test_num++;
+$sub_test_num++;
+$reqnum = '4';
+
+$inf1  = 'inputs/lest1.vcf';
+
+$tdir  = "$outd/TEST$test_num";
+$rvcf = ".in2.s0.d0.gt.hy.fy.gy.rvcf";
+$vcf  = ".in2.s0.d0.gt.hy.fy.gy.vcf";
+$outf1 = "$tdir/" . basename($inf1) . $rvcf;
+$outf2 = "$tdir/" . basename($inf1) . $vcf;
+
+$expf2 = "expected/test$test_num$vcf";
+
+
+testaf4(#Test description
+	$test_num,
+	$sub_test_num,
+	$reqnum,
+	"SVs in genotype mode with no sample groups, filtering, growth, and " .
+	"with rvcf & vcf output - no results",
+
+	$in_script,
+        $outd,
+
+	#Input files (to make sure they pre-exist)
+	[$inf1],
+	#Supply the first input file on standard in
+	0,
+
+	#Output files (they will be deleted if they pre-exist)
+	[$outf1,$outf2],
+	#Don't delete these pre-existing outfiles before test (e.g. if you want
+	#to test overwrite protection & created them on purpose)
+	[],
+
+	#Options to supply to the test script on command line in 1 string
+	"--genotype --header --filter --grow $inf1 --outdir '$tdir' -u $rvcf " .
+	"-o $vcf",
+
+	#Names of files expected to NOT be created. Supply undef if not testing.
+	[],
+
+	#Exact expected stdout & stderr files.  Supply undef if no test.
+	undef,undef,
+	#Exact expected output files.  Must be the same size as the output files
+	#array above.  Supply undef if not testing.
+	[undef,$expf2],
+
+	#Patterns expected in string output for stdout & stderr.  Supply undef
+	#if not testing.
+	undef,undef,
+	#Patterns expected in string output for o1, o2, ...  Supply undef if not
+	#testing.
+	[['^\A#vcfSampleCompare.pl','PAIR2_SCORE_DATA\Z'],undef],
+
+	#Patterns not expected in string output for stdout & stderr.  Supply
+	#undef if not testing.
+        undef,'(ERROR|WARNING)\d+:',
+	#Patterns not expected in string output for o1, o1, ...  Supply undef if
+	#not testing.
+        [undef,undef],
+
+	#Exit code (0 = success, 1 = error: means any non-0 value is expected)
+	0);
+
+
+TEST10:
+
+#Describe the test
+$test_num++;
+$sub_test_num++;
+$reqnum = '4';
+
+$inf1  = 'inputs/lest2.vcf';
+
+$tdir  = "$outd/TEST$test_num";
+$rvcf = ".in3.s0.d0.af.a6.hy.fy.gy.rvcf";
+$vcf  = ".in3.s0.d0.af.a6.hy.fy.gy.vcf";
+$outf1 = "$tdir/" . basename($inf1) . $rvcf;
+$outf2 = "$tdir/" . basename($inf1) . $vcf;
+
+$expf2 = "expected/test$test_num$vcf";
+
+
+testaf4(#Test description
+	$test_num,
+	$sub_test_num,
+	$reqnum,
+	"SVs in nogenotype mode with af 0.6, no sample groups, filtering, " .
+	"growth, and with rvcf & vcf output - results",
+
+	$in_script,
+        $outd,
+
+	#Input files (to make sure they pre-exist)
+	[$inf1],
+	#Supply the first input file on standard in
+	0,
+
+	#Output files (they will be deleted if they pre-exist)
+	[$outf1,$outf2],
+	#Don't delete these pre-existing outfiles before test (e.g. if you want
+	#to test overwrite protection & created them on purpose)
+	[],
+
+	#Options to supply to the test script on command line in 1 string
+	"--nogenotype -a 0.6 --filter --grow $inf1 --outdir '$tdir' -u $rvcf " .
+	"-o $vcf",
+
+	#Names of files expected to NOT be created. Supply undef if not testing.
+	[],
+
+	#Exact expected stdout & stderr files.  Supply undef if no test.
+	undef,undef,
+	#Exact expected output files.  Must be the same size as the output files
+	#array above.  Supply undef if not testing.
+	[undef,$expf2],
+
+	#Patterns expected in string output for stdout & stderr.  Supply undef
+	#if not testing.
+	undef,undef,
+	#Patterns expected in string output for o1, o2, ...  Supply undef if not
+	#testing.
+	[['^\A#vcfSampleCompare.pl',"chr1\t1659220\t"],undef],
 
 	#Patterns not expected in string output for stdout & stderr.  Supply
 	#undef if not testing.
@@ -1477,7 +1617,7 @@ sub testaf4
 		    else
 		      {
 			my $diff = `diff '$ary->[1]' '$ary->[7]'`;
-			if($?)
+			if($? && $diff eq '')
 			  {error("Diff failed.  $!")}
 			elsif(!defined($diff) || $diff eq '')
 			  {
@@ -1540,6 +1680,16 @@ sub testaf4
 	      }
 	  }
 
+	if(scalar(@$gotarray) == 0)
+	  {error("Test failed, but no explanation was found.",
+		 {DETAIL =>
+		  join('',('Something is wrong with the test code.  This ',
+			   "should not happen, whether the script we're ",
+			   "testing has a roblem or not.  There's probably a ",
+			   'different not accounted for in the setting of ',
+			   'test_result and the building of the values passed ',
+			   'to debug3.'})}
+
 	debug3($expected,$gotarray,$test_status,$test_cmd);
       }
 
@@ -1571,7 +1721,7 @@ sub filesMatchExactly
     my $shoulds  = $_[1]; #Array of strings of expected file contents
     my $actuals  = $_[2]; #Array of strings of actual file contents
 
-    return(scalar(grep {!defined($outfiles->[$_]) ||
+    return(scalar(grep {!defined($shoulds->[$_]) ||
 			  (-e $outfiles->[$_] &&
 			   $shoulds->[$_] eq $actuals->[$_])}
 		  0..$#{$outfiles}) ==
@@ -1602,7 +1752,7 @@ sub filesMatchPattern
 sub getContents
   {
     my $file     = $_[0];
-    my $contents = '';
+    my($contents);
     if(defined($file) && -e $file && open(CONT,$file))
       {
 	$contents = join('',<CONT>);
