@@ -1,4 +1,4 @@
-# rankVCF.pl
+# rankVCF.pl [LEGACY VERSION OF vcfSampleCompare]
 
 ## WHAT IS THIS:
 
