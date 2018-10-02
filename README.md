@@ -66,7 +66,7 @@ cd into the vcfSampleCompare directory and run the following:
     make
     sudo make install
     
-## USAGE (SIMPLE)
+## USAGE (SHORT)
 
 vcfSampleCompare.pl -i <file*...>... [OPTIONS]
 
@@ -87,7 +87,7 @@ vcfSampleCompare.pl -i <file*...>... [OPTIONS]
     --help              Print general info and file formats.
     --extended [<cnt>]  Print detailed usage.
 
-## USAGE (ADVANCED)
+## USAGE (LONG)
 
 vcfSampleCompare.pl -i <file*...>... [OPTIONS]
 vcfSampleCompare.pl [OPTIONS] < input_file
