@@ -27,7 +27,7 @@ use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev);
 use File::Glob ':glob';
 
 our
-  $VERSION = '4.133';
+  $VERSION = '4.134';
 our($compile_err);
 
 #Basic script info
@@ -533,7 +533,7 @@ sub addInfileOption
 	  {
 	    error('Unable to add default input file type ',
 		  "[$default_infile_opt] due to redundant flags: [",
-		  join(',',getDupeFlags($get_opt_str)),'].');
+		  join(',',getDupeFlags($default_infile_opt)),'].');
 	    $default_infile_opt = $get_opt_str;
 	    return(undef);
 	  }
@@ -4317,9 +4317,10 @@ sub add2DArrayOption
 	my $getoptsub;
 	if(defined($get_opt_ref) &&
 	   ref($get_opt_ref) eq 'SCALAR' && ref($$get_opt_ref) eq 'ARRAY')
-	  {$sub = sub {push(@{$$get_opt_ref},[split(/$delimiter/,$_[0])])}}
+	  {$getoptsub =
+	     sub {push(@{$$get_opt_ref},[split(/$delimiter/,$_[0])])}}
 	elsif(defined($get_opt_ref) && ref($get_opt_ref) eq 'ARRAY')
-	  {$sub = sub {push(@{$get_opt_ref},[split(/$delimiter/,$_[0])])}}
+	  {$getoptsub = sub {push(@{$get_opt_ref},[split(/$delimiter/,$_[0])])}}
 	#No need to do an else, because it would have caused a return above
 	$GetOptHash->{'<>'} = $getoptsub;
 
@@ -4572,7 +4573,7 @@ sub addToUsage
     my $delim       = $_[12];
 
     #For in/out file types (used in help output)
-    my $primary     = defined($_[13]) ? $_[13] : 0;
+    my $primary     = defined($_[13]) ? $_[13] : '';
     my $format_desc = $_[14];
     my $file_id     = $_[15];
 
@@ -4726,10 +4727,9 @@ sub getInfile
       }
 
     #Allow file_type_id to be optional when there's only 1 infile type
-    #OR allow file_type_id to be optional when called in list context
     ##TODO: Create an iterator to cycle through the types when no type ID is
     ##      supplied.  See requirement 181
-    if(!defined($file_type_id) && (getNumInfileTypes() == 1 || wantarray))
+    if(!defined($file_type_id) && (getNumInfileTypes() == 1 || !wantarray))
       {
 	#Even if we're returning a list, we'll set a file that will
 	#unnecessarily go through a conditional below to check for validity -
@@ -4742,32 +4742,9 @@ sub getInfile
 	    return(undef);
 	  }
       }
-    elsif(!defined($file_type_id))
+    elsif(!defined($file_type_id) && !wantarray)
       {
 	error("A file type ID is required.");
-	return(undef);
-      }
-
-    my $repeated = 0;
-    if(fileReturnedBefore($file_type_id))
-      {$repeated = 1}
-
-    if($repeated)
-      {
-	if($iterate)
-	  {nextFileCombo()}
-	else
-	  {warning("Repeated requests for the same file detected.  Call ",
-		   "nextFileCombo() between calls to getInfile().")}
-	if(!defined($file_set_num))
-	  {return(undef)}
-      }
-
-    if($file_type_id >= scalar(@$input_files_array) ||
-       exists($outfile_types_hash->{$file_type_id}) ||
-       $file_type_id >= scalar(@{$input_file_sets->[$file_set_num]}))
-      {
-	error("Invalid input file type ID: [$file_type_id].");
 	return(undef);
       }
 
@@ -4782,6 +4759,32 @@ sub getInfile
 		  defined($input_file_sets->[$file_set_num]->[$_]) &&
 		    !exists($outfile_types_hash->{$_})}
 	    (0..$#{$input_files_array});
+      }
+
+    my $repeated = 0;
+    if((defined($file_type_id) && fileReturnedBefore($file_type_id)) ||
+       !defined($file_type_id) && wantarray &&
+       scalar(grep {fileReturnedBefore($_)} @return_files))
+      {$repeated = 1}
+
+    if($repeated)
+      {
+	if($iterate)
+	  {nextFileCombo()}
+	else
+	  {warning("Repeated requests for the same file detected.  Call ",
+		   "nextFileCombo() between calls to getInfile().")}
+	if(!defined($file_set_num))
+	  {return(undef)}
+      }
+
+    if(defined($file_type_id) &&
+       ($file_type_id >= scalar(@$input_files_array) ||
+	exists($outfile_types_hash->{$file_type_id}) ||
+	$file_type_id >= scalar(@{$input_file_sets->[$file_set_num]})))
+      {
+	error("Invalid input file type ID: [$file_type_id].");
+	return(undef);
       }
 
     return(wantarray && !defined($file_type_id) ? @return_files :
@@ -5585,6 +5588,8 @@ sub fileReturnedBefore
 	    return(0);
 	  }
       }
+    elsif(!defined($file_type_index))
+      {return(0)}
     else
       {
 	if(exists($file_returned_before->{IN}->{$file_set_num}) &&
@@ -5615,18 +5620,27 @@ sub addDefaultFileOptions
     #pick a default
     if(!defined($primary_infile_type) && defined($def_prim_inf_type))
       {
+	#We will mark this as the primary infile ID even if the programmer may
+	#have explicitly said that it's not to be primary, just to we can do
+	#default linking of outfile types.
 	$primary_infile_type = $def_prim_inf_type;
 
-	$usage_array->[$usage_file_indexes->[$def_prim_inf_type]]->{PRIMARY} =
-	  1;
-	if(!defined($usage_array->[$usage_file_indexes->[$def_prim_inf_type]]
-		    ->{DEFAULT}))
-	  {$usage_array->[$usage_file_indexes->[$def_prim_inf_type]]->{DEFAULT}
-	     = ''}
-	elsif($usage_array->[$usage_file_indexes->[$def_prim_inf_type]]
-	      ->{DEFAULT} eq '')
-	  {$usage_array->[$usage_file_indexes->[$def_prim_inf_type]]->{DEFAULT}
-	     = "''"}
+	#If the non-primary status was not set explicitly to 0
+	if($usage_array->[$usage_file_indexes->[$def_prim_inf_type]]->{PRIMARY}
+	   ne '0')
+	  {
+	    $usage_array->[$usage_file_indexes->[$def_prim_inf_type]]
+	      ->{PRIMARY} = 1;
+	    if(!defined($usage_array
+			->[$usage_file_indexes->[$def_prim_inf_type]]
+			->{DEFAULT}))
+	      {$usage_array->[$usage_file_indexes->[$def_prim_inf_type]]
+		 ->{DEFAULT} = ''}
+	    elsif($usage_array->[$usage_file_indexes->[$def_prim_inf_type]]
+		  ->{DEFAULT} eq '')
+	      {$usage_array->[$usage_file_indexes->[$def_prim_inf_type]]
+		 ->{DEFAULT} = "''"}
+	  }
       }
 
     #If there was an error during setup (implied by cleanup_mode > 1) and there
@@ -5943,9 +5957,11 @@ sub getDefaultPrimaryLinkedInfileID
     else
       {$primary_linked_index = $linked_index2}
 
-    debug({LEVEL => -1},"Returning primary linked index: ",
-	  "[$primary_linked_index] for infile type [",
-	  getInfileFlag($primary_linked_index),"].");
+    debug({LEVEL => -1},"Returning primary linked index: [",
+	  (defined($primary_linked_index) ? $primary_linked_index : 'undef'),
+	  "] for infile type [",
+	  (defined($primary_linked_index) ?
+	   getInfileFlag($primary_linked_index) : 'undef'),"].");
     return($primary_linked_index);
   }
 
@@ -6350,6 +6366,10 @@ sub addBuiltinOptions
 				  'debug the CommandLineInterface module ',
 				  'used by this script.'));
 
+    #If there are user defaults, include --save-args in the short usage
+    my $save_args_def  = join(' ',getUserDefaults());
+    my $save_args_shrt = ($save_args_def ne '' ? 'Save accompanying command ' .
+			  'line arguments as defaults.' : '');
     my $save_args_long = join('',('Save accompanying command line arguments ',
 				  'as defaults to be used in every call of ',
 				  'this script.  Replaces previously saved ',
@@ -6514,12 +6534,12 @@ sub addBuiltinOptions
 	      VARREF     => \$use_as_default,
 	      TYPE       => 'bool',
 	      REQUIRED   => 0,
-	      DEFAULT    => 0,
+	      DEFAULT    => $save_args_def,
 	      HIDDEN     => 0,
-	      SHORT_DESC => '',
+	      SHORT_DESC => $save_args_shrt,
 	      LONG_DESC  => $save_args_long,
 	      ACCEPTS    => undef,
-	      ADVANCED   => 1);
+	      ADVANCED   => ($save_args_shrt eq '' ? 1 : 0));
     addOption(FLAG       => 'pipeline',
 	      VARREF     => \$pipeline_mode,
 	      TYPE       => 'negbool',
@@ -7224,7 +7244,7 @@ sub processCommandLine
     #Make sure there is input
     if(scalar(grep {!exists($outfile_types_hash->{$_})}
 	      (0..$#{$input_files_array})) == 0 &&
-       isStandardInputFromTerminal() && (scalar(@$required_infile_types)))
+       !isThereInputOnSTDIN() && (scalar(@$required_infile_types)))
       {
 	error('No input detected.');
 	usage(1);
@@ -7251,8 +7271,7 @@ sub processCommandLine
 	if(getNumInfileTypes() == 0 ||
 	   (scalar(@{$input_files_array->[$req_type]}) == 0 &&
 	    (defined($primary_infile_type) &&
-	     ($req_type != $primary_infile_type ||
-	      isStandardInputFromTerminal()))))
+	     ($req_type != $primary_infile_type || !isThereInputOnSTDIN()))))
 	  {
 	    my $iflag = getInfileFlag($req_type);
 	    push(@$missing_flags,
@@ -7379,6 +7398,20 @@ sub processCommandLine
 
     #Create the output directories
     mkdirs(@$outdirs_array);
+
+    #If standard output is to a redirected file and the header flag has been
+    #specified and there exists an undefined outfile suffix (which means that
+    #output will go to STDOUT, print the header to STDOUT
+    if($header && !isStandardOutputToTerminal() &&
+       scalar(grep {!defined($_)} map {@$_} grep {defined($_)}
+	      @$outfile_suffix_array))
+      {
+	#Open STDOUT to /dev/stdout because that's what the programmer's
+	#supplied file handle will be opened to and we need it to go to the same
+	#stream so that the header printed here is guaranteed to be at the top
+	open(STDOUT,'>>/dev/stdout');
+	print STDOUT (getHeader());
+      }
 
     #Really done with command line processing
     $command_line_processed = 2;
@@ -8356,7 +8389,10 @@ sub verbose
     if($verbose_message =~ /^([^\n]*)/ && $last_verbose_state &&
        $verbose_message !~ /^\n/)
       {
-	my $addendum = ' ' x ($last_verbose_size - length($1));
+	my $spacelen = (defined($last_verbose_size) ? $last_verbose_size : 0) -
+	  length($1);
+	$spacelen = 0 if($spacelen < 0);
+	my $addendum = ' ' x $spacelen;
 	unless($verbose_message =~ s/\n/$addendum\n/)
 	  {$verbose_message .= $addendum}
       }
@@ -8710,22 +8746,34 @@ sub warning
     #each line of the message and indent each subsequent line by the length
     #of the leader string
     my $tmp_msg_ln = shift(@warning_message);
+    my $spacelen = (defined($last_verbose_size) ? $last_verbose_size : 0) -
+      $warning_length;
+    $spacelen = 0 if($spacelen < 0);
     my $warning_string = $leader_string . $tmp_msg_ln .
       (defined($verbose) && $verbose && defined($last_verbose_state) &&
        $last_verbose_state ?
-       ' ' x ($last_verbose_size - $warning_length) : '') . "\n";
+       ' ' x $spacelen : '') . "\n";
+    $spacelen = (defined($last_verbose_size) ? $last_verbose_size : 0) -
+      $simple_warn_len;
+    $spacelen = 0 if($spacelen < 0);
     my $simple_string = $simple_leader . $tmp_msg_ln .
       (defined($verbose) && $verbose && defined($last_verbose_state) &&
        $last_verbose_state ?
-       ' ' x ($last_verbose_size - $simple_warn_len) : '') . "\n";
+       ' ' x $spacelen : '') . "\n";
+    $spacelen = (defined($last_verbose_size) ? $last_verbose_size : 0) -
+      $warning_length_pipe;
+    $spacelen = 0 if($spacelen < 0);
     my $warning_string_pipe = $leader_string_pipe . $tmp_msg_ln .
       (defined($verbose) && $verbose && defined($last_verbose_state) &&
        $last_verbose_state ?
-       ' ' x ($last_verbose_size - $warning_length_pipe) : '') . "\n";
+       ' ' x $spacelen : '') . "\n";
+    $spacelen = (defined($last_verbose_size) ? $last_verbose_size : 0) -
+      $simple_warn_len_pipe;
+    $spacelen = 0 if($spacelen < 0);
     my $simple_string_pipe = $simple_leader_pipe . $tmp_msg_ln .
       (defined($verbose) && $verbose && defined($last_verbose_state) &&
        $last_verbose_state ?
-       ' ' x ($last_verbose_size - $simple_warn_len_pipe) : '') . "\n";
+       ' ' x $spacelen : '') . "\n";
     foreach my $line (@warning_message)
       {
 	$warning_string      .= (' ' x $leader_length) . $line . "\n";
@@ -9517,9 +9565,16 @@ sub getVersion
   }
 
 #This method is a check to see if input is user-entered via a TTY (result
-#is non-zero) or directed in (result is zero)
+#is non-zero)
 sub isStandardInputFromTerminal
-  {return(-t STDIN || eof(STDIN))}
+  {return(-t STDIN)}
+
+#This is not fool-proof.  If called in a script, it might pick up an STDIN
+#handle on which no one is sending input.
+sub isThereInputOnSTDIN
+  {
+    my $fn = fileno(STDIN);
+    return(!-t STDIN && defined($fn) && $fn > -1)}
 
 #This method is a check to see if prints are going to a TTY.  Note,
 #explicit prints to STDOUT when another output handle is selected are not
@@ -10316,7 +10371,7 @@ sub getFileSets
     ##
     ## If standard input is present, ensure it's in the file_types_array
     ##
-    if(!isStandardInputFromTerminal())
+    if(isThereInputOnSTDIN())
       {
 	my $primary = (defined($primary_infile_type) ? $primary_infile_type :
 		       (grep {!exists($outfile_types_hash->{$_})}
@@ -11521,6 +11576,7 @@ sub openOut
 	  {
 	    ##TODO: See requirement #312
 	    open($file_handle,'>>/dev/stdout');
+	    #open(STDOUT,'>>/dev/stdout');
 	    $rejected_out_handles->{$file_handle}->{CURFILE} = 'STDOUT';
 	    $rejected_out_handles->{$file_handle}->{QUIET} = $local_quiet;
 	    $rejected_out_handles->{$file_handle}->{FILES}->{STDOUT} = 0;
@@ -11534,13 +11590,11 @@ sub openOut
 
             #Store info. about the run as a comment at the top of the output
             #file if STDOUT has been redirected to a file and it wasn't already
-	    #output via processCommandLine.  processCommandLine used to do this
-	    #and there was a check here to only print a header if it was
-	    #explicitly supplied.  This was to avoid multiple primary output
-	    #types from printing multiple headers. That logic has been moved
-	    #here because the print in processCommandLine was getting buffered
-	    #and placed randomly into the outfile among other data
-            if(!isStandardOutputToTerminal() && $local_header)
+	    #output via processCommandLine.  processCommandLine does it is the
+	    #global $header variable is true.  If it's false, but the local
+	    #version of the header variable was explicitly supplied, then print
+	    #the header here
+            if(!isStandardOutputToTerminal() && ($local_header && !$header))
               {
 		my $tfh = (defined($file_handle) ? $file_handle : *STDOUT);
 		print $tfh (getHeader());
@@ -11671,7 +11725,8 @@ sub isAppendMode
 	  #what the collision mode is set to (as passed in as $merge_mode)
 	  ($merge_mode && $opened_before);
 
-    debug({LEVEL=>-1},"Append mode is [",($append_mode ? 'on' : 'off'),
+    debug({LEVEL=>-1},"Append mode is [",
+	  (defined($append_mode) ? ($append_mode ? 'on' : 'off') : 'undef'),
 	  "] for file [$output_file].  Merge mode passed in: [$merge_mode].");
 
     return($append_mode);
@@ -13396,7 +13451,7 @@ sub processDefaultOptions
 
 sub argsOrPipeSupplied
   {
-    my $got_input = !isStandardInputFromTerminal();
+    my $got_input = isThereInputOnSTDIN();
     my $run_num = scalar(grep {$_ eq '--usage' || $_ eq 'help' ||
 				 $_ eq '--run' || $_ eq '--dry-run'}
 			 @$preserve_args);
@@ -14365,8 +14420,10 @@ sub customUsage
 	  }
 
 	my $required = '';
-	if(exists($usage_hash->{REQUIRED}) &&
-	   defined($usage_hash->{REQUIRED}) && $usage_hash->{REQUIRED})
+	if((exists($usage_hash->{REQUIRED}) &&
+	    defined($usage_hash->{REQUIRED}) && $usage_hash->{REQUIRED}) ||
+	   #Indiv. opts are made optional when in a tagteam, so we must check:
+	   $usage_hash->{TTREQD})
 	  {
 	    if(hasDefinedDefault($usage_hash))
 	      {$required = '~'}
@@ -14744,10 +14801,11 @@ sub customHelp
 	    if($local_extended > 1)
 	      {$flag .= "\n" . join(',',@{$usage_hash->{OPTFLAG}})}
 	    if($usage_hash->{HIDDEN})
-	      {$flag .= ",[HIDDEN-OPTION]"}
+	      {$flag .= ($usage_hash->{FLAGLESS} || $local_extended <= 1 ?
+			 "\n" : ',') . '[HIDDEN-OPTION]'}
 	  }
 	elsif($usage_hash->{HIDDEN})
-	  {$flag .= ",[HIDDEN-OPTION]"}
+	  {$flag .= ($usage_hash->{FLAGLESS} ? '' : ',') . '[HIDDEN-OPTION]'}
 
 	my $desc = $usage_hash->{FORMAT};
 	if(!defined($desc) || $desc eq '')
@@ -14811,7 +14869,7 @@ sub customHelp
 	if(!$usage_hash->{HIDDEN} || $local_extended > 1)
 	  {$flag .= "\n" . join(',',@{$usage_hash->{OPTFLAG}})}
 	if($usage_hash->{HIDDEN})
-	  {$flag .= ",[HIDDEN-OPTION]"}
+	  {$flag .= "\n[HIDDEN-OPTION]"}
 
 	my $desc = $usage_hash->{FORMAT};
 
@@ -14957,9 +15015,10 @@ sub alignCols
 		    $current =~ s/(?<=\n).*//s;
 		    $soft_wrap = 0;
 		  }
-		elsif(#$current !~ /\s$/ && $current !~ /^\s/ &&
+		elsif(#The random chop didn't just happened to be a valid spot
 		      $next_char ne "\n" && $next_char ne '' &&
-		      $next_char ne ' ')
+		      $next_char ne ' ' &&
+		      !($current =~ /(?<!-)-$/ && $next_char =~ /[a-zA-Z]/))
 		  {
 		    #$current =~ s/(.*)\b\{lb}\s*\S+/$1/;
 		    if(length($current) == $col_width)
@@ -14978,7 +15037,7 @@ sub alignCols
 			#comma, if one exists and is not followed by any of the
 			#following: close-bracket, comma, quote, colon, dot, or
 			#semicolon
-			my $nowrapcomma = '[\.,\'";:\{\[\(\<]';
+			my $nowrapcomma = '[\.,\'";:\)\]\}\>]';
 			$commawrap =~ s/(.*[^,],)(?!$nowrapcomma)\S.*/$1/;
 
 			#Unless the string ends with spaces
@@ -15388,7 +15447,7 @@ BEGIN
                         isDebug                      isVerbose);
     our @EXPORT_OK = qw(markTime                     getCommand
 			sglob                        getVersion
-			isStandardInputFromTerminal  isStandardOutputToTerminal
+			isThereInputOnSTDIN          isStandardOutputToTerminal
 			printRunReport               getHeader
 			flushStderrBuffer            inPipeline
                         usage                        help);
@@ -17490,11 +17549,11 @@ I<ADVANCED>
 
 n/a
 
-=item C<isStandardInputFromTerminal>
+=item C<isThereInputOnSTDIN>
 
-This method returns true (/non-zero) if nothing has been piped or redirected into the script.  If input is present on STDIN, it returns false (/0).
+This method returns true (/non-zero) if input has been piped or redirected into the script.  If input is not present on STDIN, it returns false (/0).
 
-isStandardInputFromTerminal() is not exported by default, thus you must either supply it in your `use CommandLineInterface qw(... isStandardInputFromTerminal);` statement or call it using the package name: `CommandLineInterface::isStandardInputFromTerminal();`.
+isThereInputOnSTDIN() is not exported by default, thus you must either supply it in your `use CommandLineInterface qw(:DEFAULT isThereInputOnSTDIN);` statement or call it using the package name: `CommandLineInterface::isThereInputOnSTDIN();`.
 
 I<EXAMPLE>
 
@@ -17506,12 +17565,12 @@ I<Command>
 
 I<Code>
 
-    print("Input coming from TTY?: ",
-          CommandLineInterface::isStandardInputFromTerminal());
+    print("Input coming in on standard in?: ",
+          CommandLineInterface::isThereInputOnSTDIN());
 
 I<Output>
 
-    Input coming from TTY?: 1
+    Input coming in on standard in?: 0
 
 =back
 
