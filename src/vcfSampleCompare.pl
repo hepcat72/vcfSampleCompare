@@ -16,7 +16,7 @@ use warnings;
 use strict;
 use CommandLineInterface;
 
-our $VERSION = '2.000';
+our $VERSION = '2.001';
 setScriptInfo(VERSION => $VERSION,
               CREATED => '6/22/2017',
               AUTHOR  => 'Robert William Leach',
