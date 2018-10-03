@@ -66,7 +66,7 @@ cd into the vcfSampleCompare directory and run the following:
     make
     sudo make install
     
-## USAGE (SIMPLE)
+## USAGE (SHORT)
 
 vcfSampleCompare.pl -i <file*...>... [OPTIONS]
 
@@ -87,7 +87,7 @@ vcfSampleCompare.pl -i <file*...>... [OPTIONS]
     --help              Print general info and file formats.
     --extended [<cnt>]  Print detailed usage.
 
-## USAGE (ADVANCED)
+## USAGE (LONG)
 
 vcfSampleCompare.pl -i <file*...>... [OPTIONS]
 vcfSampleCompare.pl [OPTIONS] < input_file
@@ -194,50 +194,7 @@ vcfSampleCompare.pl [OPTIONS] < input_file
                               this may lower the sort order of a variant/row when
                               --nogenotype is supplied.
   
-    --outfile <file*...>...   [STDOUT] Output file(s) associated with [-i] input
-                              file(s) in a one to (one or many) relationship.
-  
-                              Mutually exclusive with [-u] (both options specify
-                              an outfile name in different ways for the same
-                              output).  Output files are placed in the current
-                              directory (unless [--outdir] is supplied).  Will not
-                              overwrite without --overwrite.
-  
-    --outdir <dir*...>...     Directory in which to put output files.  Creates
-                              directories specified, but not recursively.  Also
-                              see --extended --help for advanced usage examples.
-  
-    --verbose [<cnt>]         Verbose mode.
-  
-    --quiet                   Quiet mode.
-  
-    --overwrite [<cnt>]       Overwrite existing output files.  By default,
-                              existing output files will not be over-written.
-                              Mutually exclusive with --skip and --append.  Supply
-                              twice to safely remove pre-existing output
-                              directories (See --outdir).  This will not remove a
-                              directory containing manually touched files.
-  
-    --skip                    Skip existing output files.  Mutually exclusive with
-                              --overwrite and --append.
-  
-    --noheader                Outfile header flag.  Headers are commented with '#'
-                              and include script version, date, and command line
-                              call at the top of every output file.  See
-                              --extended.
-
-    --version                 Print version info.  See --extended.
-
-    --help                    Print general info and file format descriptions.
-                              Includes advanced usage examples with --extended.
-
-    --dry-run                 Run without generating output files.
-
-    --extended [<cnt>]        Print extended usage/help/version/header (and
-                              errors/ warnings where noted).  Supply alone for
-                              extended usage.  Includes extended version in output
-                              file headers.  Incompatible with --noheader.  See
-                              --help & --version.
+    ...
 
 ## INPUT FORMAT (-i, --vcf-file, --input-file, STDIN)
 
