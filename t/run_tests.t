@@ -10,7 +10,7 @@ use CommandLineInterface;
 use File::Basename;
 
 our
-  $VERSION = '1.002';
+  $VERSION = '1.003';
 
 #Prevent the passing of active standard in handles to the calls to the script
 #being tested by closing STDIN.
