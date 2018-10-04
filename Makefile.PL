@@ -21,7 +21,7 @@ WriteMakefile
 		       'Test::More'           => 0.98,
 		       'strict'               => 1.07,
 		       'warnings'             => 1.13,
-		       'CommandLineInterface' => 4.133,
+		       'CommandLineInterface' => 4.135,
 		       'lib'                  => 0.63,
 		       'File::Basename'       => 2.84,
 		      },
