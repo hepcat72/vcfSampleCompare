@@ -182,6 +182,11 @@ setDefaults(HEADER     => 0,
 
 processCommandLine();
 
+#Consume possible STDIN input file so there will be no warning about unprocessed
+#file sets if this test script was supplied with input on STDIN and '-' was
+#added to the infile array
+getInfile();
+
 ##
 ## Setup test run and validate options
 ##
