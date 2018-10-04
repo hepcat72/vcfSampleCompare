@@ -45,7 +45,7 @@ my $clean             = 0;
 my $perl_call         = $perl_call_def;
 
 
-setScriptInfo(VERSION => '2.000',
+setScriptInfo(VERSION => '1.001',
               CREATED => '9/21/2018',
               AUTHOR  => 'Robert Leach',
               CONTACT => 'rleach@princeton.edu',
@@ -56,9 +56,11 @@ setScriptInfo(VERSION => '2.000',
 #Infiles & outfiles are not used, so keep the defaults out of the usage by
 #hiding them
 addInfileOption(FLAG   => 'infile',
-	        HIDDEN => 1);
-addOutfileSuffixOption(FLAG   => 'suffix',
-		       HIDDEN => 1);
+	        HIDDEN => 1,
+	        PRIMARY => 0);
+addOutfileSuffixOption(FLAG    => 'suffix',
+		       HIDDEN  => 1,
+		       PRIMARY => 0);
 
 addOption(GETOPTKEY   => 't|run-testnum',
           GETOPTVAL   => \$test_only,
