@@ -10436,9 +10436,13 @@ sub getFileSets
 	       ((ref($outdir_array) eq 'ARRAY' && scalar(@$outdir_array)) ||
 		ref(\$outdir_array) eq 'SCALAR'))
 	      {
-		error("You cannot use an output directory [",getOutdirFlag(),
-		      "] and embed a directory path in the outfile stub at ",
-		      "the same time.  Please use one or the other.",
+		error("You cannot use an output directory [",
+		      " ",(ref(\$outdir_array) eq 'SCALAR' ? $outdir_array :
+			   join(' ',map {getOutdirFlag() . (ref($_) eq 'ARRAY' ?
+							    join(',',@$_) : $_}
+					   @$outdir_array))),"] and embed a ",
+		      "directory path in the file stub [$outfile_stub] at the ",
+		      "same time.  Please use one or the other.",
 		      {DETAIL =>
 		       join('',
 			    ('Any input file option (e.g. -i) can be treated ',
@@ -12208,15 +12212,20 @@ sub getHeader
     my $version_str = getVersion(1,2);
     $version_str =~ s/\n(?!#|\z)/\n#/sg;
 
+    my $user = exists($ENV{USER}) ? $ENV{USER} : `whoami`;
+    chomp($user);
     my $host = exists($ENV{HOST}) ? $ENV{HOST} : `hostname`;
     chomp($host);
+    my $pwd = exists($ENV{PWD}) ? $ENV{PWD} : (exists($ENV{CWD}) ? $ENV{CWD} :
+					       `pwd`);
+    chomp($pwd);
 
     $header_str = "$version_str\n" .
-      '#User: ' . $ENV{USER} . "\n" .
+      "#User: $user\n" .
 	'#Time: ' . scalar(localtime($^T)) . "\n" .
 	  "#Host: $host\n" .
-	    '#PID: ' . $$ . "\n" .
-	      '#Directory: ' . $ENV{PWD} . "\n" .
+	    "#PID: $$\n" .
+	      "#Directory: $pwd\n" .
 		'#Command: ' . scalar(getCommand(1)) . "\n\n";
 
     return($header_str);
@@ -13838,8 +13847,19 @@ sub amIRedirectedTo
     my $fdin = fileno(STDIN);
 
     if(defined($fdin) && $fdin =~ /\d/ && $fdin > -1 &&
-       $handle_data =~ /\s${fdin}r\s+REG\s+/)
-      {return(1)}
+       $handle_data =~ /\s${fdin}r\s+REG\s+\S+\s+\S+\s+\S+\s+(\S+)/)
+      {
+	my $infile = $1;
+
+	#Ignore lsof read lines that are this script
+	my $script = $0;
+	$script =~ s/^.*\/([^\/]+)$/$1/;
+	my $scriptpat = quotemeta($script);
+
+	if($infile !~ m%/$scriptpat$%)
+	  {return(1)}
+      }
+
 
     return(0);
   }
