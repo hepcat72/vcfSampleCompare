@@ -27,7 +27,7 @@ use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev);
 use File::Glob ':glob';
 
 our
-  $VERSION = '4.134';
+  $VERSION = '4.135';
 our($compile_err);
 
 #Basic script info
@@ -167,7 +167,9 @@ my($required_infile_types,
    $genopt_types,
    $fileopt_types,
    $window_width,
-   $window_width_def);
+   $window_width_def,
+   $pipe_cache,
+   $lsof_cache);
 
 sub _init
   {
@@ -364,6 +366,8 @@ sub _init
     $explicit_usage        = undef;
     $window_width          = undef;
     $window_width_def      = 80;
+    $pipe_cache            = undef;
+    $lsof_cache            = undef;
   }
 
 sub setScriptInfo
@@ -9573,8 +9577,11 @@ sub isStandardInputFromTerminal
 #handle on which no one is sending input.
 sub isThereInputOnSTDIN
   {
+    my $forced = defined($_[0]) ? $_[0] : 0;
     my $fn = fileno(STDIN);
-    return(!-t STDIN && defined($fn) && $fn > -1)}
+    return(defined($fn) && $fn =~ /\d/ && $fn > -1 &&
+	   !-t STDIN && (amIPipedTo($forced) || amIRedirectedTo($forced)));
+  }
 
 #This method is a check to see if prints are going to a TTY.  Note,
 #explicit prints to STDOUT when another output handle is selected are not
@@ -13789,10 +13796,10 @@ sub getTrace
   }
 
 #This method guesses whether this script is running with concurrent or
-#serially run siblings (i.e. in a script).  It uses pgrep and lsof.  Cases
-#where the script is intended to return true: 1. when the script is being piped
-#to or from another command (i.e. not a file). 2. when the script is being run
-#from inside another script.  In both cases, it is useful to know so that
+#serially run siblings (i.e. in a script).  It uses pgrep and (indirectly) lsof.
+#Cases where the script is intended to return true: 1. when the script is being
+#piped to or from another command (i.e. not a file). 2. when the script is being
+#run from inside another script.  In both cases, it is useful to know so that
 #messages on STDERR can be prepended with the script name so that the user
 #knows the source of any message
 sub inPipeline
@@ -13802,6 +13809,98 @@ sub inPipeline
 
     #Return true if any sibling processes were detected
     return(1) if($siblings =~ /\d/);
+
+    #Return true if the parent is a script
+    return(calledInsideAScript($ppid));
+  }
+
+sub amIPipedTo
+  {
+    my $forced = defined($_[0]) ? $_[0] : 0;
+    my $pipes  = getMyPipeData($forced);
+    return($pipes->[0]);
+  }
+
+sub amIPipedFrom
+  {
+    my $forced = defined($_[0]) ? $_[0] : 0;
+    my $pipes  = getMyPipeData($forced);
+    return($pipes->[1]);
+  }
+
+sub amIRedirectedTo
+  {
+    my $forced = defined($_[0]) ? $_[0] : 0;
+
+    my $handle_data = getMyLsofData($forced);
+
+    #Get the file descriptors
+    my $fdin = fileno(STDIN);
+
+    if(defined($fdin) && $fdin =~ /\d/ && $fdin > -1 &&
+       $handle_data =~ /\s${fdin}r\s+REG\s+/)
+      {return(1)}
+
+    return(0);
+  }
+
+#Calls lsof
+#Globals used: $pipe_cache
+sub getMyPipeData
+  {
+    my $forced = defined($_[0]) ? $_[0] : 0;
+
+    #Return what was previously determined
+    if(!$forced && defined($pipe_cache))
+      {return(wantarray ? @$pipe_cache : $pipe_cache)}
+
+    #Initialize the pipe boolean values
+    $pipe_cache = [0,0,0];
+
+    #Get the data necessary to determine piping of standard file handles
+    my $handle_data = getMyLsofData($forced);
+
+    #Get the file descriptors
+    my $fdin = fileno(STDIN);
+    my $fdot = fileno(STDOUT);
+    my $fder = fileno(STDERR);
+
+    if(defined($fdin) && $fdin =~ /\d/ && $fdin > -1 &&
+       $handle_data =~ /\s$fdin\s+PIPE\s+/)
+      {$pipe_cache->[0] = 1}
+    if(defined($fdot) && $fdot =~ /\d/ && $fdot > -1 &&
+       $handle_data =~ /\s$fdot\s+PIPE\s+/)
+      {$pipe_cache->[1] = 1}
+    if(defined($fder) && $fder =~ /\d/ && $fder > -1 &&
+       $handle_data =~ /\s$fder\s+PIPE\s+/)
+      {$pipe_cache->[2] = 1}
+
+    return(wantarray ? @$pipe_cache : $pipe_cache);
+  }
+
+sub getMyLsofData
+  {
+    my $forced = defined($_[0]) ? $_[0] : 0;
+
+    #Return what was previously determined
+    if(!$forced && defined($lsof_cache) && $lsof_cache ne '')
+      {return($lsof_cache)}
+
+    $lsof_cache = `lsof -w -b -p $$`;
+
+    return($lsof_cache);
+  }
+
+#This method guesses whether this script is running with serially run siblings
+#(i.e. in a script).  It uses lsof.  Cases where the script is intended to
+#return true: 1. 2. when the script is being run from inside a script being read
+#by an interpreter.  It is useful to know so that messages on STDERR can be
+#prepended with the script name so that the user knows the source of any message
+#and in determining the source of STDIN (e.g. not connected to a tty and
+#(possibly) not a pipe, but rather: inherited from the parent
+sub calledInsideAScript
+  {
+    my $ppid = $_[0];
 
     #Find out what file handles the parent process has open
     my $parent_data = `lsof -w -b -p $ppid`;
