@@ -9,6 +9,13 @@ use lib (-e '../lib' ? '../lib' : 'lib'); #Can run from repo dir or t dir
 use CommandLineInterface;
 use File::Basename;
 
+our
+  $VERSION = '1.002';
+
+#Prevent the passing of active standard in handles to the calls to the script
+#being tested by closing STDIN.
+close(STDIN);
+
 ##
 ## Global variables
 ##
@@ -45,7 +52,7 @@ my $clean             = 0;
 my $perl_call         = $perl_call_def;
 
 
-setScriptInfo(VERSION => '1.001',
+setScriptInfo(VERSION => $VERSION,
               CREATED => '9/21/2018',
               AUTHOR  => 'Robert Leach',
               CONTACT => 'rleach@princeton.edu',
