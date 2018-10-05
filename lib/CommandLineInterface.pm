@@ -10439,8 +10439,8 @@ sub getFileSets
 		error("You cannot use an output directory [",
 		      " ",(ref(\$outdir_array) eq 'SCALAR' ? $outdir_array :
 			   join(' ',map {getOutdirFlag() . (ref($_) eq 'ARRAY' ?
-							    join(',',@$_) : $_}
-					   @$outdir_array))),"] and embed a ",
+							    join(',',@$_) : $_)}
+					   @$outdir_array)),"] and embed a ",
 		      "directory path in the file stub [$outfile_stub] at the ",
 		      "same time.  Please use one or the other.",
 		      {DETAIL =>
