@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 
 #USAGE: Run with no options to get usage or with --help for basic details
 
@@ -16,7 +16,7 @@ use warnings;
 use strict;
 use CommandLineInterface;
 
-our $VERSION = '2.005';
+our $VERSION = '2.006';
 setScriptInfo(VERSION => $VERSION,
               CREATED => '6/22/2017',
               AUTHOR  => 'Robert William Leach',
