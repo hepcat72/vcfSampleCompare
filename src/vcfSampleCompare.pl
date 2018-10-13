@@ -16,7 +16,7 @@ use warnings;
 use strict;
 use CommandLineInterface;
 
-our $VERSION = '2.006';
+our $VERSION = '2.007';
 setScriptInfo(VERSION => $VERSION,
               CREATED => '6/22/2017',
               AUTHOR  => 'Robert William Leach',
@@ -571,6 +571,7 @@ while(nextFileCombo())
 	my(@data)      = @cols[$sample_name_start_index..$#cols];
 
 	debug("FORMAT string for data record [$data_line]: [$format_str].");
+	debug({LEVEL => 2},"Data record [$data_line]: [",join("\t",@data),"].");
 
 	#Determine the subindex of each piece of sample data based on the
 	#FORMAT string by creating a hash
@@ -644,9 +645,25 @@ while(nextFileCombo())
 	  {@tmp_sample_groups = createSampleGroups($sample_info,
 						   $group_diff_mins)}
 
-	if(scalar(@tmp_sample_groups) == 0)
+	debug("Sample groups this row: [(",
+	      join('),(',map {my $a = $_;defined($a) ?
+				join(',',map {defined($_) ? $_ : 'undef'} @$a) :
+				  'undef'} @tmp_sample_groups),
+	      ")].");
+
+	if(scalar(@tmp_sample_groups) == 0 ||
+	   scalar(grep {scalar(@$_) == 0} @tmp_sample_groups))
 	  {
-	    error("No sample groups.",{DETAIL => "Line $line_num"});
+	    error("No sample groups could be determined for the variant on ",
+		  "line [$line_num] of file [$inputFile].",
+		  {DETAIL => ('Sample groups are automatically determined ' .
+			      'based on the ' .
+			      ($genotype ? 'genotype call (GT)' : 'allelic ' .
+			       'frequencies (AO/DP and RO/DP observation ' .
+			       'ratio(s))') . '.  If no data (e.g. ' .
+			      ($genotype ? 'GT is "."' : 'DP is 0') . ') in ' .
+			      'all of the samples, they cannot be put into ' .
+			      'sample groups.')});
 	    next;
 	  }
 
@@ -682,7 +699,10 @@ while(nextFileCombo())
 		   join(',',map {defined($_) ? $_ : 'undef'} @$min_group2) :
 		   'undef array'),"] with remainders [@$real_remainders1] and ",
 		  "[@$real_remainders2] and left/right case: [$leftright_case",
-		  "].");
+		  "].\nUsing original set1 [",
+		  join(',',map {defined($_) ? $_ : 'undef'} @$set1),
+		  "] vs set2 [",
+		  join(',',map {defined($_) ? $_ : 'undef'} @$set2),"].");
 
 	    if(!$filter || sampleGroupPairPasses($min_group1,$min_group2,
 						 $sample_info))
