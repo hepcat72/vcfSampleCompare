@@ -16,7 +16,7 @@ use warnings;
 use strict;
 use CommandLineInterface;
 
-our $VERSION = '2.007';
+our $VERSION = '2.008';
 setScriptInfo(VERSION => $VERSION,
               CREATED => '6/22/2017',
               AUTHOR  => 'Robert William Leach',
@@ -534,6 +534,9 @@ while(nextFileCombo())
 		  {push(@$group_diff_mins,1,1)}
 	      }
 
+	    debug("Min group sizes: [",join(',',@$group_diff_mins),"].",
+		  {LEVEL => 3});
+
 	    #Print the new header
 	    $outputs->{HEADER_LINES} .= "#$_\n";
 
@@ -571,7 +574,7 @@ while(nextFileCombo())
 	my(@data)      = @cols[$sample_name_start_index..$#cols];
 
 	debug("FORMAT string for data record [$data_line]: [$format_str].");
-	debug({LEVEL => 2},"Data record [$data_line]: [",join("\t",@data),"].");
+	debug({LEVEL => 2},"Record [$data_line]: [$_].");
 
 	#Determine the subindex of each piece of sample data based on the
 	#FORMAT string by creating a hash
@@ -1538,8 +1541,10 @@ sub createSampleGroups
 	      sort {$genotype_counts->{$sample_info->{$b}->{GT}} <=>
 		      $genotype_counts->{$sample_info->{$a}->{GT}}}
 		grep {$sample_info->{$_}->{GT} !~ /\./} keys(%$sample_info);
-	    my @nocalls = grep {/\./} keys(%$sample_info);
-	    my @samples_remaining = (@ordered_gts_real,@nocalls);
+	    my @nocalls = (grep {$sample_info->{$_}->{GT} =~ /\./}
+			   keys(%$sample_info));
+	    my @samples_remaining = (grep {defined($_)}
+				     @ordered_gts_real,@nocalls);
 	    my $call = '';
 	    while(scalar(@samples_remaining) &&
 		  scalar(@$group1) < $min_size1 &&
