@@ -16,7 +16,7 @@ use warnings;
 use strict;
 use CommandLineInterface;
 
-our $VERSION = '2.008';
+our $VERSION = '2.009';
 setScriptInfo(VERSION => $VERSION,
               CREATED => '6/22/2017',
               AUTHOR  => 'Robert William Leach',
@@ -941,7 +941,7 @@ sub createMinSampleGroupPair
 	my @ordered_samples_real1 =
 	  sort {$genotype_counts->{$sample_info->{$b}->{GT}} <=>
 		  $genotype_counts->{$sample_info->{$a}->{GT}} ||
-		    $sample_info->{$a}->{GT} <=> $sample_info->{$b}->{GT}}
+		    $sample_info->{$a}->{GT} cmp $sample_info->{$b}->{GT}}
 	    grep {$sample_info->{$_}->{GT} !~ /\./} @$max_group1;
 	my @nocalls1 = grep {$sample_info->{$_}->{GT} =~ /\./} @$max_group1;
 
@@ -950,7 +950,7 @@ sub createMinSampleGroupPair
 	my @ordered_samples_real2 =
 	  sort {$genotype_counts->{$sample_info->{$b}->{GT}} <=>
 		  $genotype_counts->{$sample_info->{$a}->{GT}} ||
-		    $sample_info->{$a}->{GT} <=> $sample_info->{$b}->{GT}}
+		    $sample_info->{$a}->{GT} cmp $sample_info->{$b}->{GT}}
 	    grep {$sample_info->{$_}->{GT} !~ /\./} @$max_group2;
 	my @nocalls2 = grep {$sample_info->{$_}->{GT} =~ /\./} @$max_group2;
 
