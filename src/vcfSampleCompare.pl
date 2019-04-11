@@ -259,7 +259,7 @@ addOption(GETOPTKEY   => 'a|separation-gap',
 
 my $gap_measures = ['mean-proximity','edge-proximity'];
 my $gap_measure  = $scoring_methods->[0];
-addOption(GETOPTKEY   => 'm|gap-measure-method',
+addOption(GETOPTKEY   => 'm|gap-measure',
 	  TYPE        => 'enum',
 	  ACCEPTS     => $gap_measures,
 	  GETOPTVAL   => \$gap_measure,
@@ -268,7 +268,7 @@ addOption(GETOPTKEY   => 'm|gap-measure-method',
 			  "observation frequencies."),
 	  DETAIL_DESC => << 'end_detail'
 
-Method to measure the gap between sample groups' observation frequencies.
+Method to measure the gap between sample groups' allelic/observation frequencies.
 
 The mean-proximity is the absolute difference of the mean observation frequency of group 1 versus group 2, resulting in a value between 0 and 1.
 
@@ -1923,6 +1923,71 @@ sub mean
     foreach my $val (@$array)
       {$sum += $val}
     return($sum / scalar(@$array));
+  }
+
+#Globals used: $gap_measure
+sub getObsFreqScore
+  {
+    my $group1_freqs = $_[0];
+    my $group2_freqs = $_[1];
+    my($score);
+
+    if($gap_measure eq 'mean-proximity')
+      {$score = getMeanDiffScore($group1_freqs,$group2_freqs)}
+    elsif($gap_measure eq 'edge-proximity')
+      {$score = getEdgeDiffScore($group1_freqs,$group2_freqs)}
+    else
+      {
+	$score = 0;
+	error("Invalid --gap-measure: [$gap_measure].");
+      }
+
+    return($score);
+  }
+
+sub getMeanDiffScore
+  {
+    my $ave1 = mean($_[0]);
+    my $ave2 = mean($_[1]);
+
+    return(abs($ave1 - $ave2));
+  }
+
+#This returns a score between -1 and 1 where -1 to 0 indicates degree of overlap
+#and 0 to 1 is degree of separation
+sub getEdgeDiffScore
+  {
+    my $group1_freqs = $_[0];
+    my $group2_freqs = $_[1];
+    my($score);
+
+    my $min_first  = (sort {$a <=> $b} @$group1_freqs)[0];
+    my $max_first  = (sort {$b <=> $a} @$group1_freqs)[0];
+    my $min_second = (sort {$a <=> $b} @$group2_freqs)[0];
+    my $max_second = (sort {$b <=> $a} @$group2_freqs)[0];
+
+    #If either group contains the other
+    if(($min_first <= $min_second && $max_first >= $max_second) ||
+       ($min_second <= $min_first && $max_second >= $max_first))
+      {$score = -1}
+    elsif($min_first < $min_second) #First group is lesser
+      {
+	$score = $min_second - $max_first;
+      }
+    else #first group is greater
+      {
+	$score = $min_first - $max_second;
+      }
+
+    if($score < -1 || $score > 1)
+      {
+	error("Score outside of expected range: [$score].",
+	      {DETAIL => 'The score should be between -1 and 1.  This is a ' .
+	       'bug.  Please report it here: https://github.com/hepcat72/' .
+	       'vcfSampleCompare/issues.'});
+      }
+
+    return($score);
   }
 
 sub expandSampleInfo
