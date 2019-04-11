@@ -257,6 +257,40 @@ addOption(GETOPTKEY   => 'a|separation-gap',
 			  '--grow are true.  See --help --extended for more ' .
 			  'details.'));
 
+my $gap_measures = ['mean-proximity','edge-proximity'];
+my $gap_measure  = $scoring_methods->[0];
+addOption(GETOPTKEY   => 'm|gap-measure-method',
+	  TYPE        => 'enum',
+	  ACCEPTS     => $gap_measures,
+	  GETOPTVAL   => \$gap_measure,
+	  DEFAULT     => $gap_measure,
+	  SMRY_DESC   => ("Method to measure the gap between sample groups' " .
+			  "observation frequencies."),
+	  DETAIL_DESC => << 'end_detail'
+
+Method to measure the gap between sample groups' observation frequencies.
+
+The mean-proximity is the absolute difference of the mean observation frequency of group 1 versus group 2, resulting in a value between 0 and 1.
+
+The edge-proximity method results in a number between -1.0 and 1.0 where values between 0 and 1 represent the difference between the closest observation frequencies when there is no overlap and values between -1 and 0 represent the maximum degree of overlap of the range of observation frequencies.  Note, if the range of one group contains the range of another, the score is -1.
+
+Example 1 (observation frequencies [AO/DP] for variant state "G" for 2 sample groups of size 3):
+
+    Group1 frequencies: 0.1, 0.2, 0.3
+    Group2 frequencies: 0.7, 0.8, 0.9
+    Edge-proximity Score: 0.4
+    Mean-proximity score: 0.6
+
+Example 2 (observation frequencies [AO/DP] for variant state "G" for 2 sample groups of size 3):
+
+    Group1 frequencies: 0.1, 0.5, 0.7
+    Group2 frequencies: 0.3, 0.7, 0.9
+    Edge-proximity Score: -0.4
+    Mean-proximity score: 0.2
+
+end_detail
+	 );
+
 my $genotype = 1;
 addOption(GETOPTKEY   => 'g|genotype',
 	  TYPE        => 'negbool',
@@ -1537,7 +1571,7 @@ sub createSampleGroups
 
     for(my $mi = 0;$mi < scalar(@$min_group_sizes);$mi += 2)
       {
-	#Make sure the first size is the lerger size
+	#Make sure the first size is the larger size
 	my($min_size1,$min_size2) = sort {$b <=> $a}
 	  ($min_group_sizes->[$mi],$min_group_sizes->[$mi + 1]);
 	my $group1 = [];
