@@ -1005,34 +1005,84 @@ sub growAPair
 
     my($something_added);
 
+    #The following logic in deciding which group to grow at each iteration is
+    #only useful for user-defined sample groups.  Dynamically created sample
+    #groups do need to be grown, but their larger groups have already been
+    #separated up in the best way possible.  Thus, this could be done more
+    #efficiently if I didn't compare scores at this step for dynamically created
+    #groups and rather just pushed the remainders on without testing.
+
     $something_added = 1;
-    while($something_added && scalar(@$real_remainders1))
+    while($something_added &&
+	  (scalar(@$real_remainders1) || scalar(@$real_remainders2)))
       {
+	my($score1,$score2,$next_sample1,$next_sample2,$scoring_data);
 	$something_added = 0;
-	my $next_sample = ($leftright_case ?
-			   shift(@$real_remainders1) :
-			   pop(@$real_remainders1));
-	if(sampleGroupPairPasses([@$min_group1,$next_sample],
-				 $min_group2,
-				 $sample_info))
+	if(scalar(@$real_remainders1))
 	  {
-	    push(@$min_group1,$next_sample);
-	    $something_added = 1;
+	    $next_sample1 = ($leftright_case ?
+			     $real_remainders1->[0] :
+			     $real_remainders1->[-1]);
+	    if(sampleGroupPairPasses([@$min_group1,$next_sample1],
+				     $min_group2,
+				     $sample_info))
+	      {
+		$something_added = 1;
+		$scoring_data = getBestScoringData([@$min_group1,$next_sample1],
+						   $min_group2,
+						   $sample_info);
+		$score1 = $scoring_data->{RANK};
+	      }
 	  }
-      }
-    $something_added = 1;
-    while($something_added && scalar(@$real_remainders2))
-      {
-	$something_added = 0;
-	my $next_sample = ($leftright_case ?
-			   pop(@$real_remainders2) :
-			   shift(@$real_remainders2));
-	if(sampleGroupPairPasses($min_group1,
-				 [@$min_group2,$next_sample],
-				 $sample_info))
+	if(scalar(@$real_remainders2))
 	  {
-	    push(@$min_group2,$next_sample);
-	    $something_added = 1;
+	    $next_sample2 = ($leftright_case ?
+			     $real_remainders2->[-1] :
+			     $real_remainders2->[0]);
+	    if(sampleGroupPairPasses($min_group1,
+				     [@$min_group2,$next_sample2],
+				     $sample_info))
+	      {
+		$something_added = 1;
+		$scoring_data = getBestScoringData($min_group1,
+						   [@$min_group2,$next_sample2],
+						   $sample_info);
+		$score2 = $scoring_data->{RANK};
+	      }
+	  }
+	if($something_added)
+	  {
+	    if(defined($score1) && defined($score2))
+	      {
+		if($score1 >= $score2)
+		  {
+		    push(@$min_group1,$next_sample1);
+		    ($leftright_case ?
+		     shift(@$real_remainders1) :
+		     pop(@$real_remainders1));
+		  }
+		elsif($score1 < $score2)
+		  {
+		    push(@$min_group2,$next_sample2);
+		    ($leftright_case ?
+		     pop(@$real_remainders2) :
+		     shift(@$real_remainders2));
+		  }
+	      }
+	    elsif(defined($score1))
+	      {
+		push(@$min_group1,$next_sample1);
+		($leftright_case ?
+		 shift(@$real_remainders1) :
+		 pop(@$real_remainders1));
+	      }
+	    else
+	      {
+		push(@$min_group2,$next_sample2);
+		($leftright_case ?
+		 pop(@$real_remainders2) :
+		 shift(@$real_remainders2));
+	      }
 	  }
       }
   }
@@ -1558,7 +1608,7 @@ sub getBestScoringData
 				      ($expanded_sample_info->{$_}->{DP} ?
 				       $expanded_sample_info->{$_}->{DP} : 1)}
 			       @$group2]);
-debug("Comparing scores: cur: $cur_score >? prev: $score");
+
 	    #Base the best score on the variant state with the best separation
 	    #gap.  If there are multiple variant states that produce the same
 	    #best score, go with the one that's not the same as the reference.
