@@ -452,6 +452,20 @@ elsif($gap_measure eq 'edge' && ($separation_gap < -1 || $separation_gap > 1))
 	  "(inclusive) when -m is 'edge'.");
     quit(7);
   }
+elsif($dynamic_group_creation && $separation_gap <= 0)
+  {
+    error("The separation gap (--separation-gap/-a) [$separation_gap] cannot ",
+	  "be less than or equal to 0 when no sample groups are defined (see ",
+	  "-s).",
+	  {DETAIL =>
+	   join('',('A score less than 0 is not possible with dynamic sample ',
+		    'group creation and a score of 0 would mean that the ',
+		    'genotypes/allelic frequencies of all samples (with data) ',
+		    'would be the same.  If you just want to not filter any ',
+		    'data, use --nofilter.  Note, you can use --force to ',
+		    'force -a to be 0 or less.'))});
+    quit(8);
+  }
 
 my $global_mode = '';
 
@@ -564,7 +578,7 @@ while(nextFileCombo())
 	    #Validate the sample names in the groups
 	    if(scalar(@$sample_groups))
 	      {unless(validateSampleGroupNames(\@samples,$sample_groups))
-		 {quit(8)}}
+		 {quit(9)}}
 
 	    #Handle a special case where auto-group creation is allowed
 	    if(scalar(@$sample_groups) == 1)
@@ -576,7 +590,7 @@ while(nextFileCombo())
 			  "create second sample group (-s), given the first ",
 			  "sample group size of [",
 			  scalar(@{$sample_groups->[0]}),"].");
-		    quit(9);
+		    quit(10);
 		  }
 
 		#Create the second group
@@ -594,7 +608,7 @@ while(nextFileCombo())
 			error("Invalid min group size (-d) [",
 			      $group_diff_mins->[1],"] for sample group of ",
 			      "size [",scalar(@{$sample_groups->[1]}),"].");
-			quit(10);
+			quit(11);
 		      }
 		  }
 		#Add a new group diff min
@@ -719,7 +733,7 @@ while(nextFileCombo())
 	    error("Invalid number of sample groups: [",scalar(@$sample_groups),
 		  "].  Must be the same as the number of minimum group sizes ",
 		  "(see -d).  Unable to proceed.");
-	    quit(11);
+	    quit(12);
 	  }
 
 	my @tmp_sample_groups = @$sample_groups;
@@ -1615,18 +1629,18 @@ sub createSampleGroups
 	error("Odd number of minimum grouyp sizes encountered: [",
 	      scalar(@$min_group_sizes),"].  Must be even.  Unable to ",
 	      "proceed.");
-	quit(12);
+	quit(13);
       }
     elsif(scalar(@$min_group_sizes) == 0)
       {
 	error("Empty minimum group sizes array.  Unable to proceed.");
-	quit(13);
+	quit(14);
       }
 
     if(scalar(keys(%$sample_info)) == 0)
       {
 	error("Empty sample info hash.  Unable to proceed.");
-	quit(14);
+	quit(15);
       }
 
     for(my $mi = 0;$mi < scalar(@$min_group_sizes);$mi += 2)
@@ -1644,7 +1658,7 @@ sub createSampleGroups
 		  "sum [",($min_size1 + $min_size2),"] to more than the ",
 		  "number of samples: [",scalar(keys(%$sample_info)),
 		  "].  Unable to proceed.");
-	    quit(15);
+	    quit(16);
 	  }
 
 	##
