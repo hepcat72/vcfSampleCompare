@@ -89,13 +89,17 @@ If --nogrow is supplied, group sizes will reflect the --min-group-size.  Groups 
 
 Note, when multiple pairs of groups are submitted on the command line, each variant/row may be composed of a different pair of groups.  The selected pair is intended to represent the groupings that have greatest difference for that variant.  If there are multiple pairs of sample groups that are of interest, it is recommended to run vcfSampleCompare.pl multiple times, one for each pairing.  Supplying multiple pairs of groups is intended to be used when you do not know which samples have variants of interest.
 
+The minimum possible score for user-defined sample groups is either -1 for scoring method 'edge' or 0 for scoring method 'mean'.  Negative numbers indicate the degree of overlap/mix of the observation ratios.  A score of -1 means that one group's range of observation ratios contains the other.
+
 DYNAMIC CREATION OF SAMPLE GROUPS
 
-If no --sample-group(s) or --min-group-size(s) are supplied, 2 sample groups are constructed in the following manner: samples are sorted by their observation ratios and the sample at each end of the sorted list seeds 2 initial groups: one from the beginning of the list and one from the end.  Unless --nogrow is supplied (or until each group's --min-group-size's are reached), the next sample (from either end of the remaining sorted list) which results in the largest separation gap (i.e. the difference between the averages of the observation ratios in the 2 groups) is added to its end-group.  Samples continue to be added to the groups, one by one, until the difference in their average observation ratios would go below the --separation-gap threshold (or in the case of --nogrow: until each group's --min-group-size's are reached).  Note, if the --separation-gap threshold is set to 0 and --grow is true (default), all samples will end up in a group.
+If no --sample-group(s) or --min-group-size(s) are supplied, 2 sample groups are constructed in the following manner: samples are sorted by their observation ratios and the sample at each end of the sorted list seeds 2 initial groups: one from the beginning of the list and one from the end (even if all genotype calls or observation frequencies are the same).  Unless --nogrow is supplied (or until each group's --min-group-size's are reached), the next sample (from either end of the remaining sorted list) which results in the largest separation gap (i.e. the difference between the averages of the observation ratios in the 2 groups) is added to its end-group.  Samples continue to be added to the groups, one by one, until the difference in their average observation ratios would go below the --separation-gap threshold (or in the case of --nogrow: until each group's --min-group-size's are reached).  Note, if the --separation-gap threshold is set to 0 and --grow is true (default), all samples will end up in a group.
 
 Up to 2 --min-group-size's can be supplied, but must not sum to more than the number of samples.  The default --min-group-size is 1 when --sample-group is not provided.
 
 Each grouping is independent for each variant (i.e. each row in the VCF file).  Thus, when groups are dynamically created, each variant/row may be composed of different groups.  The selected groups are intended to represent the binary sample division that represents the greatest difference for that variant.  If there are more than 2 types of samples (e.g. multiple treatments and a control), dynamic creation of sample groups can miss significant differences and it is recommended to supply sample groupings in multiple runs of vcfSampleCompare.pl.
+
+The minimum possible score when sample groups are dynamically created is 0, since the groups are created from a list sorted by either the genotype call or observation frequencies (thus the difference in those values will always be positive or 0).
 
 FILTERING
 
@@ -253,9 +257,12 @@ addOption(GETOPTKEY   => 'a|separation-gap',
 			  'by -s (and -d) must be at least this value in ' .
 			  'order to either be retained (see --filter|' .
 			  '--nofilter) or grown (--grow|--nogrow).  This ' .
-			  'option is only used when either --filter or ' .
-			  '--grow are true.  See --help --extended for more ' .
-			  'details.'));
+			  'threshold is only used when either --filter or ' .
+			  '--grow are true.  Note that if only 1 or 0 ' .
+			  'samples have data, it will be filtered regardless ' .
+			  'of this threshold.  use --nofilter to retain ' .
+			  'cases of too little data.  See --help --extended ' .
+			  'for more details.'));
 
 my $gap_measures = ['mean','edge'];
 my $gap_measure  = $gap_measures->[0];
