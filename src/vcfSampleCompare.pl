@@ -431,11 +431,19 @@ elsif(scalar(@$sample_groups) &&
     quit(5);
   }
 
-if($separation_gap < 0 || $separation_gap > 1)
+my $dynamic_group_creation = (scalar(@$sample_groups) == 0);
+
+if($gap_measure eq 'mean' && ($separation_gap < 0 || $separation_gap > 1))
   {
     error("Invalid value for -a [$separation_gap].  Must be between 0 and 1 ",
-	  "(inclusive).");
+	  "(inclusive) when -m is 'mean'.");
     quit(6);
+  }
+elsif($gap_measure eq 'edge' && ($separation_gap < -1 || $separation_gap > 1))
+  {
+    error("Invalid value for -a [$separation_gap].  Must be between -1 and 1 ",
+	  "(inclusive) when -m is 'edge'.");
+    quit(7);
   }
 
 my $global_mode = '';
@@ -549,7 +557,7 @@ while(nextFileCombo())
 	    #Validate the sample names in the groups
 	    if(scalar(@$sample_groups))
 	      {unless(validateSampleGroupNames(\@samples,$sample_groups))
-		 {quit(7)}}
+		 {quit(8)}}
 
 	    #Handle a special case where auto-group creation is allowed
 	    if(scalar(@$sample_groups) == 1)
@@ -561,7 +569,7 @@ while(nextFileCombo())
 			  "create second sample group (-s), given the first ",
 			  "sample group size of [",
 			  scalar(@{$sample_groups->[0]}),"].");
-		    quit(8);
+		    quit(9);
 		  }
 
 		#Create the second group
@@ -579,7 +587,7 @@ while(nextFileCombo())
 			error("Invalid min group size (-d) [",
 			      $group_diff_mins->[1],"] for sample group of ",
 			      "size [",scalar(@{$sample_groups->[1]}),"].");
-			quit(9);
+			quit(10);
 		      }
 		  }
 		#Add a new group diff min
@@ -704,7 +712,7 @@ while(nextFileCombo())
 	    error("Invalid number of sample groups: [",scalar(@$sample_groups),
 		  "].  Must be the same as the number of minimum group sizes ",
 		  "(see -d).  Unable to proceed.");
-	    quit(10);
+	    quit(11);
 	  }
 
 	my @tmp_sample_groups = @$sample_groups;
@@ -738,7 +746,7 @@ while(nextFileCombo())
 	my $anything_passed = 0;
 	my $group_pair_rule = 0;
 	my $rank_data       = [];
-	my $best_score      = -1;
+	my $best_score      = -2;
 	my $best_dp         = 0;
 	my $best_pair       = '.';
 	foreach my $pair_index (grep {$_ % 2 == 0} (0..$#tmp_sample_groups))
@@ -759,7 +767,7 @@ while(nextFileCombo())
 				       $set2,$set2_min,
 				       $sample_info);
 
-	    debug("Testing groups [",
+	    debug("Testing groups for $cols[0] $cols[1] [",
 		  (defined($min_group1) ?
 		   join(',',map {defined($_) ? $_ : 'undef'} @$min_group1) :
 		   'undef array'),"] vs [",
@@ -1457,9 +1465,9 @@ sub sampleGroupPairPasses
 	  }
       }
 
-    debug("Group 1: [@$group1] values: [",
+    debug("Group 1: [@$group1] GT values: [",
 	  join(',',map {$sample_info->{$_}->{GT}} @$group1),"]\n",
-	  "Group 2: [@$group2] values: [",
+	  "Group 2: [@$group2] GT values: [",
 	  join(',',map {$sample_info->{$_}->{GT}} @$group2),"]\n",
 	  "Pass: $pass");
 
@@ -1473,7 +1481,7 @@ sub getBestScoringData
     my $group2      = $_[1];
     my $sample_info = $_[2];
 
-    my $score   = 0;
+    my $score   = -2; #Lowest possible is -1 when groups are supplied
     my $state   = '';
     my $data1   = [];
     my $data2   = [];
@@ -1517,7 +1525,7 @@ sub getBestScoringData
       {
 	my($expanded_sample_info,$ao_keys) = expandSampleInfo($sample_info);
 	my @variant_states = ('RO',@$ao_keys);
-	my $cur_score = 0;
+	my $cur_score = -2; #Lowest possible is -1 when groups are supplied
 	foreach my $cur_state (@variant_states)
 	  {
 	    $cur_score =
@@ -1529,7 +1537,7 @@ sub getBestScoringData
 				      ($expanded_sample_info->{$_}->{DP} ?
 				       $expanded_sample_info->{$_}->{DP} : 1)}
 			       @$group2]);
-
+debug("Comparing scores: cur: $cur_score >? prev: $score");
 	    #Base the best score on the variant state with the best separation
 	    #gap.  If there are multiple variant states that produce the same
 	    #best score, go with the one that's not the same as the reference.
@@ -1600,18 +1608,18 @@ sub createSampleGroups
 	error("Odd number of minimum grouyp sizes encountered: [",
 	      scalar(@$min_group_sizes),"].  Must be even.  Unable to ",
 	      "proceed.");
-	quit(9);
+	quit(12);
       }
     elsif(scalar(@$min_group_sizes) == 0)
       {
 	error("Empty minimum group sizes array.  Unable to proceed.");
-	quit(10);
+	quit(13);
       }
 
     if(scalar(keys(%$sample_info)) == 0)
       {
 	error("Empty sample info hash.  Unable to proceed.");
-	quit(11);
+	quit(14);
       }
 
     for(my $mi = 0;$mi < scalar(@$min_group_sizes);$mi += 2)
@@ -1629,7 +1637,7 @@ sub createSampleGroups
 		  "sum [",($min_size1 + $min_size2),"] to more than the ",
 		  "number of samples: [",scalar(keys(%$sample_info)),
 		  "].  Unable to proceed.");
-	    quit(12);
+	    quit(15);
 	  }
 
 	##
@@ -2038,6 +2046,7 @@ sub getMeanDiffScore
 
 #This returns a score between -1 and 1 where -1 to 0 indicates degree of overlap
 #and 0 to 1 is degree of separation
+#Globals used: $dynamic_group_creation
 sub getEdgeDiffScore
   {
     my $group1_freqs = $_[0];
@@ -2054,23 +2063,19 @@ sub getEdgeDiffScore
 	return($score);
       }
 
-    my $min_first  = (sort {$a <=> $b} @$group1_freqs)[0];
-    my $max_first  = (sort {$b <=> $a} @$group1_freqs)[0];
-    my $min_second = (sort {$a <=> $b} @$group2_freqs)[0];
-    my $max_second = (sort {$b <=> $a} @$group2_freqs)[0];
+    my $min_first  = (sort {compareDec($a,$b)} @$group1_freqs)[0];
+    my $max_first  = (sort {compareDec($b,$a)} @$group1_freqs)[0];
+    my $min_second = (sort {compareDec($a,$b)} @$group2_freqs)[0];
+    my $max_second = (sort {compareDec($b,$a)} @$group2_freqs)[0];
 
     #If either group contains the other
     if(($min_first <= $min_second && $max_first >= $max_second) ||
        ($min_second <= $min_first && $max_second >= $max_first))
-      {$score = -1}
+      {$score = ($dynamic_group_creation ? 0 : -1)}
     elsif($min_first < $min_second) #First group is lesser
-      {
-	$score = $min_second - $max_first;
-      }
+      {$score = $min_second - $max_first}
     else #first group is greater
-      {
-	$score = $min_first - $max_second;
-      }
+      {$score = $min_first - $max_second}
 
     if($score < -1 || $score > 1)
       {
@@ -2079,6 +2084,8 @@ sub getEdgeDiffScore
 	       'bug.  Please report it here: https://github.com/hepcat72/' .
 	       'vcfSampleCompare/issues.'});
       }
+
+    debug("Edge Diff Score: $score");
 
     return($score);
   }
