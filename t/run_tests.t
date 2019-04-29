@@ -850,7 +850,7 @@ testaf4(#Test description
 	undef,undef,
 	#Patterns expected in string output for o1, o2, ...  Supply undef if not
 	#testing.
-	[['^\A#vcfSampleCompare.pl','PAIR2_SCORE_DATA\Z'],undef],
+	[['^\A#vcfSampleCompare.pl','GROUP2_ORS\Z'],undef],
 
 	#Patterns not expected in string output for stdout & stderr.  Supply
 	#undef if not testing.
