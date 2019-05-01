@@ -302,11 +302,11 @@ addOption(GETOPTKEY   => 'm|gap-measure',
 	  DEFAULT     => $gap_measure,
 	  DETAIL_DESC => << 'end_detail'
 
-Method to measure the gap between sample groups' observation ratios (i.e. "allelic frequencies").
+Method to measure the gap between the observation ratios (i.e. "allelic frequencies") of 2 sample groups.
 
-Using the sample group means to measure the gap between sample groups is done by taking the absolute difference of the mean observation ratio of group 1 versus group 2, resulting in a value between 0 and 1.
+Using each sample group's mean observation ratio to measure the gap between sample groups is done by taking the absolute difference of the mean observation ratio of group 1 versus group 2, resulting in a value between 0 and 1.
 
-Using the (nearest or most overlapping) edge method results in a number between -1 and 1, where values between 0 and 1 represent the difference between the closest observation frequencies when there is no overlap and values between -1 and 0 represent the maximum degree of overlap of the range of observation ratios.  Note, if the range of one group contains the range of another, the score is -1.
+Using the (nearest or most overlapping) edge method results in a number between -1 and 1, where values between 0 and 1 represent the difference between the closest observation ratios (when there is no overlap) and values between -1 and 0 represent the maximum degree of overlap of the range of observation ratios.  Note, if the range of one group contains the range of another, the score is -1.
 
 Example 1 (observation ratios [AO/DP] for SNP state "G" for 2 sample groups of size 3):
 
