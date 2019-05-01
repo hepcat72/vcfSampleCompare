@@ -273,18 +273,25 @@ addOption(GETOPTKEY   => 'a|separation-gap',
 	  GETOPTVAL   => \$separation_gap,
 	  DEFAULT     => $separation_gap,
 	  SMRY_DESC   => ("Observation ratio difference threshold [0-1]."),
-	  DETAIL_DESC => ('The maximum difference between observation ratios ' .
-			  '(i.e. allelic frequencies) for a given variant ' .
-			  'state (e.g. a SNP value of "A") between groups ' .
-			  'defined by -s (and -d), must be at least this ' .
-			  'value in order to either be retained (see ' .
-			  '--filter|--nofilter) or grown (--grow|--nogrow).  ' .
-			  'This threshold is only used when either --filter ' .
-			  'or --grow are true.  Note that if only 1 or 0 ' .
-			  'samples have data, it will be filtered regardless ' .
-			  'of this threshold.  Use --nofilter to retain ' .
-			  'cases of too little data.  See --help --extended ' .
-			  'for more details.'));
+	  DETAIL_DESC => ('The difference between observation ratios (i.e. ' .
+			  'allelic frequencies) of 2 sample groups (defined ' .
+			  'by -s and -d) for a given variant state (e.g. a ' .
+			  'SNP value of "A"), as calculated using the --gap-' .
+			  'measure method, must be at least this value in ' .
+			  'order for a variant to be retained (see --filter|' .
+			  '--nofilter) or for a sample to be added to a ' .
+			  'sample group (see --grow|--nogrow).  The ' .
+			  'separation gap (or difference between observation ' .
+			  'ratios) can be calculated for every variant state ' .
+			  '(e.g. SNP values of "A", "T", "G", or "C" have ' .
+			  'separate ratios for each sample).  The state ' .
+			  'which produces the largest gap is the one that is ' .
+			  'used to filter variants and add samples to sample ' .
+			  'groups.  Note that if only 1 or 0 samples have ' .
+			  'data, it will be filtered regardless of this ' .
+			  'threshold.  Use --nofilter to retain cases of too ' .
+			  'little data.  See --help --extended for more ' .
+			  'details.'));
 
 my $gap_measures = ['mean','edge'];
 my $gap_measure  = $gap_measures->[0];
