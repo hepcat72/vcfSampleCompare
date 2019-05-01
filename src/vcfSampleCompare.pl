@@ -202,11 +202,11 @@ Tab delimited file of variants that are sorted by and optionally filtered on deg
 * BEST_PAIR - Best Sample Group Pair Number - The sample group pair's number (numbered from left to right, as they were supplied on the command line) for the pair that resulted in the biggest difference in variant states between the sample groups.  If -s was not used to pre-define sample groups, this value will always be 1, though each row's pair of sample groups selected will be independent.
 * BEST_GT_SCORE - Best Genotype Score - The value the primary sorting criteria is based on, which is the maximum PAIR_GT_SCORE.
 * BEST_OR_SCORE - Best Observation Ratio Score - The value the secondary sorting criteria is based on, which is the maximum PAIR_OR_SCORE.
-* BEST_MINDP - Best Minimum Read Depth - The read depth of the sample with the lowest read depth among both sample groups in the selected/best pair.
+* BEST_DP_SCORE - Best Depth Score - The read depth score of the best sample group pair.  See the usage for -x to see how the score is calculated.
 * PAIR_NUM - Pair Number - A colon-delimited list of numbers indicating the pair of sample groups the sort and filtering is based on.
 * PAIR_GT_SCORE - Pair Genotype Score - A colon-delimited list of each sample group pair's maximum GT score.
 * PAIR_OR_SCORE - Pair Observation Ratio Score - A colon-delimited list of each sample group pair's maximum observation ratio score.
-* PAIR_MINDP - Pair Minimum Read Depth - A colon-delimited list of each sample group pair's minimum read depth among both sample groups.
+* PAIR_DP_SCORE - Pair Read Depth Score - A colon-delimited list of each sample group pair's read depth score.  See the usage for -x to see how the score is calculated.
 * STATES_USED_GT - Genotype Calls Used - The genotype calls used to calculate the BEST_GT_SCORE.  There will be at least 2 genotype calls separated by a semicolon.  If there are multiple genotype calls present in 1 sample group, they will be delimited with a "+".
 * STATE_USED_OR - Variant State Used to Calculate Observation Ratios - The state used can be 0 (the value of the variant at the variant position in the reference), or a number indicating which of the ALT observations produced the BEST_OR_SCORE.  E.g. if the state '0' was used to compute the scores (indicating the REF state), then (by default) the average observation ratio of each group will be close to either N/N (i.e. the same as the reference) and the other group will be close to 0/N (i.e. different from the reference).
 * GROUP1_SAMPLES - Sample Group 1 Members - A comma-delimited list of sample names belonging to group 1.  Lists of group 1 samples from multiple pairs of sample groups will be colon-delimited.  E.g. For 2 pairs, the value might be: "s1,s2:s6,s7".
@@ -218,7 +218,7 @@ Tab delimited file of variants that are sorted by and optionally filtered on deg
 
 Example:
 
-    #CHROM	POS	ID	REF	ALT	BEST_PAIR	BEST_GT_SCORE	BEST_OR_SCORE	BEST_MINDP	PAIR_NUM	PAIR_GT_SCORE	PAIR_OR_SCORE	PAIR_MINDP	STATES_USED_GT	STATE_USED_OR	GROUP1_SAMPLES	GROUP1_GTS	GROUP1_ORS	GROUP2_SAMPLES	GROUP2_GTS	GROUP2_ORS
+    #CHROM	POS	ID	REF	ALT	BEST_PAIR	BEST_GT_SCORE	BEST_OR_SCORE	BEST_DP_SCORE	PAIR_NUM	PAIR_GT_SCORE	PAIR_OR_SCORE	PAIR_DP_SCORE	STATES_USED_GT	STATE_USED_OR	GROUP1_SAMPLES	GROUP1_GTS	GROUP1_ORS	GROUP2_SAMPLES	GROUP2_GTS	GROUP2_ORS
     Chromosome	6610	.	C	G	1	1	1	408	1	1	1	408	1;0	1	sample1	1	254/254	sample2,sample3	0,0	0/407,0/564
     Chromosome	10723	.	C	G	1	1	1	111	1	1	1	111	1;0	1	sample1	1	39/39	sample2,sample3	0,0	0/78,0/216
     Chromosome	10843	.	T	C	1	1	1	33	1	1	1	33	1;0	1	sample1	1	8/8	sample2,sample3	0,0	0/25,0/67
@@ -373,6 +373,56 @@ addOption(GETOPTKEY   => 'w|grow',
 			  'Note, this may lower the sort order of a variant/' .
 			  'row when --nogenotype is supplied.'));
 
+my $min_depth = 1;
+addOption(GETOPTKEY   => 'l|minimum-depth',
+	  TYPE        => 'integer',
+	  GETOPTVAL   => \$min_depth,
+	  DEFAULT     => $min_depth,
+	  SMRY_DESC   => ("Minimum read depth (DP)."),
+	  DETAIL_DESC => << 'end_detail'
+
+Minimum read depth (DP).  Samples whose DP value is below this threshold will not be added to sample groups (see -d) when --grow is true.  Note however that user-defined sample groups (see -s) are still included.  Variants/rows for which all samples in both sample groups combined (see -s) have DP scores below a minimum score based on this threshold, will be omitted from the results (when --filter is true).  The minimum DP score is calculated in the following manner:
+
+    S_m = SUM[i=1..n](D_i > D_m ? D_m : D_i) / (D_m * n)
+
+where:
+
+    S_m = Minimum depth score
+    n   = Number of samples in both groups
+    i   = Sample number
+    D_i = Depth of sample i
+    D_m = Minimum depth
+
+If you wish to down-weight low-depth samples, use -x.
+
+end_detail
+	 );
+
+my $max_depth = 10;
+addOption(GETOPTKEY   => 'x|adequate-depth',
+	  TYPE        => 'integer',
+	  GETOPTVAL   => \$max_depth,
+	  DEFAULT     => $max_depth,
+	  SMRY_DESC   => ("Adequate read depth (DP)."),
+	  DETAIL_DESC => << 'end_detail'
+
+Adequate read depth (DP).  This is the depth at which all samples with greater depth are treated as equally capable at yielding confident results.  Individual samples whose DP value is below this threshold will have down-weighted depth scores (between 0 and 1).  Samples at or above this depth will have a depth score of 1.  Depth scores for pairs of sample groups are reported under BEST_DP_SCORE and PAIR_DP_SCORE (see -u).  The depth score calculated for a pair of sample groups is calculated in the following manner:
+
+    S = SUM[i=1..n](D_i > D_a ? D_a : D_i) / (D_a * n)
+
+where:
+
+    S   = Depth score
+    n   = Number of samples in both groups
+    i   = Sample number
+    D_i = Depth of sample i
+    D_a = Adequate depth
+
+If you wish to filter low-depth samples, use -l.
+
+end_detail
+	 );
+
 processCommandLine();
 
 #There must be an even number of sample groups (or 1)
@@ -511,7 +561,18 @@ elsif($dynamic_group_creation && $separation_gap <= 0)
     quit(8);
   }
 
-my $global_mode = '';
+if($max_depth < 1)
+  {
+    error("Adequate depth (-x) [$max_depth] must be an integer greater than ",
+	  "0.");
+    quit(9);
+  }
+
+if($min_depth < 0 || !isUnsignedInteger($min_depth))
+  {
+    error("Minimum depth (-l) [$min_depth] must be an unsigned integer.");
+    quit(9);
+  }
 
 while(nextFileCombo())
   {
@@ -622,7 +683,7 @@ while(nextFileCombo())
 	    #Validate the sample names in the groups
 	    if(scalar(@$sample_groups))
 	      {unless(validateSampleGroupNames(\@samples,$sample_groups))
-		 {quit(9)}}
+		 {quit(10)}}
 
 	    #Handle a special case where auto-group creation is allowed
 	    if(scalar(@$sample_groups) == 1)
@@ -634,7 +695,7 @@ while(nextFileCombo())
 			  "create second sample group (-s), given the first ",
 			  "sample group size of [",
 			  scalar(@{$sample_groups->[0]}),"].");
-		    quit(10);
+		    quit(11);
 		  }
 
 		#Create the second group
@@ -652,7 +713,7 @@ while(nextFileCombo())
 			error("Invalid min group size (-d) [",
 			      $group_diff_mins->[1],"] for sample group of ",
 			      "size [",scalar(@{$sample_groups->[1]}),"].");
-			quit(11);
+			quit(12);
 		      }
 		  }
 		#Add a new group diff min
@@ -777,7 +838,7 @@ while(nextFileCombo())
 	    error("Invalid number of sample groups: [",scalar(@$sample_groups),
 		  "].  Must be the same as the number of minimum group sizes ",
 		  "(see -d).  Unable to proceed.");
-	    quit(12);
+	    quit(13);
 	  }
 
 	my @tmp_sample_groups = @$sample_groups;
@@ -874,7 +935,7 @@ while(nextFileCombo())
 		      {
 			$best_gt_score = $scoring_data->{GT_SCORE};
 			$best_or_score = $scoring_data->{OR_SCORE};
-			$best_dp       = $scoring_data->{MINDP};
+			$best_dp       = $scoring_data->{DP_SCORE};
 			$best_pair     = $group_pair_rule;
 		      }
 		  }
@@ -886,7 +947,7 @@ while(nextFileCombo())
 		      {
 			$best_gt_score = $scoring_data->{GT_SCORE};
 			$best_or_score = $scoring_data->{OR_SCORE};
-			$best_dp       = $scoring_data->{MINDP};
+			$best_dp       = $scoring_data->{DP_SCORE};
 			$best_pair     = $group_pair_rule;
 		      }
 		  }
@@ -897,7 +958,7 @@ while(nextFileCombo())
 		      SAMPLES1   => $min_group1,                    #array rf
 		      SAMPLES2   => $min_group2,                    #array rf
 
-		      MINDP      => $scoring_data->{MINDP},         #num
+		      DP_SCORE   => $scoring_data->{DP_SCORE},      #dec
 
 		      GT_SCORE   => $scoring_data->{GT_SCORE},      #dec
 		      GT_STATE   => $scoring_data->{GT_STATE},      #str
@@ -923,7 +984,7 @@ while(nextFileCombo())
 		  BEST_PAIR     => $best_pair,
 		  BEST_GT_SCORE => $best_gt_score,
 		  BEST_OR_SCORE => $best_or_score,
-		  BEST_MINDP    => $best_dp,
+		  BEST_DP_SCORE => $best_dp,
 		  RANK_DATA     => $rank_data});
 	  }
       }
@@ -940,8 +1001,8 @@ while(nextFileCombo())
       {print VCFO ($outputs->{HEADER_LINES})}
 
     print OUT ("#CHROM\tPOS\tID\tREF\tALT\tBEST_PAIR\tBEST_GT_SCORE\t",
-	       "BEST_OR_SCORE\tBEST_MINDP\tPAIR_NUM\tPAIR_GT_SCORE\t",
-	       "PAIR_OR_SCORE\tPAIR_MINDP\tSTATES_USED_GT\tSTATES_USED_OR\t",
+	       "BEST_OR_SCORE\tBEST_DP_SCORE\tPAIR_NUM\tPAIR_GT_SCORE\t",
+	       "PAIR_OR_SCORE\tPAIR_DP_SCORE\tSTATES_USED_GT\tSTATES_USED_OR\t",
 	       "GROUP1_SAMPLES\tGROUP1_GTS\tGROUP1_ORS\tGROUP2_SAMPLES\t",
 	       "GROUP2_GTS\tGROUP2_ORS\n");
 
@@ -951,7 +1012,7 @@ while(nextFileCombo())
 				    ('BEST_GT_SCORE','BEST_OR_SCORE') :
 				    ('BEST_OR_SCORE','BEST_GT_SCORE'));
 	foreach my $ordered_rec
-	  (sort {compareWhenZero($b->{BEST_MINDP},$a->{BEST_MINDP}) ||
+	  (sort {compareWhenZero($b->{BEST_DP_SCORE},$a->{BEST_DP_SCORE}) ||
 		   compareDec($b->{$prim_rank},$a->{$prim_rank}) ||
 		     compareDec($b->{$sec_rank},$a->{$sec_rank})}
 	   @{$outputs->{ROW_DATA}})
@@ -963,8 +1024,9 @@ while(nextFileCombo())
 	    #Code for debugging
 	    my $teststate =
 	      join(':',map {$_->{GT_STATE}} @{$ordered_rec->{RANK_DATA}});
-	    if($teststate =~ /\d/ && intRound($ordered_rec->{BEST_MINDP}) == 0)
-	      {warning("BEST_MINDP of 0 when state has a value: [$teststate].")}
+	    if($teststate =~ /\d/ && $ordered_rec->{BEST_DP_SCORE} == 0)
+	      {warning("BEST_DP_SCORE of 0 when state has a value: ",
+		       "[$teststate].")}
 
 	    #Print the rank info
 	    print OUT (join("\t",($ordered_rec->{CHROM},$ordered_rec->{POS},
@@ -972,7 +1034,8 @@ while(nextFileCombo())
 				  $ordered_rec->{ALT},$ordered_rec->{BEST_PAIR},
 				  sigdec($ordered_rec->{BEST_GT_SCORE},4),
 				  sigdec($ordered_rec->{BEST_OR_SCORE},4),
-				  $ordered_rec->{BEST_MINDP})),"\t",
+				  sigdec($ordered_rec->{BEST_DP_SCORE},4))),
+		       "\t",
 
 		       #Next column's a colon-delimited list of passing rule 
 		       #numbers
@@ -991,7 +1054,7 @@ while(nextFileCombo())
 
 		       #Next column is a colon-delimited list of each rule's
 		       #sub-score (which is the minimum DP (read depth))
-		       join(':',map {$_->{MINDP}}
+		       join(':',map {sigdec($_->{DP_SCORE},4)}
 			    @{$ordered_rec->{RANK_DATA}}),"\t",
 
 		       #Next column's a colon-delimited list of each rule's
@@ -1718,23 +1781,11 @@ sub getBestScoringData
     my $or_data1   = [];
     my $or_data2   = [];
 
-    my $mindp = -1;
-    my $g1dpsum = 0;
-    foreach my $sample (@$group1)
-      {
-	$g1dpsum += $sample_info->{$sample}->{DP};
-	if($mindp == -1 || $sample_info->{$sample}->{DP} < $mindp)
-	  {$mindp = $sample_info->{$sample}->{DP}}
-      }
-    my $g2dpsum = 0;
-    foreach my $sample (@$group2)
-      {
-	$g2dpsum += $sample_info->{$sample}->{DP};
-	if($mindp == -1 || $sample_info->{$sample}->{DP} < $mindp)
-	  {$mindp = $sample_info->{$sample}->{DP}}
-      }
-    if($mindp == -1)
-      {$mindp = 0}
+    my($expanded_sample_info,$ao_keys) = expandSampleInfo($sample_info);
+
+    my $dpscore =
+      getDepthScore([map {$expanded_sample_info->{$_}->{DP}} @$group1],
+		    [map {$expanded_sample_info->{$_}->{DP}} @$group2]);
 
     ##
     ## Calculate genotype score
@@ -1765,7 +1816,6 @@ sub getBestScoringData
     ## Calculate best observation ratio score
     ##
 
-    my($expanded_sample_info,$ao_keys) = expandSampleInfo($sample_info);
     my @variant_states = ('RO',@$ao_keys);
     my $cur_score = -2; #Lowest possible is -1 when groups are supplied
     foreach my $cur_state (@variant_states)
@@ -1806,8 +1856,8 @@ sub getBestScoringData
 	  }
       }
 
-    if($g1dpsum == 0 || $g2dpsum == 0)
-      {return({MINDP      => 0,
+    if($dpscore <= 0)
+      {return({DP_SCORE   => 0,
 
 	       GT_SCORE   => ($dynamic_group_creation ? 0 : -1),
 	       GT_STATE   => '.',
@@ -1819,7 +1869,7 @@ sub getBestScoringData
 	       GROUP1_ORS => $or_data1,
 	       GROUP2_ORS => $or_data2})}
 
-    return({MINDP      => $mindp,
+    return({DP_SCORE   => $dpscore,
 
 	    GT_SCORE   => $gt_score,
 	    GT_STATE   => $gt_state,
@@ -1832,6 +1882,24 @@ sub getBestScoringData
 	    GROUP2_ORS => $or_data2});
   }
 
+#Globals_used: $min_depth, $max_depth
+sub getDepthScore
+  {
+    my $group1 = $_[0];
+    my $group2 = $_[1];
+
+    if(scalar(@$group1) == 0 || scalar(@$group2) == 0)
+      {
+	error("One or both sample groups of depth values is empty.");
+	return(0);
+      }
+
+    my $sum = 0;
+    foreach my $dp (@$group1,@$group2)
+      {$sum += ($dp > $max_depth ? $max_depth : $dp)}
+
+    return($sum / ($max_depth * (scalar(@$group1) + scalar(@$group2))));
+  }
 
 #Call this to create sample groups dynamically (when no sample groups have been
 #defined).  It starts by creating the best groups it can using the minimum group
@@ -1861,18 +1929,18 @@ sub createDynamicMaxSampleGroupPair
 	error("Odd number of minimum grouyp sizes encountered: [",
 	      scalar(@$min_group_sizes),"].  Must be even.  Unable to ",
 	      "proceed.");
-	quit(13);
+	quit(14);
       }
     elsif(scalar(@$min_group_sizes) == 0)
       {
 	error("Empty minimum group sizes array.  Unable to proceed.");
-	quit(14);
+	quit(15);
       }
 
     if(scalar(keys(%$sample_info)) == 0)
       {
 	error("Empty sample info hash.  Unable to proceed.");
-	quit(15);
+	quit(16);
       }
 
     for(my $mi = 0;$mi < scalar(@$min_group_sizes);$mi += 2)
@@ -1890,7 +1958,7 @@ sub createDynamicMaxSampleGroupPair
 		  "sum [",($min_size1 + $min_size2),"] to more than the ",
 		  "number of samples: [",scalar(keys(%$sample_info)),
 		  "].  Unable to proceed.");
-	    quit(16);
+	    quit(17);
 	  }
 
 	##
@@ -2430,4 +2498,16 @@ sub validateSampleGroupNames
       }
 
     return($status);
+  }
+
+sub isUnsignedInteger
+  {
+    my $val = $_[0];
+
+    if(defined($val) && ref($val) eq '' &&
+       $val =~ /^\d+([eE]\+?(\d+))?$/)
+      {return(1)}
+
+    return(0);
+
   }
