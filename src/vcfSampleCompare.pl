@@ -381,19 +381,17 @@ addOption(GETOPTKEY   => 'l|minimum-depth',
 	  SMRY_DESC   => ("Minimum read depth (DP)."),
 	  DETAIL_DESC => << 'end_detail'
 
-Minimum read depth (DP).  Samples whose DP value is below this threshold will not be added to sample groups (see -d) when --grow is true.  Note however that user-defined sample groups (see -s) are still included.  Variants/rows for which all samples in both sample groups combined (see -s) have DP scores below a minimum score based on this threshold, will be omitted from the results (when --filter is true).  The minimum DP score is calculated in the following manner:
+Minimum read depth (DP).  Samples whose DP value is below this threshold will not be added to sample groups (see -d) when --grow is true.  Note however that user-defined sample groups (see -s) still include samples with depths below the minimum depth, but variants/rows for which all samples in either sample group have DP scores below a minimum score based on this threshold, will be omitted from the results (when --filter is true).  The minimum DP score is calculated in the following manner:
 
-    S_m = SUM[i=1..n](D_i > D_m ? D_m : D_i) / (D_m * n)
+    S_m = D_m / D_a
 
 where:
 
     S_m = Minimum depth score
-    n   = Number of samples in both groups
-    i   = Sample number
-    D_i = Depth of sample i
     D_m = Minimum depth
+    D_a = Adequate depth
 
-If you wish to down-weight low-depth samples, use -x.
+If you wish to only down-weight low-depth samples and include them in dynamically generated group pairs, use -x.
 
 end_detail
 	 );
@@ -408,12 +406,14 @@ addOption(GETOPTKEY   => 'x|adequate-depth',
 
 Adequate read depth (DP).  This is the depth at which all samples with greater depth are treated as equally capable at yielding confident results.  Individual samples whose DP value is below this threshold will have down-weighted depth scores (between 0 and 1).  Samples at or above this depth will have a depth score of 1.  Depth scores for pairs of sample groups are reported under BEST_DP_SCORE and PAIR_DP_SCORE (see -u).  The depth score calculated for a pair of sample groups is calculated in the following manner:
 
-    S = SUM[i=1..n](D_i > D_a ? D_a : D_i) / (D_a * n)
+    S = MIN(SUM[i=1..n](D_i > D_a ? D_a : D_i) / (D_a * n),
+            SUM[i=1..m](D_i > D_a ? D_a : D_i) / (D_a * m))
 
 where:
 
     S   = Depth score
-    n   = Number of samples in both groups
+    n   = Number of samples in group 1
+    n   = Number of samples in group 2
     i   = Sample number
     D_i = Depth of sample i
     D_a = Adequate depth
@@ -574,6 +574,13 @@ if($min_depth < 0 || !isUnsignedInteger($min_depth))
     quit(9);
   }
 
+if($max_depth < $min_depth)
+  {
+    error("Adequate depth (-x) [$max_depth] cannot be less than minimum depth ",
+	  "(-l) [$min_depth].");
+    quit(10);
+  }
+
 while(nextFileCombo())
   {
     my $inputFile  = getInfile();
@@ -683,7 +690,7 @@ while(nextFileCombo())
 	    #Validate the sample names in the groups
 	    if(scalar(@$sample_groups))
 	      {unless(validateSampleGroupNames(\@samples,$sample_groups))
-		 {quit(10)}}
+		 {quit(11)}}
 
 	    #Handle a special case where auto-group creation is allowed
 	    if(scalar(@$sample_groups) == 1)
@@ -695,7 +702,7 @@ while(nextFileCombo())
 			  "create second sample group (-s), given the first ",
 			  "sample group size of [",
 			  scalar(@{$sample_groups->[0]}),"].");
-		    quit(11);
+		    quit(12);
 		  }
 
 		#Create the second group
@@ -713,7 +720,7 @@ while(nextFileCombo())
 			error("Invalid min group size (-d) [",
 			      $group_diff_mins->[1],"] for sample group of ",
 			      "size [",scalar(@{$sample_groups->[1]}),"].");
-			quit(12);
+			quit(13);
 		      }
 		  }
 		#Add a new group diff min
@@ -838,7 +845,7 @@ while(nextFileCombo())
 	    error("Invalid number of sample groups: [",scalar(@$sample_groups),
 		  "].  Must be the same as the number of minimum group sizes ",
 		  "(see -d).  Unable to proceed.");
-	    quit(13);
+	    quit(14);
 	  }
 
 	my @tmp_sample_groups = @$sample_groups;
@@ -874,7 +881,7 @@ while(nextFileCombo())
 	my $rank_data       = [];
 	my $best_gt_score   = -2;
 	my $best_or_score   = -2;
-	my $best_dp         = 0;
+	my $best_dp_score   = 0;
 	my $best_pair       = '.';
 	foreach my $pair_index (grep {$_ % 2 == 0} (0..$#tmp_sample_groups))
 	  {
@@ -935,7 +942,7 @@ while(nextFileCombo())
 		      {
 			$best_gt_score = $scoring_data->{GT_SCORE};
 			$best_or_score = $scoring_data->{OR_SCORE};
-			$best_dp       = $scoring_data->{DP_SCORE};
+			$best_dp_score = $scoring_data->{DP_SCORE};
 			$best_pair     = $group_pair_rule;
 		      }
 		  }
@@ -947,7 +954,7 @@ while(nextFileCombo())
 		      {
 			$best_gt_score = $scoring_data->{GT_SCORE};
 			$best_or_score = $scoring_data->{OR_SCORE};
-			$best_dp       = $scoring_data->{DP_SCORE};
+			$best_dp_score = $scoring_data->{DP_SCORE};
 			$best_pair     = $group_pair_rule;
 		      }
 		  }
@@ -984,7 +991,7 @@ while(nextFileCombo())
 		  BEST_PAIR     => $best_pair,
 		  BEST_GT_SCORE => $best_gt_score,
 		  BEST_OR_SCORE => $best_or_score,
-		  BEST_DP_SCORE => $best_dp,
+		  BEST_DP_SCORE => $best_dp_score,
 		  RANK_DATA     => $rank_data});
 	  }
       }
@@ -1522,12 +1529,12 @@ sub createStaticMinSampleGroupPair
 
 	    my $gap1 =
 	      getObsFreqScore([map {$expanded_sample_info->{$_}->{$state} /
-				      ($expanded_sample_info->{$_}->{DP} ?
-				       $expanded_sample_info->{$_}->{DP} : 1)}
+				      $expanded_sample_info->{$_}->{DP}}
+			       grep {$expanded_sample_info->{$_}->{DP}}
 			       @$tmp_group1_1],
 			      [map {$expanded_sample_info->{$_}->{$state} /
-				      ($expanded_sample_info->{$_}->{DP} ?
-				       $expanded_sample_info->{$_}->{DP} : 1)}
+				      $expanded_sample_info->{$_}->{DP}}
+			       grep {$expanded_sample_info->{$_}->{DP}}
 			       @$tmp_group2_1]);
 	    my $leftright = 1;
 
@@ -1566,13 +1573,13 @@ sub createStaticMinSampleGroupPair
 
 		my $gap2 =
 		  getObsFreqScore([map {$expanded_sample_info->{$_}->{$state} /
-					  ($expanded_sample_info->{$_}->{DP} ?
-					   $expanded_sample_info->{$_}->{DP} :
-					   1)} @$tmp_group1_2],
+					  $expanded_sample_info->{$_}->{DP}}
+				   grep {$expanded_sample_info->{$_}->{DP}}
+				   @$tmp_group1_2],
 				  [map {$expanded_sample_info->{$_}->{$state} /
-					  ($expanded_sample_info->{$_}->{DP} ?
-					   $expanded_sample_info->{$_}->{DP} :
-					   1)} @$tmp_group2_2]);
+					  $expanded_sample_info->{$_}->{DP}}
+				   grep {$expanded_sample_info->{$_}->{DP}}
+				   @$tmp_group2_2]);
 
 		#The version of the groups with the larger gap is better
 		if($gap2 > $gap1)
@@ -1711,6 +1718,13 @@ sub sampleGroupPairPasses
 
     my $pass = 0;
 
+    my($expanded_sample_info,$ao_keys) = expandSampleInfo($sample_info);
+    my $dp_score =
+      getDepthScore([map {$expanded_sample_info->{$_}->{DP}} @$group1],
+		    [map {$expanded_sample_info->{$_}->{DP}} @$group2]);
+    if($dp_score < ($min_depth / $max_depth))
+      {return($pass)}
+
     if($genotype)
       {
 	my $g1_gts = {map {$sample_info->{$_}->{GT} => 1}
@@ -1726,7 +1740,6 @@ sub sampleGroupPairPasses
       }
     else
       {
-	my($expanded_sample_info,$ao_keys) = expandSampleInfo($sample_info);
 	my @variant_states = ('RO',@$ao_keys);
 	foreach my $state (@variant_states)
 	  {
@@ -1735,12 +1748,12 @@ sub sampleGroupPairPasses
 		     "$expanded_sample_info->{$_}->{$state}")}
 	    my $score =
 	      getObsFreqScore([map {$expanded_sample_info->{$_}->{$state} /
-				      ($expanded_sample_info->{$_}->{DP} ?
-				       $expanded_sample_info->{$_}->{DP} : 1)}
+				      $expanded_sample_info->{$_}->{DP}}
+			       grep {$expanded_sample_info->{$_}->{DP}}
 			       @$group1],
 			      [map {$expanded_sample_info->{$_}->{$state} /
-				      ($expanded_sample_info->{$_}->{DP} ?
-				       $expanded_sample_info->{$_}->{DP} : 1)}
+				      $expanded_sample_info->{$_}->{DP}}
+			       grep {$expanded_sample_info->{$_}->{DP}}
 			       @$group2]);
 	    my $any_real1 =
 	      scalar(grep {$sample_info->{$_}->{GT} !~ /\./} @$group1);
@@ -1806,7 +1819,8 @@ sub getBestScoringData
 			      @$group2) / scalar(@$group2))}
 
     #The state is the combo of unique genotypes present in each group
-    $gt_state  = join('+',keys(%$g1_gts)) . ';' . join('+',keys(%$g2_gts));
+    $gt_state  = join('+',sort(keys(%$g1_gts))) . ';' .
+      join('+',sort(keys(%$g2_gts)));
 
     #The data is the raw genotype calls
     @$gt_data1 = map {$sample_info->{$_}->{GT}} @$group1;
@@ -1822,12 +1836,12 @@ sub getBestScoringData
       {
 	$cur_score =
 	  getObsFreqScore([map {$expanded_sample_info->{$_}->{$cur_state} /
-				  ($expanded_sample_info->{$_}->{DP} ?
-				   $expanded_sample_info->{$_}->{DP} : 1)}
+				  $expanded_sample_info->{$_}->{DP}}
+			   grep {$expanded_sample_info->{$_}->{DP}}
 			   @$group1],
 			  [map {$expanded_sample_info->{$_}->{$cur_state} /
-				  ($expanded_sample_info->{$_}->{DP} ?
-				   $expanded_sample_info->{$_}->{DP} : 1)}
+				  $expanded_sample_info->{$_}->{DP}}
+			   grep {$expanded_sample_info->{$_}->{DP}}
 			   @$group2]);
 
 	#Base the best score on the variant state with the best separation
@@ -1894,11 +1908,17 @@ sub getDepthScore
 	return(0);
       }
 
-    my $sum = 0;
-    foreach my $dp (@$group1,@$group2)
-      {$sum += ($dp > $max_depth ? $max_depth : $dp)}
+    my $sum1 = 0;
+    foreach my $dp (@$group1)
+      {$sum1 += ($dp > $max_depth ? $max_depth : $dp)}
+    my $score1 = $sum1 / ($max_depth * scalar(@$group1));
 
-    return($sum / ($max_depth * (scalar(@$group1) + scalar(@$group2))));
+    my $sum2 = 0;
+    foreach my $dp (@$group2)
+      {$sum2 += ($dp > $max_depth ? $max_depth : $dp)}
+    my $score2 = $sum2 / ($max_depth * scalar(@$group2));
+
+    return($score1 < $score2 ? $score1 : $score2);
   }
 
 #Call this to create sample groups dynamically (when no sample groups have been
@@ -1929,18 +1949,18 @@ sub createDynamicMaxSampleGroupPair
 	error("Odd number of minimum grouyp sizes encountered: [",
 	      scalar(@$min_group_sizes),"].  Must be even.  Unable to ",
 	      "proceed.");
-	quit(14);
+	quit(15);
       }
     elsif(scalar(@$min_group_sizes) == 0)
       {
 	error("Empty minimum group sizes array.  Unable to proceed.");
-	quit(15);
+	quit(16);
       }
 
     if(scalar(keys(%$sample_info)) == 0)
       {
 	error("Empty sample info hash.  Unable to proceed.");
-	quit(16);
+	quit(17);
       }
 
     for(my $mi = 0;$mi < scalar(@$min_group_sizes);$mi += 2)
@@ -1958,7 +1978,7 @@ sub createDynamicMaxSampleGroupPair
 		  "sum [",($min_size1 + $min_size2),"] to more than the ",
 		  "number of samples: [",scalar(keys(%$sample_info)),
 		  "].  Unable to proceed.");
-	    quit(17);
+	    quit(18);
 	  }
 
 	##
@@ -2145,13 +2165,13 @@ sub createDynamicMaxSampleGroupPair
 
 		my $gap1 =
 		  getObsFreqScore([map {$expanded_sample_info->{$_}->{$state} /
-					  ($expanded_sample_info->{$_}->{DP} ?
-					   $expanded_sample_info->{$_}->{DP} :
-					   1)} @$tmp_group1_1],
+					  $expanded_sample_info->{$_}->{DP}}
+				   grep {$expanded_sample_info->{$_}->{DP}}
+				   @$tmp_group1_1],
 				  [map {$expanded_sample_info->{$_}->{$state} /
-					  ($expanded_sample_info->{$_}->{DP} ?
-					   $expanded_sample_info->{$_}->{DP} :
-					   1)} @$tmp_group2_1]);
+					  $expanded_sample_info->{$_}->{DP}}
+				   grep {$expanded_sample_info->{$_}->{DP}}
+				   @$tmp_group2_1]);
 
 		#Now try the opposite (if the sizes are different)
 		if($min_size1 != $min_size2)
@@ -2186,16 +2206,15 @@ sub createDynamicMaxSampleGroupPair
 
 		    my $gap2 =
 		      getObsFreqScore([map
-				       {$expanded_sample_info->{$_}
-					  ->{$state} /
-					    ($expanded_sample_info->{$_}->{DP} ?
-					     $expanded_sample_info->{$_}->{DP} :
-					     1)} @$tmp_group1_1],
+				       {$expanded_sample_info->{$_}->{$state} /
+					  $expanded_sample_info->{$_}->{DP}}
+				       grep {$expanded_sample_info->{$_}->{DP}}
+				       @$tmp_group1_1],
 				      [map
 				       {$expanded_sample_info->{$_}->{$state} /
-					  ($expanded_sample_info->{$_}->{DP} ?
-					   $expanded_sample_info->{$_}->{DP} :
-					   1)} @$tmp_group2_1]);
+					  $expanded_sample_info->{$_}->{DP}}
+				       grep {$expanded_sample_info->{$_}->{DP}}
+				       @$tmp_group2_1]);
 
 		    #The version of the groups with the larger gap is better
 		    if($gap2 > $gap1)
@@ -2232,13 +2251,13 @@ sub createDynamicMaxSampleGroupPair
 		my $cur_score =
 		  getObsFreqScore([map
 				   {$expanded_sample_info->{$_}->{$best_state} /
-				      ($expanded_sample_info->{$_}->{DP} ?
-				       $expanded_sample_info->{$_}->{DP} : 1)}
+				      $expanded_sample_info->{$_}->{DP}}
+				   grep {$expanded_sample_info->{$_}->{DP}}
 				   @$best_group1],
 				  [map
 				   {$expanded_sample_info->{$_}->{$best_state} /
-				      ($expanded_sample_info->{$_}->{DP} ?
-				       $expanded_sample_info->{$_}->{DP} : 1)}
+				      $expanded_sample_info->{$_}->{DP}}
+				   grep {$expanded_sample_info->{$_}->{DP}}
 				   @$best_group2]);
 
 		#If the minimum group size is already less than the separation
@@ -2250,24 +2269,24 @@ sub createDynamicMaxSampleGroupPair
 		my $first_to_g1_score =
 		  getObsFreqScore([map
 				   {$expanded_sample_info->{$_}->{$best_state} /
-				      ($expanded_sample_info->{$_}->{DP} ?
-				       $expanded_sample_info->{$_}->{DP} : 1)}
+				      $expanded_sample_info->{$_}->{DP}}
+				   grep {$expanded_sample_info->{$_}->{DP}}
 				   (@$best_group1,$first_sample)],
 				  [map
 				   {$expanded_sample_info->{$_}->{$best_state} /
-				      ($expanded_sample_info->{$_}->{DP} ?
-				       $expanded_sample_info->{$_}->{DP} : 1)}
+				      $expanded_sample_info->{$_}->{DP}}
+				   grep {$expanded_sample_info->{$_}->{DP}}
 				   @$best_group2]);
 		my $last_to_g2_score =
 		  getObsFreqScore([map
 				   {$expanded_sample_info->{$_}->{$best_state} /
-				      ($expanded_sample_info->{$_}->{DP} ?
-				       $expanded_sample_info->{$_}->{DP} : 1)}
+				      $expanded_sample_info->{$_}->{DP}}
+				   grep {$expanded_sample_info->{$_}->{DP}}
 				   @$best_group1],
 				  [map
 				   {$expanded_sample_info->{$_}->{$best_state} /
-				      ($expanded_sample_info->{$_}->{DP} ?
-				       $expanded_sample_info->{$_}->{DP} : 1)}
+				      $expanded_sample_info->{$_}->{DP}}
+				   grep {$expanded_sample_info->{$_}->{DP}}
 				   (@$best_group2,$last_sample)]);
 
 		#Determine which will result in a smaller gap change
@@ -2334,15 +2353,14 @@ sub getObsFreqScore
     my $group2_freqs = $_[1];
 
     my $score = -1;
-    if(scalar(@_) < 2 ||
-       scalar(@$group1_freqs) == 0 || scalar(@$group2_freqs) == 0)
+    if(scalar(@_) < 2)
       {
-	error("Invalid input.  2 arrays of non-zero size are required.",
-	      {DETAIL => '  ' . (scalar(@_) < 2 ? scalar(@_) . " provided." :
-				 (scalar(@$group1_freqs) == 0 ?
-				  'First' : 'Second') . " array too small.")});
+	error("2 sample groups required.");
 	return($score);
       }
+
+    if(scalar(@$group1_freqs) == 0 || scalar(@$group2_freqs) == 0)
+      {return($score)}
 
     if($gap_measure eq 'mean')
       {$score = getMeanDiffScore($group1_freqs,$group2_freqs)}
