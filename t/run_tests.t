@@ -933,6 +933,77 @@ testaf4(#Test description
 	0);
 
 
+TEST11:
+
+#Describe the test
+$test_num++;
+$sub_test_num = 1;
+$reqnum = '13';
+
+$inf1  = 'inputs/fbse1.vcf';
+
+$tdir  = "$outd/TEST$test_num";
+$rvcf = ".in3.s1.d2-1.af.a05.hy.fy.gy.rvcf";
+$vcf  = ".in3.s1.d2-1.af.a05.hy.fy.gy.vcf";
+$outf1 = "$tdir/" . basename($inf1) . $rvcf;
+$outf2 = "$tdir/" . basename($inf1) . $vcf;
+
+$expf1 = "expected/test$test_num$rvcf";
+$expf2 = "expected/test$test_num$vcf";
+
+
+testaf4(#Test description
+	$test_num,
+	$sub_test_num,
+	$reqnum,
+	"Low depth filter and score",
+
+	$in_script,
+        $outd,
+
+	#Input files (to make sure they pre-exist)
+	[$inf1],
+	#Supply the first input file on standard in
+	0,
+
+	#Output files (they will be deleted if they pre-exist)
+	[$outf1,$outf2],
+	#Don't delete these pre-existing outfiles before test (e.g. if you want
+	#to test overwrite protection & created them on purpose)
+	[],
+
+	#Options to supply to the test script on command line in 1 string
+	"--nogenotype -a 0.05 --filter --grow $inf1 --outdir '$tdir' " .
+	"-u $rvcf -o $vcf -s 'gDNA-PA14 205w1' -d 2 -s '205w3 205w2' -d 1 " .
+	"--noheader",
+
+	#Names of files expected to NOT be created. Supply undef if not testing.
+	[],
+
+	#Exact expected stdout & stderr files.  Supply undef if no test.
+	undef,undef,
+	#Exact expected output files.  Must be the same size as the output files
+	#array above.  Supply undef if not testing.
+	[$expf1,$expf2],
+
+	#Patterns expected in string output for stdout & stderr.  Supply undef
+	#if not testing.
+	undef,undef,
+	#Patterns expected in string output for o1, o2, ...  Supply undef if not
+	#testing.
+	[undef,undef],
+
+	#Patterns not expected in string output for stdout & stderr.  Supply
+	#undef if not testing.
+        "Chromosome\t4838412",'(ERROR|WARNING)\d+:',
+	#Patterns not expected in string output for o1, o1, ...  Supply undef if
+	#not testing.
+        [undef,undef],
+
+	#Exit code (0 = success, 1 = error: means any non-0 value is expected)
+	0);
+
+
 
 
 
