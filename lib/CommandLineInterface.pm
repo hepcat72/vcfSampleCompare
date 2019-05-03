@@ -27,7 +27,7 @@ use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev);
 use File::Glob ':glob';
 
 our
-  $VERSION = '4.135';
+  $VERSION = '4.135.1';
 our($compile_err);
 
 #Basic script info
@@ -10437,10 +10437,11 @@ sub getFileSets
 		ref(\$outdir_array) eq 'SCALAR'))
 	      {
 		error("You cannot use an output directory [",
-		      " ",(ref(\$outdir_array) eq 'SCALAR' ? $outdir_array :
-			   join(' ',map {getOutdirFlag() . (ref($_) eq 'ARRAY' ?
-							    join(',',@$_) : $_)}
-					   @$outdir_array)),"] and embed a ",
+		      (ref(\$outdir_array) eq 'SCALAR' ? $outdir_array :
+		       join(' ',map {getOutdirFlag() . ' ' .
+				       (ref($_) eq 'ARRAY' ?
+					join(',',@$_) : $_)}
+			    @$outdir_array)),"] and embed a ",
 		      "directory path in the file stub [$outfile_stub] at the ",
 		      "same time.  Please use one or the other.",
 		      {DETAIL =>
@@ -13856,7 +13857,10 @@ sub amIRedirectedTo
 	$script =~ s/^.*\/([^\/]+)$/$1/;
 	my $scriptpat = quotemeta($script);
 
-	if($infile !~ m%/$scriptpat$%)
+	##EDIT: Added requirement that the infile from lsof not match
+	##      AppendToPath so that tests would pass using MacOS system perl.
+	##      I should make this update to CLI, or a better update.
+	if($infile !~ m%/$scriptpat$% && $infile !~ m%/AppendToPath%)
 	  {return(1)}
       }
 
