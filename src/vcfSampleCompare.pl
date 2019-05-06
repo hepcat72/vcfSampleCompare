@@ -1896,6 +1896,81 @@ sub getBestScoringData
 	    GROUP2_ORS => $or_data2});
   }
 
+#Calculated Ratio of Resolution - It takes 2 groups of genotype calls where the
+#calls can be any of a set of numbers or a dot (indicating no data).  Each
+#number occurrence is for a sample.  A perfect score of 1 is achieved when there
+#are no common calls between the 2 groups.  A bottom score of 0 is when all
+#calls are common and evenly populated between the 2 groups.
+sub getGTCallScore
+  {
+    my $group1 = $_[0];
+    my $group2 = $_[1];
+
+    my $ratio_of_resolution = 0;
+
+    my $group1_call_counts = {};
+    my $group2_call_counts = {};
+    my $call_hash          = {};
+    my $total_call_counts  = 0;
+    my $ambig1_counts      = 0;
+    my $ambig2_counts      = 0;
+    my $total = scalar(@$group1) + scalar(@$group2);
+    foreach my $call (@$group1)
+      {
+	if($call eq '.')
+	  {$ambig1_counts++}
+	else
+	  {
+	    $call_hash->{$call} = 1;
+	    $group1_call_counts->{$call}++;
+	    $total_call_counts++;
+	  }
+      }
+    foreach my $call (@$group2)
+      {
+	if($call eq '.')
+	  {$ambig2_counts++}
+	else
+	  {
+	    $call_hash->{$call} = 1;
+	    $group2_call_counts->{$call}++;
+	    $total_call_counts++;
+	  }
+      }
+
+    my $num_states = scalar(keys(%$call_hash));
+
+    if($num_states > 1 &&
+       scalar(keys(%$group1_call_counts)) && scalar(keys(%$group2_call_counts)))
+      {
+	my $ambig1_fraction = $ambig1_counts / $num_states;
+	my $ambig2_fraction = $ambig2_counts / $num_states;
+	my $group1_weighted_sum = 0;
+	my $group1_sum = 0;
+
+	foreach my $call (keys(%$call_hash))
+	  {
+	    if(!exists($group1_call_counts->{$call}))
+	      {$group1_call_counts->{$call} = 0}
+	    if(!exists($group2_call_counts->{$call}))
+	      {$group2_call_counts->{$call} = 0}
+
+	    $group1_weighted_sum +=
+	      ($group1_call_counts->{$call} + $ambig1_fraction)**2 /
+		($group1_call_counts->{$call} + $ambig1_fraction +
+		 $group2_call_counts->{$call} + $ambig2_fraction);
+	    $group1_sum += $group1_call_counts->{$call} + $ambig1_fraction;
+	  }
+
+	#Should be greater than 0 - just being safe
+	if($group1_sum > 0)
+	  {$ratio_of_resolution = $group1_weighted_sum / $group1_sum}
+      }
+
+    return($ratio_of_resolution);
+  }
+
+
 #Globals_used: $min_depth, $max_depth
 sub getDepthScore
   {
