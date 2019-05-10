@@ -2,7 +2,7 @@
 
 ## WHAT IS THIS:
 
-This script sorts and filters the variant records of a VCF file (containing data for 2 or more samples) based on the differences in the variant data between samples.  The end result is a file containing the variants that show the biggest difference at the top and variants with no or little difference filtered out.  Think of it as the genetic variant analog of differential gene expression analysis.  It solves the problem of finding "what's different" between (for example) wildtype and mutant samples.
+This script answers the question "What's different?" between my samples.  It does this by sorting and filtering the variant records of a VCF file (containing data for 2 or more samples) based on the differences in the variant data between samples.  The end result is a file containing the variants that show the biggest difference at the top and variants with no or little difference at the bottom or filtered out.  Think of it as the genetic variant analog of a differential gene expression analysis.  It solves the problem of finding "what's different" (for example) between wildtype and mutant samples.
 
 Note, this tool does not perform a statistical analysis.  It is only meant to highlight whether differences exist between sample groups of interest.  It is not intended to be used as "proof" that differences between samples are "real" or biologically relevant.
 
