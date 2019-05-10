@@ -267,12 +267,12 @@ When -s is supplied, setting -d to 0 will automatically set the minimum group si
 END_DETAIL
 		);
 
-my $separation_gap = 0.6;
-addOption(GETOPTKEY   => 'a|separation-gap',
+my $separation_gap = 0.7;
+addOption(GETOPTKEY   => 'a|separation-gap|minimum-or-score',
 	  TYPE        => 'float',
 	  GETOPTVAL   => \$separation_gap,
 	  DEFAULT     => $separation_gap,
-	  SMRY_DESC   => ("Observation ratio difference threshold [0-1]."),
+	  SMRY_DESC   => ("Minimum observation ratio difference [0-1]."),
 	  DETAIL_DESC => ('The difference between observation ratios (i.e. ' .
 			  'allelic frequencies) of 2 sample groups (defined ' .
 			  'by -s and -d) for a given variant state (e.g. a ' .
@@ -338,20 +338,51 @@ addOption(GETOPTKEY   => 'g|genotype',
 			  '--nogrow and --nofilter.  See --help --extended ' .
 			  'for details.'));
 
+my $min_gt_score = 1;
+addOption(GETOPTKEY   => 't|minimum-gt-score',
+	  TYPE        => 'float',
+	  GETOPTVAL   => \$min_gt_score,
+	  DEFAULT     => $min_gt_score,
+	  ADVANCED    => 1,
+	  SMRY_DESC   => ('Minimum genotype call ratio difference between ' .
+			  'sample groups [0-1].'),
+	  DETAIL_DESC => ('Minimum genotype call ratio difference between ' .
+			  'sample groups [0-1].  This is only useful when ' .
+			  'set to 1, but is provided as an advanced option ' .
+			  'to allow some mixing of genotype calls between ' .
+			  'sample groups and instead rely more heavily on ' .
+			  'the gap between observation ratios (see -a).  The ' .
+			  'genotype score, which this threshold operated on ' .
+			  'is based on a metric called the "ratio of ' .
+			  "resolution\".  It's best explained by example.  " .
+			  'If all samples have genotype calls and comparing ' .
+			  "one sample group's genotype calls with all " .
+			  'genotype calls in one group differ from those ' .
+			  "comparing one sample group's genotype calls with " .
+			  'of the other group (see -s), comparing one sample ' .
+			  "group's genotype calls with the score will be 1.  " .
+			  'If each group is composed comparing one sample ' .
+			  "group's genotype calls with of the same genotype " .
+			  'call or even numbers of common genotype calls ' .
+			  "(e.g. group 1's calls: 0,0,1,1 group 2's calls: " .
+			  '0,1), the score will be 0.'));
+
 my $filter = 1;
 addOption(GETOPTKEY   => 'f|filter',
 	  TYPE        => 'negbool',
 	  GETOPTVAL   => \$filter,
 	  DEFAULT     => $filter,
 	  SMRY_DESC   => ("Do not filter variant rows."),
-	  DETAIL_DESC => ('Do not filter variant rows whose best sample ' .
-			  'group pair score does not meet thresholds defined ' .
-			  'by `--separation-gap <float>` when --nogenotype ' .
-			  'is supplied, or (when --genotype is supplied) do ' .
-			  'not filter variants when the genotype calls for ' .
-			  'samples in each group contain common genotype ' .
-			  'calls or do not meet the minimum size requirement ' .
-			  '(-d).  See --help --extended for more details.'));
+	  DETAIL_DESC => ('Variants/rows are filtered based on the ' .
+			  'characteristics of the best sample group pair, ' .
+			  'such as the size of the sample groups (see ' .
+			  '--min-group-size and --grow), the depth of read ' .
+			  'coverage (see --minimum-depth), and either their ' .
+			  'genotype score or observation ratio score (see ' .
+			  '--separation-gap).  Supply this option to not ' .
+			  'filter variant rows whose best sample group pair ' .
+			  'does not meet these thresholds.  See --help ' .
+			  '--extended for more details.'));
 
 my $grow = 1;
 addOption(GETOPTKEY   => 'w|grow',
@@ -373,7 +404,7 @@ addOption(GETOPTKEY   => 'w|grow',
 			  'Note, this may lower the sort order of a variant/' .
 			  'row when --nogenotype is supplied.'));
 
-my $min_depth = 1;
+my $min_depth = 4;
 addOption(GETOPTKEY   => 'l|minimum-depth',
 	  TYPE        => 'integer',
 	  GETOPTVAL   => \$min_depth,
@@ -396,7 +427,7 @@ If you wish to only down-weight low-depth samples and include them in dynamicall
 end_detail
 	 );
 
-my $max_depth = 10;
+my $max_depth = 20;
 addOption(GETOPTKEY   => 'x|adequate-depth',
 	  TYPE        => 'integer',
 	  GETOPTVAL   => \$max_depth,
@@ -778,7 +809,8 @@ while(nextFileCombo())
 	my $format_str = $cols[$format_index];
 	my(@data)      = @cols[$sample_name_start_index..$#cols];
 
-	debug("FORMAT string for data record [$data_line]: [$format_str].");
+	debug("FORMAT string for data record [$cols[0]:$cols[1]] on line ",
+	      "[$data_line]: [$format_str].");
 	debug({LEVEL => 2},"Record [$data_line]: [$_].");
 
 	#Determine the subindex of each piece of sample data based on the
@@ -914,13 +946,16 @@ while(nextFileCombo())
 		  "] vs set2 [",
 		  join(',',map {defined($_) ? $_ : 'undef'} @$set2),"].");
 
+	    #The min group is allowed to have samples under the minimum depth,
+	    #but the group depth average must be above the minimum depth
+	    #threshold
 	    if(!$filter || sampleGroupPairPasses($min_group1,$min_group2,
-						 $sample_info))
+						 $sample_info,1))
 	      {
 		$anything_passed++;
 
-		if($grow && (scalar(@$min_group1) < scalar(@$set1) ||
-			     scalar(@$min_group2) < scalar(@$set2)))
+		if(scalar(@$min_group1) < scalar(@$set1) ||
+		   scalar(@$min_group2) < scalar(@$set2))
 		  {growAPair($min_group1,$min_group2,
 			     $real_remainders1,$real_remainders2,
 			     $leftright_case,$sample_info)}
@@ -934,6 +969,12 @@ while(nextFileCombo())
 		my $scoring_data = getBestScoringData($min_group1,
 						      $min_group2,
 						      $sample_info);
+
+		debug("Group 1: [@$min_group1] Group 2: [@$min_group2]\n",
+		      "GT Score: $scoring_data->{GT_SCORE}\n",
+		      "OR Score: $scoring_data->{OR_SCORE}\n",
+		      "DP Score: $scoring_data->{DP_SCORE}");
+
 		if($genotype)
 		  {
 		    if($scoring_data->{GT_SCORE} > $best_gt_score ||
@@ -1160,7 +1201,7 @@ sub compareWhenZero
     return(0);
   }
 
-#Globals used: $genotype
+#Globals used: $genotype, $min_depth, $max_depth
 sub growAPair
   {
     my $min_group1       = $_[0];
@@ -1171,6 +1212,9 @@ sub growAPair
                                   #2 from the right or vice versa
     my $sample_info      = $_[5];
 
+    return(undef) if(!$grow);
+
+    my($expanded_sample_info,$ao_keys) = expandSampleInfo($sample_info);
     my($something_added);
 
     #The following logic in deciding which group to grow at each iteration is
@@ -1188,20 +1232,41 @@ sub growAPair
 	   $next_sample1,$next_sample2,$scoring_data);
 	$something_added = 0;
 
+	my $initial_state_passes = sampleGroupPairPasses($min_group1,
+							 $min_group2,
+							 $sample_info,
+							 1);
+	my $initial_score = getBestScoringData($min_group1,
+					       $min_group2,
+					       $sample_info);
+
 	#If there are still un-added samples in sample group 1
 	if(scalar(@$real_remainders1))
 	  {
 	    $next_sample1 = ($leftright_case ?
 			     $real_remainders1->[0] :
 			     $real_remainders1->[-1]);
-	    if(sampleGroupPairPasses([@$min_group1,$next_sample1],
-				     $min_group2,
-				     $sample_info))
+	    $scoring_data = getBestScoringData([@$min_group1,$next_sample1],
+					       $min_group2,
+					       $sample_info);
+
+	    if(#If the initial state is passing, the depth is at least the
+	       #minimum, and the proposed addition passes as well
+	       ($initial_state_passes &&
+		$expanded_sample_info->{$next_sample1}->{DP} >= $min_depth &&
+		sampleGroupPairPasses([@$min_group1,$next_sample1],
+				      $min_group2,$sample_info,0)) ||
+
+	       #Or if the initial state is NOT passing, but we're not filtering,
+	       #and the score improves or stays the same.  (The goal is to
+	       #output the best failing pair when there will be no filtering.)
+	       (!$initial_state_passes && !$filter &&
+	        (($genotype &&
+		  $scoring_data->{GT_SCORE} >= $initial_score->{GT_SCORE}) ||
+		 (!$genotype &&
+		  $scoring_data->{OR_SCORE} >= $initial_score->{OR_SCORE}))))
 	      {
 		$something_added = 1;
-		$scoring_data = getBestScoringData([@$min_group1,$next_sample1],
-						   $min_group2,
-						   $sample_info);
 		$gt_score1 = $scoring_data->{GT_SCORE};
 		$or_score1 = $scoring_data->{OR_SCORE};
 	      }
@@ -1213,20 +1278,34 @@ sub growAPair
 	    $next_sample2 = ($leftright_case ?
 			     $real_remainders2->[-1] :
 			     $real_remainders2->[0]);
-	    if(sampleGroupPairPasses($min_group1,
-				     [@$min_group2,$next_sample2],
-				     $sample_info))
+	    $scoring_data = getBestScoringData($min_group1,
+					       [@$min_group2,$next_sample2],
+					       $sample_info);
+
+	    if(#If the initial state is passing, the depth is at least the
+	       #minimum, and the proposed addition passes as well
+	       ($initial_state_passes &&
+		$expanded_sample_info->{$next_sample2}->{DP} >= $min_depth &&
+		sampleGroupPairPasses($min_group1,
+				      [@$min_group2,$next_sample2],
+				      $sample_info,0)) ||
+
+	       #Or if the initial state is NOT passing, but we're not filtering,
+	       #and the score improves or stays the same.  (The goal is to
+	       #output the best failing pair when there will be no filtering.)
+	       (!$initial_state_passes && !$filter &&
+	        (($genotype &&
+		  $scoring_data->{GT_SCORE} >= $initial_score->{GT_SCORE}) ||
+		 (!$genotype &&
+		  $scoring_data->{OR_SCORE} >= $initial_score->{OR_SCORE}))))
 	      {
 		$something_added = 1;
-		$scoring_data = getBestScoringData($min_group1,
-						   [@$min_group2,$next_sample2],
-						   $sample_info);
 		$gt_score2 = $scoring_data->{GT_SCORE};
 		$or_score2 = $scoring_data->{OR_SCORE};
 	      }
 	  }
 
-	#If there was a passing sample added top one of the sample groups,
+	#If there was a passing sample added to one of the sample groups,
 	#decide which one created a better separation
 	if($something_added)
 	  {
@@ -1368,20 +1447,22 @@ sub createStaticMinSampleGroupPair
 	my @ordered_samples_real2_tmp = @ordered_samples_real2;
 	my @nocalls2_tmp              = @nocalls2;
 	my $min_group1_case1          = [];
+	my $min_group2_case1          = [];
+	my $real_remainder1_case1     = [];
+	my $real_remainder2_case1     = [];
+	#Fill group 1 (for case 1) to min size
 	push(@$min_group1_case1,shift(@ordered_samples_real1_tmp))
 	  while(scalar(@$min_group1_case1) < $min_size1 &&
 		scalar(@ordered_samples_real1_tmp));
-	my $real_remainder1_case1 = [];
 	if(scalar(@$min_group1_case1) >= $min_size1)
 	  {@$real_remainder1_case1 = @ordered_samples_real1_tmp}
 	push(@$min_group1_case1,shift(@nocalls1_tmp))
 	  while(scalar(@$min_group1_case1) < $min_size1 &&
 		scalar(@nocalls1_tmp));
-	my $min_group2_case1 = [];
+	#Fill group 2 (for case 1) to min size
 	push(@$min_group2_case1,pop(@ordered_samples_real2_tmp))
 	  while(scalar(@$min_group2_case1) < $min_size2 &&
 		scalar(@ordered_samples_real2_tmp));
-	my $real_remainder2_case1 = [];
 	if(scalar(@$min_group2_case1) >= $min_size2)
 	  {@$real_remainder2_case1 = @ordered_samples_real2_tmp}
 	push(@$min_group2_case1,shift(@nocalls2_tmp))
@@ -1394,59 +1475,41 @@ sub createStaticMinSampleGroupPair
 	@ordered_samples_real2_tmp = @ordered_samples_real2;
 	@nocalls2_tmp              = @nocalls2;
 	my $min_group1_case2       = [];
+	my $min_group2_case2       = [];
+	my $real_remainder1_case2  = [];
+	my $real_remainder2_case2  = [];
+	#Fill group 1 (for case 2) to min size
 	push(@$min_group1_case2,pop(@ordered_samples_real1_tmp))
 	  while(scalar(@$min_group1_case2) < $min_size1 &&
 		scalar(@ordered_samples_real1_tmp));
-	my $real_remainder1_case2 = [];
 	if(scalar(@$min_group1_case1) >= $min_size1)
 	  {@$real_remainder1_case2 = @ordered_samples_real1_tmp}
 	push(@$min_group1_case2,shift(@nocalls1_tmp))
 	  while(scalar(@$min_group1_case2) < $min_size1 &&
 		scalar(@nocalls1_tmp));
-	my $min_group2_case2 = [];
+	#Fill group 2 (for case 2) to min size
 	push(@$min_group2_case2,shift(@ordered_samples_real2_tmp))
 	  while(scalar(@$min_group2_case2) < $min_size2 &&
 		scalar(@ordered_samples_real2_tmp));
-	my $real_remainder2_case2 = [];
 	if(scalar(@$min_group2_case2) >= $min_size2)
 	  {@$real_remainder2_case2 = @ordered_samples_real2_tmp}
 	push(@$min_group2_case2,shift(@nocalls2_tmp))
 	  while(scalar(@$min_group2_case2) < $min_size2 &&
 		scalar(@nocalls2_tmp));
 
-	#Determine which case is better (the one with more samples with a real
-	#and unique genotype)
-	my $g1_gts = {map {$sample_info->{$_}->{GT} => 1}
-		      grep {$sample_info->{$_}->{GT} !~ /\./}
-		      @$min_group1_case1};
-	my $g2_gts = {map {$sample_info->{$_}->{GT} => 1}
-		      grep {$sample_info->{$_}->{GT} !~ /\./}
-		      @$min_group2_case1};
-	my $common_nocall_gts =
-	  {map {$_ => 1} grep {/\./ || exists($g2_gts->{$_})} keys(%$g1_gts)};
-	my $unique_call_count_case1 = 0;
-	foreach my $sample (grep {defined($_)}
-			    (@$min_group1_case1,@$min_group2_case1))
-	  {$unique_call_count_case1++
-	     unless(exists($common_nocall_gts
-			   ->{$sample_info->{$sample}->{GT}}))}
+	##
+	## Determine which case is better (from the 2 greedily constructed opts)
+	##
 
-	$g1_gts = {map {$sample_info->{$_}->{GT} => 1}
-		   grep {$sample_info->{$_}->{GT} !~ /\./}
-		   @$min_group1_case2};
-	$g2_gts = {map {$sample_info->{$_}->{GT} => 1}
-		   grep {$sample_info->{$_}->{GT} !~ /\./}
-		   @$min_group2_case2};
-	$common_nocall_gts =
-	  {map {$_ => 1} grep {/\./ || exists($g2_gts->{$_})} keys(%$g1_gts)};
-	my $unique_call_count_case2 = 0;
-	foreach my $sample (grep {defined($_)}
-			    (@$min_group1_case2,@$min_group2_case2))
-	  {$unique_call_count_case2++
-	     unless(exists($common_nocall_gts
-			   ->{$sample_info->{$sample}->{GT}}))}
+	my $case1_score =
+	  getGTCallScore([map {$sample_info->{$_}->{GT}} @$min_group1_case1],
+			 [map {$sample_info->{$_}->{GT}} @$min_group2_case1]);
 
-	if($unique_call_count_case1 >= $unique_call_count_case2)
+	my $case2_score =
+	  getGTCallScore([map {$sample_info->{$_}->{GT}} @$min_group1_case2],
+			 [map {$sample_info->{$_}->{GT}} @$min_group2_case2]);
+
+	if($case1_score >= $case2_score)
 	  {
 	    @$min_group1      = @$min_group1_case1;
 	    @$min_group2      = @$min_group2_case1;
@@ -1710,11 +1773,13 @@ sub intRound
     return($num);
   }
 
+#Globals used: $min_depth, $max_depth
 sub sampleGroupPairPasses
   {
-    my $group1      = $_[0];
-    my $group2      = $_[1];
-    my $sample_info = $_[2];
+    my $group1           = $_[0];
+    my $group2           = $_[1];
+    my $sample_info      = $_[2];
+    my $ave_depth_filter = $_[3];
 
     my $pass = 0;
 
@@ -1722,21 +1787,15 @@ sub sampleGroupPairPasses
     my $dp_score =
       getDepthScore([map {$expanded_sample_info->{$_}->{DP}} @$group1],
 		    [map {$expanded_sample_info->{$_}->{DP}} @$group2]);
-    if($dp_score < ($min_depth / $max_depth))
+    if($ave_depth_filter && $dp_score < ($min_depth / $max_depth))
       {return($pass)}
 
     if($genotype)
       {
-	my $g1_gts = {map {$sample_info->{$_}->{GT} => 1}
-		      grep {$sample_info->{$_}->{GT} !~ /\./} @$group1};
-	my $g2_gts = {map {$sample_info->{$_}->{GT} => 1}
-		      grep {$sample_info->{$_}->{GT} !~ /\./} @$group2};
-	my $common_gts = [grep {exists($g2_gts->{$_})} keys(%$g1_gts)];
-	$pass = (scalar(grep {$sample_info->{$_}->{GT} !~ /\./} @$group1) ==
-		 scalar(@$group1) &&
-		 scalar(grep {$sample_info->{$_}->{GT} !~ /\./} @$group2) ==
-		 scalar(@$group2) &&
-		 scalar(@$common_gts) == 0) ? 1 : 0;
+	my $gt_score =
+	  getGTCallScore([map {$sample_info->{$_}->{GT}} @$group1],
+			 [map {$sample_info->{$_}->{GT}} @$group2]);
+	$pass = ($gt_score >= $min_gt_score);
       }
     else
       {
@@ -1804,27 +1863,20 @@ sub getBestScoringData
     ## Calculate genotype score
     ##
 
+    #The data is the raw genotype calls
+    @$gt_data1 = map {$sample_info->{$_}->{GT}} @$group1;
+    @$gt_data2 = map {$sample_info->{$_}->{GT}} @$group2;
+
+    $gt_score = getGTCallScore($gt_data1,$gt_data2);
+
     my $g1_gts = {map {$sample_info->{$_}->{GT} => 1}
 		  grep {$sample_info->{$_}->{GT} !~ /\./} @$group1};
     my $g2_gts = {map {$sample_info->{$_}->{GT} => 1}
 		  grep {$sample_info->{$_}->{GT} !~ /\./} @$group2};
-    my $common_gts = [grep {exists($g2_gts->{$_})} keys(%$g1_gts)];
-
-    if(scalar(@$common_gts))
-      {$gt_score = 0}
-    else
-      {$gt_score = (scalar(grep {$sample_info->{$_}->{GT} !~ /\./} @$group1) /
-		    scalar(@$group1)) *
-		      (scalar(grep {$sample_info->{$_}->{GT} !~ /\./}
-			      @$group2) / scalar(@$group2))}
 
     #The state is the combo of unique genotypes present in each group
-    $gt_state  = join('+',sort(keys(%$g1_gts))) . ';' .
-      join('+',sort(keys(%$g2_gts)));
-
-    #The data is the raw genotype calls
-    @$gt_data1 = map {$sample_info->{$_}->{GT}} @$group1;
-    @$gt_data2 = map {$sample_info->{$_}->{GT}} @$group2;
+    $gt_state  = (join('+',sort(keys(%$g1_gts))) . ';' .
+		  join('+',sort(keys(%$g2_gts))));
 
     ##
     ## Calculate best observation ratio score
@@ -1903,18 +1955,18 @@ sub getBestScoringData
 #calls are common and evenly populated between the 2 groups.
 sub getGTCallScore
   {
-    my $group1 = $_[0];
-    my $group2 = $_[1];
+    my $group1              = $_[0];
+    my $group2              = $_[1];
 
     my $ratio_of_resolution = 0;
 
-    my $group1_call_counts = {};
-    my $group2_call_counts = {};
-    my $call_hash          = {};
-    my $total_call_counts  = 0;
-    my $ambig1_counts      = 0;
-    my $ambig2_counts      = 0;
-    my $total = scalar(@$group1) + scalar(@$group2);
+    my $group1_call_counts  = {};
+    my $group2_call_counts  = {};
+    my $call_hash           = {};
+    my $ambig1_counts       = 0;
+    my $ambig2_counts       = 0;
+
+    #Count the specific calls in each group, the total, and track unique calls
     foreach my $call (@$group1)
       {
 	if($call eq '.')
@@ -1923,7 +1975,6 @@ sub getGTCallScore
 	  {
 	    $call_hash->{$call} = 1;
 	    $group1_call_counts->{$call}++;
-	    $total_call_counts++;
 	  }
       }
     foreach my $call (@$group2)
@@ -1934,37 +1985,66 @@ sub getGTCallScore
 	  {
 	    $call_hash->{$call} = 1;
 	    $group2_call_counts->{$call}++;
-	    $total_call_counts++;
 	  }
       }
 
+    #Count the total number of unique calls.  This will be the number of ways a
+    #sample can be identified based on its genotype call.  We will use it to see
+    #how well genotype calls divide up the samples in the given groups.
     my $num_states = scalar(keys(%$call_hash));
 
+    #If there are different calls and each group is populated
     if($num_states > 1 &&
        scalar(keys(%$group1_call_counts)) && scalar(keys(%$group2_call_counts)))
       {
-	my $ambig1_fraction = $ambig1_counts / $num_states;
-	my $ambig2_fraction = $ambig2_counts / $num_states;
+	#The ambiguous fraction is the number of samples in the "ambiguous
+	#category" divided by the number of known states.  This assumes that the
+	#unknown sample states has an equal chance of being one of the other
+	#known/seen states
+	my $ambig1_fraction     = $ambig1_counts / $num_states;
+	my $ambig2_fraction     = $ambig2_counts / $num_states;
 	my $group1_weighted_sum = 0;
-	my $group1_sum = 0;
+	my $group1_sum          = 0;
 
+	#For each possible known genotype call among the 2 groups
 	foreach my $call (keys(%$call_hash))
 	  {
+	    #If a group doesn't have that call (which is good),
+	    #initialize its count
 	    if(!exists($group1_call_counts->{$call}))
 	      {$group1_call_counts->{$call} = 0}
 	    if(!exists($group2_call_counts->{$call}))
 	      {$group2_call_counts->{$call} = 0}
 
+	    #We're going to base the call on being able to tease out group 1
+	    #from group 2 (we could do it either way, but we shouyld get the
+	    #same result).  We want to add the number of samples from group 1
+	    #with this call multiplied by the ratio of the number of samples
+	    #with this call over the total number of samples with this call in
+	    #both groups (this is the ratio of resolution).  We also spread out
+	    #a fraction of the samples with ambiguous calls among each call.
 	    $group1_weighted_sum +=
 	      ($group1_call_counts->{$call} + $ambig1_fraction)**2 /
 		($group1_call_counts->{$call} + $ambig1_fraction +
 		 $group2_call_counts->{$call} + $ambig2_fraction);
+	    #We will also keep track of the number of samples in group 1 with
+	    #this call.
 	    $group1_sum += $group1_call_counts->{$call} + $ambig1_fraction;
 	  }
 
 	#Should be greater than 0 - just being safe
 	if($group1_sum > 0)
-	  {$ratio_of_resolution = $group1_weighted_sum / $group1_sum}
+	  {
+	    $ratio_of_resolution = $group1_weighted_sum / $group1_sum;
+
+	    #All scores will be between 0.5 and 1, so normalize to between 0 and
+	    #1
+	    $ratio_of_resolution -= 0.5;
+	    $ratio_of_resolution *= 2.0;
+
+	    if($ratio_of_resolution < 0 || $ratio_of_resolution > 1.0)
+	      {error("Invalid ratio of resolution score.")}
+	  }
       }
 
     return($ratio_of_resolution);
@@ -2170,7 +2250,8 @@ sub createDynamicMaxSampleGroupPair
 		  }
 	      }
 
-	    #Grow the groups to the max size without adding to inconsistencies
+	    #Grow the groups to the max size as much as possible without adding
+	    #to inconsistencies
 	    my $g1_gts = {map {$sample_info->{$_}->{GT} => 1}
 			  grep {$sample_info->{$_}->{GT} !~ /\./} @$group1};
 	    my $g2_gts = {map {$sample_info->{$_}->{GT} => 1}
