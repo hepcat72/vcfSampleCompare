@@ -764,7 +764,7 @@ testaf4(#Test description
 
 	#Options to supply to the test script on command line in 1 string
 	"--noheader -s gDNA-PA14 -d 1 -s '205w3 205w2 205w1' -d 1 --genotype " .
-	"--filter --grow $inf1 --outdir '$tdir' -u $rvcf -o $vcf",
+	"--filter --grow $inf1 --outdir '$tdir' -u $rvcf -o $vcf -l 1",
 
 	#Names of files expected to NOT be created. Supply undef if not testing.
 	[],
