@@ -202,11 +202,11 @@ Tab delimited file of variants that are sorted by and optionally filtered on deg
 * BEST_PAIR - Best Sample Group Pair Number - The sample group pair's number (numbered from left to right, as they were supplied on the command line) for the pair that resulted in the biggest difference in variant states between the sample groups.  If -s was not used to pre-define sample groups, this value will always be 1, though each row's pair of sample groups selected will be independent.
 * BEST_GT_SCORE - Best Genotype Score - The value the primary sorting criteria is based on, which is the maximum PAIR_GT_SCORE.
 * BEST_OR_SCORE - Best Observation Ratio Score - The value the secondary sorting criteria is based on, which is the maximum PAIR_OR_SCORE.
-* BEST_DP_SCORE - Best Depth Score - The read depth score of the best sample group pair.  See the usage for -x to see how the score is calculated.
+* BEST_DP_SCORE - Best Depth Score - The read depth score of the best sample group pair.  The read depth score of the best pair is based on the lower average read depth of the 2 sample groups in the pair.  See the usage for -x and -l to see how the score is calculated.
 * PAIR_NUM - Pair Number - A colon-delimited list of numbers indicating the pair of sample groups the sort and filtering is based on.
 * PAIR_GT_SCORE - Pair Genotype Score - A colon-delimited list of each sample group pair's maximum GT score.
 * PAIR_OR_SCORE - Pair Observation Ratio Score - A colon-delimited list of each sample group pair's maximum observation ratio score.
-* PAIR_DP_SCORE - Pair Read Depth Score - A colon-delimited list of each sample group pair's read depth score.  See the usage for -x to see how the score is calculated.
+* PAIR_DP_SCORE - Pair Read Depth Score - A colon-delimited list of each sample group pair's read depth score.  The read depth score for each pair is based on the lower average read depth of the 2 sample groups in the pair.  See the usage for -x and -l to see how the score is calculated.
 * STATES_USED_GT - Genotype Calls Used - The genotype calls used to calculate the BEST_GT_SCORE.  There will be at least 2 genotype calls separated by a semicolon.  If there are multiple genotype calls present in 1 sample group, they will be delimited with a "+".
 * STATE_USED_OR - Variant State Used to Calculate Observation Ratios - The state used can be 0 (the value of the variant at the variant position in the reference), or a number indicating which of the ALT observations produced the BEST_OR_SCORE.  E.g. if the state '0' was used to compute the scores (indicating the REF state), then (by default) the average observation ratio of each group will be close to either N/N (i.e. the same as the reference) and the other group will be close to 0/N (i.e. different from the reference).
 * GROUP1_SAMPLES - Sample Group 1 Members - A comma-delimited list of sample names belonging to group 1.  Lists of group 1 samples from multiple pairs of sample groups will be colon-delimited.  E.g. For 2 pairs, the value might be: "s1,s2:s6,s7".
@@ -453,6 +453,57 @@ If you wish to filter low-depth samples, use -l.
 
 end_detail
 	 );
+
+my $dp_weight = 100;
+addOption(GETOPTKEY   => 'dp-sort-weight',
+	  TYPE        => 'float',
+	  GETOPTVAL   => \$dp_weight,
+	  DEFAULT     => $dp_weight,
+	  ADVANCED    => 1,
+	  SMRY_DESC   => ('Sort weight for depth scores.'),
+	  DETAIL_DESC => ('Sort weight for depth scores.  This can be any ' .
+			  'positive number.  It is multiplied by the best ' .
+			  'depth score (the values in the BEST_DP_SCORE ' .
+			  'column) and is added to the other weighted scores ' .
+			  '(BEST_OR_SCORE and BEST_GT_SCORE) to determine ' .
+			  '(descending) sort order for the variant rows.  ' .
+			  'All unweighted scores are a value between 0 and ' .
+			  '1.'));
+
+my $gt_weight = 10;
+addOption(GETOPTKEY   => 'gt-sort-weight',
+	  TYPE        => 'float',
+	  GETOPTVAL   => \$gt_weight,
+	  DEFAULT     => $gt_weight,
+	  ADVANCED    => 1,
+	  SMRY_DESC   => ('Sort weight for genotype call scores.'),
+	  DETAIL_DESC => ('Sort weight for genotype call scores.  This can ' .
+			  'be any positive number.  It is multiplied by the ' .
+			  'best genotype call score (the values in the ' .
+			  'BEST_GT_SCORE column) and is added to the other ' .
+			  'weighted scores (BEST_OR_SCORE and BEST_DP_SCORE) ' .
+			  'to determine (descending) sort order for the ' .
+			  'variant rows.  All unweighted scores are a value ' .
+			  'between 0 and 1.'));
+
+my $or_weight = 1;
+addOption(GETOPTKEY   => 'or-sort-weight',
+	  TYPE        => 'float',
+	  GETOPTVAL   => \$or_weight,
+	  DEFAULT     => $or_weight,
+	  ADVANCED    => 1,
+	  SMRY_DESC   => ('Sort weight for observation ratio scores.'),
+	  DETAIL_DESC => ('Sort weight for observation ratio scores.  This ' .
+			  'can be any positive number.  It is multiplied by ' .
+			  'the best observation ratio score (the values in ' .
+			  'the BEST_GT_SCORE column) and is added to the ' .
+			  'other weighted scores (BEST_OR_SCORE and ' .
+			  'BEST_DP_SCORE) to determine (descending) sort ' .
+			  'order for the variant rows.  All unweighted ' .
+			  'observation ratio scores are a value between -1 ' .
+			  'and 1.  Values less than 0 mean that there is ' .
+			  'overlap between the observation ratios in each ' .
+			  'sample group, which acts as a penalty.'));
 
 processCommandLine();
 
@@ -1060,9 +1111,13 @@ while(nextFileCombo())
 				    ('BEST_GT_SCORE','BEST_OR_SCORE') :
 				    ('BEST_OR_SCORE','BEST_GT_SCORE'));
 	foreach my $ordered_rec
-	  (sort {compareWhenZero($b->{BEST_DP_SCORE},$a->{BEST_DP_SCORE}) ||
-		   compareDec($b->{$prim_rank},$a->{$prim_rank}) ||
-		     compareDec($b->{$sec_rank},$a->{$sec_rank})}
+	  (sort {($b->{BEST_DP_SCORE} * $dp_weight +
+		  ($genotype ? $b->{BEST_GT_SCORE} * $gt_weight : 0) +
+		  $b->{BEST_OR_SCORE} * $or_weight) <=>
+		    ($a->{BEST_DP_SCORE} * $dp_weight +
+		     ($genotype ? $a->{BEST_GT_SCORE} * $gt_weight : 0) +
+		     $a->{BEST_OR_SCORE} * $or_weight) ||
+		       $a->{CHROM} cmp $b->{CHROM} || $a->{POS} <=> $b->{POS}}
 	   @{$outputs->{ROW_DATA}})
 	  {
 	    #Print the VCF output
