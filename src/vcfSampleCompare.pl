@@ -25,7 +25,7 @@ setScriptInfo(VERSION => $VERSION,
               LICENSE => 'Copyright 2019',
               HELP    => << 'END_HELP'
 
-This script sorts and filters the variant records of a VCF file (containing data for 2 or more samples) based on the differences in the variant data between samples.  The end result is a file containing the variants that show the biggest difference at the top and variants with no or little difference filtered out.  Think of it as the genetic variant analog of differential gene expression analysis.  It solves the problem of finding "what's different" between (for example) wildtype and mutant samples.
+This script answers the question "What's different?" between my samples. It does this by sorting and filtering the variant records of a VCF file (containing data for 2 or more samples) based on the differences in the variant data between samples. The end result is a file containing the variants that show the biggest difference at the top and variants with no or little difference at the bottom or filtered out. Think of it as the genetic variant analog of a differential gene expression analysis. It solves the problem of finding "what's different" (for example) between wildtype and mutant samples.
 
 Note, this tool does not perform a statistical analysis.  It is only meant to highlight whether differences exist between sample groups of interest.  It is not intended to be used as "proof" that differences between samples are "real" or biologically relevant.
 
@@ -37,7 +37,7 @@ If multiple pairs of sample groups are provided, the pair used to represent the 
 
 If sample groups are not specified, the pair of sample groups leading to the greatest difference is greedily generated.
 
-The primary default sort is the degree of difference in genotype calls between sample groups.  A secondary sort is based on the degree of difference in observation ratios.  If --nogenotype is provided, genotype calls are ignored and output is sorted based on the difference in observation ratios.
+The sort is intended to bring variants whose degree of difference in genotype calls or allelic frequencies between sample groups to the top.
 
 See --help --extended for more details.
 
@@ -51,29 +51,25 @@ Each row in a VCF file will be assumed to represent a variant (or variant positi
 
 SORTING
 
-The primary sort is based on genotype calls (BEST_GT_SCORE).  A secondary sort is applied based on the most discriminating variant state (BEST_OR_SCORE).  The values reported in both columns will always be a value between -1 and 1, or 0 and 1, depending on whether the sample groups are dynamically created or user-defined.  These score columns are intended to reflect the maximum "degree of difference" between sample groups.
+Sorting is based on genotype call scores (BEST_GT_SCORE), observation ratio scores (BEST_OR_SCORE), and read depth scores (BEST_DP_SCORE).  These score columns will always be between 0 and 1*.
+
+When in --nogenotype mode, sorting ignores the BEST_GT_SCORE values.
+
+* When `--gap-measure edge` is supplied, BEST_OR_SCORE can be negative (between -1 and 0) if the observation ratios overlap/mix, i.e. there is no gap separating all observation ratios of 1 group from the other.  A score of -1 is applied when all values in 1 group are bounded by the range of scores in the other group.
 
 SORTING METRICS
 
-The degree of difference between sample groups is based on the degree of difference of the genotype calls or observation ratios between the sample groups reported.  In both cases, the values reflect the maximum degree of difference between the sample groups.
+All 3 scores on which sorting is based (BEST_DP_SCORE, BEST_GT_SCORE, and BEST_OR_SCORE) by default, are weighted in a 100:10:1 ratio, respectively.  The weighted sum of the scores is used for a descending sort.  To alter the weightings, see the --*-sort-weight options in the advanced usage (by running vcfSampleCompare.pl --extended 2).
 
-GENOTYPE MODE
+The degree of difference between sample groups is based on the degree of difference of the genotype calls (BEST_GT_SCORE) and/or observation ratios (BESTOR_SCORE) between the sample groups reported.  In both cases, BEST_GT_SCORE and BEST_OR_SCORE are intended to reflect the maximum "degree of difference" between sample groups.
 
-If run in --genotype mode, the values in the output BEST_GT_SCORE column (see -u) are the primary basis for sorting and reflect the degree of difference in the genotype calls among the members of each sample group.
+However, with regard to BEST_GT_SCORE, by default, scores are treated in a binary fashion.  A pair of sample groups either fully discriminates the 2 sample groups (a score of 1) or not (a score of 0).  See the advanced usage (by running `vcfSampleCompare.pl --extended --extended`) to allow partially discriminating variants using the --minimum-gt-score option.  A score of 0 can either mean that there were differing genotype calls between the sample groups or that none of the samples had a genotype call.  Despite the common score, cases of no data in all samples will be sorted to the bottom of the output.
 
-If all the samples in both groups have genotype calls and all the genotype calls of group 1 differ from all the genotype calls of group 2 (i.e. there are no common calls), the score will be 1.  If there are any common genotype calls between the 2 groups, the score will be 0.
+The scores under the BEST_OR_SCORE column can be calculated in 1 of 2 ways (see --gap-measure), which either treats the collection of observation ratios for a single variant state (e.g. a SNP value of "C") as 2 ranges of separate or overlapping ratios (all between 0 and 1) or a comparison of average observation ratios.  Each variant state is considered independently and the one resulting in the highest BEST_OR_SCORE is the one that is used to represent the row.  Consider SNPs for example.  A SNP can have 1 of 4 values (A, T, G, or C).  One of those is the reference state (RO), which is referred to as state 0.  The other three states are 1, 2, and 3.  For each state, the observation ratios are computed as (RO or AO)/DP for all of the samples.  The state resulting in the highest score (i.e. the largest gap between the 2 ranges of observation ratios) is what is reported under the BEST_GT_SCORE column (see -u).  If there is a tie between RO and one of the AO values, the AO state (1, 2, or 3) is preferred.  For example, if state 1 is the state used to calculate the BEST_OR_SCORE, the ratio for each sample of AO(1)/DP is computed and those values for each group are used to compute the difference between the groups.
 
-If not all the samples in both groups have genotype calls, but the existing calls between the 2 groups differ, the BEST_GT_SCORE will be a value between 0 and 1.
+The BEST_DP_SCORE values are calculated as a degree of adequate depth (see --adequate-depth), where each sample/variant whose DP is at or above the adequate-depth gets a score of 1 and anything less is a value between 0 and 1.
 
-A score of 0 can either mean that there were differing genotype calls between the sample groups or that none of the samples had a genotype call.  Despite the common score, cases of no data in all samples will be sorted to the bottom of the output.
-
-NO-GENOTYPE MODE (A.K.A. OBSERVATION RATIO MODE)
-
-If run in --nogenotype mode, the values in the output BEST_OR_SCORE column (see -u) are the primary basis for sorting and reflect the degree of difference in the observation frequencies (referred to as "allelic frequencies").  Each variant state is considered independently and the one resulting in the highest BEST_OR_SCORE is the one that is used to represent the row.  Consider SNPs for example.  A SNP can have 1 of 4 values (A, T, G, or C).  One of those is the reference state (RO), which is referred to as state 0.  The other three states are 1, 2, and 3.  Each state is considered individually.  For each state, the observation ratios are computed as (RO or AO)/DP for all of the samples.  Depending on the --gap-measure (see the next paragraph), those ratios are compared in 1 of 2 ways.  The state resulting in the highest score is what is reported under the BEST_GT_SCORE column (see -u).  If there is a tie between RO and one of the AO values, the AO state (1, 2, or 3) is preferred.  For example, if state 1 is the state used to calculate the BEST_OR_SCORE, the ratio for each sample of AO(1)/DP is computed and those values for each group are used to compute the difference between the groups.
-
-There are 2 methods (see --gap-measure) to choose from when computing the difference in the sets of observation ratios among the groups: 'mean' and 'edge'.  The 'mean' method takes the absolute difference between the average ratios of each group.  The 'edge' method takes the difference between the 'closest' ratios between the 2 groups.  If the ratios between the 2 groups overlap, the difference will be negative.  If one group's ratios contain the other, the difference will be -1.
-
-If any sample in a group has no depth (DP=0), the score is set to 0 or -1, depending on whther the groups were dynamically generated or user-defined, respectively.
+If run in --nogenotype mode, the values in the BEST_OR_SCORE column of the output (see -u) reflect the only measure of degree of difference in the observation ratios (a.k.a. "allelic frequencies").
 
 SAMPLE GROUP CONSTRUCTION AND ITS EFFECT ON SORTING
 
@@ -114,6 +110,8 @@ Up to 2 --min-group-size's can be supplied, but must not sum to more than the to
 Each grouping is independent for each variant (i.e. each row in the VCF file).  Thus, when groups are dynamically created, each variant/row may be composed of different groups.  The selected groups are intended to represent the binary sample division that represents the greatest difference for that variant between 2 sample groups.  If there are more than 2 types of samples (e.g. multiple treatments and a control), dynamic creation of sample groups can miss significant differences and it is recommended to supply sample groupings in multiple runs of vcfSampleCompare.pl.
 
 The minimum possible score when sample groups are dynamically created is 0, since the groups are created from a list sorted by either the genotype call or observation ratios (thus the difference in those values will always be positive).
+
+Note: Minimum group sizes are dynamically created regardless of whether there exists a sample grouping that would pass the filter.  When --nofilter is supplied, sample groups that fail the filter will have a BEST_GT_SCORE or BEST_OR_SCORE of 0 and the sample grouping and size will be meaningless.
 
 FILTERING
 
@@ -185,7 +183,7 @@ my $sum_oid =
 					 'to -i).  This file can contain a ' .
 					 'row for each variant row in the ' .
 					 'input VCF file, and include the ' .
-					 'sorting value and pairs of sample ' .
+					 'sorting values and pairs of sample ' .
 					 'groups that were identified as ' .
 					 'different.  This file may ' .
 					 'optionally be a filtered version ' .
@@ -193,15 +191,15 @@ my $sum_oid =
 					 '(-i).'),
 			 FORMAT_DESC => << 'END_FORMAT'
 
-Tab delimited file of variants that are sorted by and optionally filtered on degree of difference between 2 pairs of sample groups.  Sorting and filtering is based on the values in the BEST_GT_SCORE and BEST_OR_SCORE columns.  The columns of the file are:
+Tab delimited file of variants that are sorted by and optionally filtered on degree of difference between 2 pairs of sample groups.  Sorting and filtering is based on the values in the BEST_GT_SCORE, BEST_OR_SCORE, and BEST_DP_SCORE columns.  The columns of the file are:
 
 * CHROM - Chromosome - The chromosome on which the variant is located.
 * POS - Position - The position starting from 1 where the variant is located.
 * REF - Reference Value - The value the reference has in the variant position.
 * ALT - Alternate Value(s) - The value(s) observed in the samples in the variant position.
 * BEST_PAIR - Best Sample Group Pair Number - The sample group pair's number (numbered from left to right, as they were supplied on the command line) for the pair that resulted in the biggest difference in variant states between the sample groups.  If -s was not used to pre-define sample groups, this value will always be 1, though each row's pair of sample groups selected will be independent.
-* BEST_GT_SCORE - Best Genotype Score - The value the primary sorting criteria is based on, which is the maximum PAIR_GT_SCORE.
-* BEST_OR_SCORE - Best Observation Ratio Score - The value the secondary sorting criteria is based on, which is the maximum PAIR_OR_SCORE.
+* BEST_GT_SCORE - Best Genotype Score - The maximum PAIR_GT_SCORE.  Values are between 0 and 1.  A score of 1 means that all members of both sample groups have genotype calls and there are no common genotype calls between the members of the pair of sample groups.  See `--help --extended` for an explanation  of lesser scores.
+* BEST_OR_SCORE - Best Observation Ratio Score - The maximum PAIR_OR_SCORE.  Values are between 0 and 1 (when --gap-measure is "mean") or -1 and 1 (when --gap-measure is "edge").  See `--help --extended` for more details.
 * BEST_DP_SCORE - Best Depth Score - The read depth score of the best sample group pair.  The read depth score of the best pair is based on the lower average read depth of the 2 sample groups in the pair.  See the usage for -x and -l to see how the score is calculated.
 * PAIR_NUM - Pair Number - A colon-delimited list of numbers indicating the pair of sample groups the sort and filtering is based on.
 * PAIR_GT_SCORE - Pair Genotype Score - A colon-delimited list of each sample group pair's maximum GT score.

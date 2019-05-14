@@ -98,6 +98,8 @@ In --genotype mode, you can use --min-group-size as a reporting threshold.  Ther
 
 In --nogenotype mode the threshold is the combination of --separation-gap and --min-group-size.  If the difference in the observation ratios between the minimum-size sample groups is less than the separation gap threshold, the row will not be printed.
 
+Note: Minimum group sizes are dynamically created regardless of whether there exists a sample grouping that would pass the filter.  When --nofilter is supplied, sample groups that fail the filter will have a BEST_GT_SCORE or BEST_OR_SCORE of 0 and the sample grouping and size will be meaningless.
+
 ### EXAMPLE
 
 To sort based on the degree of difference between specific groups of samples, those groups can be defined on the command line using --sample-group/-s.  You can specify a minimum number of samples in the groups to differ.  So for example, say you have 3 wildtype (WT) replicates and you would like to see differences that all 3 WT samples have with any one of a set of 10 mutant samples.  You would do that on the command line using the sample names:
