@@ -9093,7 +9093,8 @@ sub debug
 	       (defined($verbose) && $verbose &&
 		defined($last_verbose_state) &&
 		$last_verbose_state ?
-		' ' x ($last_verbose_size - $debug_length) : ''),
+		' ' x (($last_verbose_size - $debug_length) < 0 ? 0 :
+		       ($last_verbose_size - $debug_length)) : ''),
 	       "\n"));
     my $simple_string =
       join('',($simple_leader,

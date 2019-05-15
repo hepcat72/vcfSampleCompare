@@ -16,7 +16,7 @@ use warnings;
 use strict;
 use CommandLineInterface;
 
-our $VERSION = '2.011';
+our $VERSION = '2.012';
 setScriptInfo(VERSION => $VERSION,
               CREATED => '6/22/2017',
               AUTHOR  => 'Robert William Leach',
@@ -669,13 +669,14 @@ while(nextFileCombo())
 
     openIn(*IN,$inputFile)     || next;
 
-    my $line_num  = 0;
-    my @samples   = ();
+    my $line_num          = 0;
+    my @samples           = ();
     my $orig_sample_order = {};
-    my $data_line = 0;
-    my $outputs   = {HEADER_LINES  => '',
-		     COMMENT_LINES => '',
-		     ROW_DATA      => []};
+    my $data_line         = 0;
+    my $outputs           = {HEADER_LINES  => '',
+			     COMMENT_LINES => '',
+			     ROW_DATA      => []};
+    my $pair_hash         = {};
 
     while(getLine(*IN))
       {
@@ -958,7 +959,7 @@ while(nextFileCombo())
 	  }
 
 	my $anything_passed = 0;
-	my $group_pair_rule = 0;
+	my $pair_num        = 0;
 	my $rank_data       = [];
 	my $best_gt_score   = -2;
 	my $best_or_score   = -2;
@@ -966,7 +967,11 @@ while(nextFileCombo())
 	my $best_pair       = '.';
 	foreach my $pair_index (grep {$_ % 2 == 0} (0..$#tmp_sample_groups))
 	  {
-	    $group_pair_rule++;
+	    if($dynamic_group_creation)
+	      {$pair_num = 0}
+	    else
+	      {$pair_num++}
+
 	    my $set1     = [@{$tmp_sample_groups[$pair_index]}];
 	    my $set1_min = $group_diff_mins->[$pair_index];
 	    my $set2     = [@{$tmp_sample_groups[$pair_index + 1]}];
@@ -1019,6 +1024,20 @@ while(nextFileCombo())
 						      $min_group2,
 						      $sample_info);
 
+		my $sub_pair_num = '';
+		#If any score is greater than the lowest score possible, assign
+		#a sub-pair number.  We don't want to assign IDs to meaningless
+		#pairs that were forcibly & arbitrarily created.
+		if($scoring_data->{GT_SCORE} > 0 ||
+		   (($dynamic_group_creation &&
+		     $scoring_data->{OR_SCORE} > 0) ||
+		    (!$dynamic_group_creation &&
+		     $scoring_data->{OR_SCORE} > -1)) ||
+		   $scoring_data->{DP_SCORE} > 0)
+		  {$sub_pair_num = '.' . getSubPairNum($min_group1,
+						       $min_group2,
+						       $pair_hash)}
+
 		debug("Group 1: [@$min_group1] Group 2: [@$min_group2]\n",
 		      "GT Score: $scoring_data->{GT_SCORE}\n",
 		      "OR Score: $scoring_data->{OR_SCORE}\n",
@@ -1033,7 +1052,7 @@ while(nextFileCombo())
 			$best_gt_score = $scoring_data->{GT_SCORE};
 			$best_or_score = $scoring_data->{OR_SCORE};
 			$best_dp_score = $scoring_data->{DP_SCORE};
-			$best_pair     = $group_pair_rule;
+			$best_pair     = "$pair_num$sub_pair_num";
 		      }
 		  }
 		else
@@ -1045,12 +1064,12 @@ while(nextFileCombo())
 			$best_gt_score = $scoring_data->{GT_SCORE};
 			$best_or_score = $scoring_data->{OR_SCORE};
 			$best_dp_score = $scoring_data->{DP_SCORE};
-			$best_pair     = $group_pair_rule;
+			$best_pair     = "$pair_num$sub_pair_num";
 		      }
 		  }
 
 		push(@$rank_data,
-		     {RULE_NUM   => $group_pair_rule,               #int
+		     {PAIR_NUM   => "$pair_num$sub_pair_num",      #float-like
 
 		      SAMPLES1   => $min_group1,                    #array rf
 		      SAMPLES2   => $min_group2,                    #array rf
@@ -1140,7 +1159,7 @@ while(nextFileCombo())
 
 		       #Next column's a colon-delimited list of passing rule 
 		       #numbers
-		       join(':',map {$_->{RULE_NUM}}
+		       join(':',map {$_->{PAIR_NUM}}
 			    @{$ordered_rec->{RANK_DATA}}),"\t",
 
 		       #Next column is a colon-delimited list of each rule's
@@ -2737,4 +2756,29 @@ sub isUnsignedInteger
 
     return(0);
 
+  }
+
+sub getSubPairNum
+  {
+    my $group1    = [sort(@{$_[0]})];
+    my $group2    = [sort(@{$_[1]})];
+    my $pair_hash = $_[2];
+
+    my $num = 1;
+    my($lesser_group,$greater_group) = ($group1->[0] lt $group2->[0] ?
+					($group1,$group2) : ($group2,$group1));
+    my $key = join('_X_',@$lesser_group) . '_Y_' . join('_Z_',@$greater_group);
+    if(scalar(keys(%$pair_hash)) == 0)
+      {%$pair_hash = (LAST => 1,
+		      LKUP => {$key => 1})}
+    elsif(exists($pair_hash->{LKUP}->{$key}))
+      {$num = $pair_hash->{LKUP}->{$key}}
+    else
+      {
+	$pair_hash->{LAST}++;
+	$pair_hash->{LKUP}->{$key} = $pair_hash->{LAST};
+	$num = $pair_hash->{LAST};
+      }
+
+    return($num);
   }
