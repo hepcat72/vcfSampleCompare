@@ -197,11 +197,11 @@ Tab delimited file of variants that are sorted by and optionally filtered on deg
 * POS - Position - The position starting from 1 where the variant is located.
 * REF - Reference Value - The value the reference has in the variant position.
 * ALT - Alternate Value(s) - The value(s) observed in the samples in the variant position.
-* BEST_PAIR - Best Sample Group Pair Number - The sample group pair's number (numbered from left to right, as they were supplied on the command line) for the pair that resulted in the biggest difference in variant states between the sample groups.  If -s was not used to pre-define sample groups, this value will always be 1, though each row's pair of sample groups selected will be independent.
+* BEST_PAIR - Best Sample Group Pair ID - The sample group pair's number (numbered from left to right, as they were supplied on the command line) for the pair that resulted in the biggest difference in variant states between the sample groups.  A sub-ID (appended with a dot) is applied for each unique set of samples included in a pair.  If -s was not used to pre-define sample groups, this value will always be 0, though each row's pair of sample groups selected will be independent.
 * BEST_GT_SCORE - Best Genotype Score - The maximum PAIR_GT_SCORE.  Values are between 0 and 1.  A score of 1 means that all members of both sample groups have genotype calls and there are no common genotype calls between the members of the pair of sample groups.  See `--help --extended` for an explanation  of lesser scores.
 * BEST_OR_SCORE - Best Observation Ratio Score - The maximum PAIR_OR_SCORE.  Values are between 0 and 1 (when --gap-measure is "mean") or -1 and 1 (when --gap-measure is "edge").  See `--help --extended` for more details.
 * BEST_DP_SCORE - Best Depth Score - The read depth score of the best sample group pair.  The read depth score of the best pair is based on the lower average read depth of the 2 sample groups in the pair.  See the usage for -x and -l to see how the score is calculated.
-* PAIR_NUM - Pair Number - A colon-delimited list of numbers indicating the pair of sample groups the sort and filtering is based on.
+* PAIR_ID - Pair ID - A colon-delimited list of IDs indicating the pair of sample groups the sort and filtering is based on (numbered from left to right, as they were supplied on the command line), with a dot-appended sub-ID indicating the unique set of samples included in the pair.  Each unique set of samples gets its own ID, assigned in the order encountered.  The sub-ID is independent of the parent pair ID.
 * PAIR_GT_SCORE - Pair Genotype Score - A colon-delimited list of each sample group pair's maximum GT score.
 * PAIR_OR_SCORE - Pair Observation Ratio Score - A colon-delimited list of each sample group pair's maximum observation ratio score.
 * PAIR_DP_SCORE - Pair Read Depth Score - A colon-delimited list of each sample group pair's read depth score.  The read depth score for each pair is based on the lower average read depth of the 2 sample groups in the pair.  See the usage for -x and -l to see how the score is calculated.
@@ -216,7 +216,7 @@ Tab delimited file of variants that are sorted by and optionally filtered on deg
 
 Example:
 
-    #CHROM	POS	ID	REF	ALT	BEST_PAIR	BEST_GT_SCORE	BEST_OR_SCORE	BEST_DP_SCORE	PAIR_NUM	PAIR_GT_SCORE	PAIR_OR_SCORE	PAIR_DP_SCORE	STATES_USED_GT	STATE_USED_OR	GROUP1_SAMPLES	GROUP1_GTS	GROUP1_ORS	GROUP2_SAMPLES	GROUP2_GTS	GROUP2_ORS
+    #CHROM	POS	ID	REF	ALT	BEST_PAIR	BEST_GT_SCORE	BEST_OR_SCORE	BEST_DP_SCORE	PAIR_ID	PAIR_GT_SCORE	PAIR_OR_SCORE	PAIR_DP_SCORE	STATES_USED_GT	STATE_USED_OR	GROUP1_SAMPLES	GROUP1_GTS	GROUP1_ORS	GROUP2_SAMPLES	GROUP2_GTS	GROUP2_ORS
     Chromosome	6610	.	C	G	1	1	1	408	1	1	1	408	1;0	1	sample1	1	254/254	sample2,sample3	0,0	0/407,0/564
     Chromosome	10723	.	C	G	1	1	1	111	1	1	1	111	1;0	1	sample1	1	39/39	sample2,sample3	0,0	0/78,0/216
     Chromosome	10843	.	T	C	1	1	1	33	1	1	1	33	1;0	1	sample1	1	8/8	sample2,sample3	0,0	0/25,0/67
@@ -1069,7 +1069,7 @@ while(nextFileCombo())
 		  }
 
 		push(@$rank_data,
-		     {PAIR_NUM   => "$pair_num$sub_pair_num",      #float-like
+		     {PAIR_ID    => "$pair_num$sub_pair_num",      #float-like
 
 		      SAMPLES1   => $min_group1,                    #array rf
 		      SAMPLES2   => $min_group2,                    #array rf
@@ -1117,7 +1117,7 @@ while(nextFileCombo())
       {print VCFO ($outputs->{HEADER_LINES})}
 
     print OUT ("#CHROM\tPOS\tID\tREF\tALT\tBEST_PAIR\tBEST_GT_SCORE\t",
-	       "BEST_OR_SCORE\tBEST_DP_SCORE\tPAIR_NUM\tPAIR_GT_SCORE\t",
+	       "BEST_OR_SCORE\tBEST_DP_SCORE\tPAIR_ID\tPAIR_GT_SCORE\t",
 	       "PAIR_OR_SCORE\tPAIR_DP_SCORE\tSTATES_USED_GT\tSTATES_USED_OR\t",
 	       "GROUP1_SAMPLES\tGROUP1_GTS\tGROUP1_ORS\tGROUP2_SAMPLES\t",
 	       "GROUP2_GTS\tGROUP2_ORS\n");
@@ -1159,7 +1159,7 @@ while(nextFileCombo())
 
 		       #Next column's a colon-delimited list of passing rule 
 		       #numbers
-		       join(':',map {$_->{PAIR_NUM}}
+		       join(':',map {$_->{PAIR_ID}}
 			    @{$ordered_rec->{RANK_DATA}}),"\t",
 
 		       #Next column is a colon-delimited list of each rule's
