@@ -16,7 +16,7 @@ use warnings;
 use strict;
 use CommandLineInterface;
 
-our $VERSION = '2.012';
+our $VERSION = '2.013';
 setScriptInfo(VERSION => $VERSION,
               CREATED => '6/22/2017',
               AUTHOR  => 'Robert William Leach',
@@ -914,9 +914,15 @@ while(nextFileCombo())
 	    #Create easy access to the sample info by creating a hash like:
 	    #sample_info->{$samplename}->{GT} = value
 	    $sample_info->{$sample} =
-	      {map {$_ => $d[$format_key_tosubindex->{$_}]}
+	      {map {$_ => ($d[$format_key_tosubindex->{$_}] eq '.' &&
+			   $_ ne 'GT' ? 0 : $d[$format_key_tosubindex->{$_}])}
 	       keys(%$format_key_tosubindex)};
 	    $orig_sample_order->{$sample} = $sample_index;
+
+	    #Let's add ALT, because if data was merged from multiple runs,
+	    #different samples will have comma-delimited AO values while others
+	    #will have a single '.' even though there may be multiple ALT values
+	    $sample_info->{$sample}->{ALT} = $cols[4];
 	  }
 
 	#Quick error check.  There must be either 0 or scalar(@$group_diff_mins)
@@ -1614,6 +1620,9 @@ sub createStaticMinSampleGroupPair
 	my $best_remainder1 = [];
 	my $best_remainder2 = [];
 	my $best_gap        = 0;
+
+	debug("Variant (AO/RO) keys: [",join(',',@variant_states),"].",
+	      {LEVEL => 3});
 
 	foreach my $state (@variant_states)
 	  {
@@ -2661,40 +2670,59 @@ sub expandSampleInfo
   {
     my $sample_info          = $_[0];
     my $expanded_sample_info = {};
-    my $ao_keys              = [];
+    my $ao_keys              = {};
 
     foreach my $sample (keys(%$sample_info))
       {
+	my @real_alts = split(/,/,$sample_info->{$sample}->{ALT},-1);
+
 	foreach my $key (keys(%{$sample_info->{$sample}}))
 	  {
-	    my $val = $sample_info->{$sample}->{$key};
+	    my $val  = ($sample_info->{$sample}->{$key} eq '.' && $key ne 'GT' ?
+			0 : $sample_info->{$sample}->{$key});
 	    my @alts = split(/,/,$val,-1);
+
+	    if(scalar(@alts) != 1 && ($key eq 'RO' || $key eq 'DP'))
+	      {error("Multiple values found in $key key [$val].",
+		     {DETAIL => ('This script assumes that the FORMAT ' .
+				 'keys "DP" and "RO" each have a single ' .
+				 '(comma-delimited) value, but found more ' .
+				 'than 1.')})}
+	    elsif($key eq 'AO' && scalar(@real_alts) != 1 &&
+		  scalar(@alts) == 1 && $val ne '.' && $val ne '0')
+	      {
+		error("Single value found in $key key [$val] but multiple ALT ",
+		      "values: [$sample_info->{$sample}->{ALT}].  Cannot ",
+		      "associate it with an ALT state.  Setting zeroes.",
+		      {DETAIL => ('Multiple ALT values must map to the same ' .
+				  'number of observation values for key ' .
+				  "$key.")});
+		@alts = map {0} @real_alts;
+	      }
+	    elsif($key eq 'AO' && scalar(@real_alts) != 1 &&
+		  scalar(@alts) == 1 && ($val eq '.' || $val eq '0'))
+	      {@alts = map {0} @real_alts}
+
 	    if(scalar(@alts) == 1)
 	      {
 		$expanded_sample_info->{$sample}->{$key} = $val;
-		if($key eq 'AO' && scalar(@$ao_keys) == 0)
-		  {push(@$ao_keys,'AO')}
+		if($key eq 'AO')
+		  {$ao_keys->{AO}++}
 	      }
 	    else
 	      {
-		if($key eq 'RO' || $key eq 'DP')
-		  {
-		    error("Multiple values found in $key key [$val].",
-			  {DETAIL => 'This script assumes that the FORMAT ' .
-			   'keys "DP" and "RO" each have a single (comma-' .
-			   'delimited) value, but found more than 1.'});
-		  }
-
-		if($key eq 'AO' && scalar(@$ao_keys) == 0)
-		  {push(@$ao_keys,map {"AO$_"} (1..scalar(@alts)))}
+		if($key eq 'AO')
+		  {foreach my $key (map {"AO$_"} (1..scalar(@alts)))
+		     {$ao_keys->{$key}++}}
 
 		for(my $i = 0;$i <= $#alts;$i++)
-		  {$expanded_sample_info->{$sample}->{$key .($i+1)} = $alts[$i]}
+		  {$expanded_sample_info->{$sample}->{$key .($i+1)} =
+		     ($alts[$i] eq '.' && $key ne 'GT' ? 0 : $alts[$i])}
 	      }
 	  }
       }
 
-    return($expanded_sample_info,$ao_keys);
+    return($expanded_sample_info,[sort(keys(%$ao_keys))]);
   }
 
 sub max

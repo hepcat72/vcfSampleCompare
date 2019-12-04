@@ -1004,6 +1004,76 @@ testaf4(#Test description
 	0);
 
 
+TEST12:
+
+#Describe the test
+$test_num++;
+$sub_test_num = 1;
+$reqnum = '23';
+
+$inf1  = 'inputs/mixed_dots.vcf';
+
+$tdir  = "$outd/TEST$test_num";
+$rvcf = ".vsc";
+$vcf  = ".vsc.vcf";
+$outf1 = "$tdir/" . basename($inf1) . $rvcf;
+$outf2 = "$tdir/" . basename($inf1) . $vcf;
+
+$expf1 = "expected/test$test_num$rvcf";
+$expf2 = "expected/test$test_num$vcf";
+
+
+testaf4(#Test description
+	$test_num,
+	$sub_test_num,
+	$reqnum,
+	"bcftools merge fix relating to single dots for multiple ALT values",
+
+	$in_script,
+        $outd,
+
+	#Input files (to make sure they pre-exist)
+	[$inf1],
+	#Supply the first input file on standard in
+	0,
+
+	#Output files (they will be deleted if they pre-exist)
+	[$outf1,$outf2],
+	#Don't delete these pre-existing outfiles before test (e.g. if you want
+	#to test overwrite protection & created them on purpose)
+	[],
+
+	#Options to supply to the test script on command line in 1 string
+	"--outdir '$tdir' -u $rvcf -o $vcf --noheader -s '147_93B 149_93D' " .
+	"-d '2' -s '151_93F 153_93H' -d '1' --nogenotype --filter --grow $inf1",
+
+	#Names of files expected to NOT be created. Supply undef if not testing.
+	[],
+
+	#Exact expected stdout & stderr files.  Supply undef if no test.
+	undef,undef,
+	#Exact expected output files.  Must be the same size as the output files
+	#array above.  Supply undef if not testing.
+	[$expf1,$expf2],
+
+	#Patterns expected in string output for stdout & stderr.  Supply undef
+	#if not testing.
+	undef,undef,
+	#Patterns expected in string output for o1, o2, ...  Supply undef if not
+	#testing.
+	[undef,undef],
+
+	#Patterns not expected in string output for stdout & stderr.  Supply
+	#undef if not testing.
+        undef,'(ERROR|WARNING)\d+:',
+	#Patterns not expected in string output for o1, o1, ...  Supply undef if
+	#not testing.
+        [undef,undef],
+
+	#Exit code (0 = success, 1 = error: means any non-0 value is expected)
+	0);
+
+
 
 
 
