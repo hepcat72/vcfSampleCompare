@@ -13858,10 +13858,7 @@ sub amIRedirectedTo
 	$script =~ s/^.*\/([^\/]+)$/$1/;
 	my $scriptpat = quotemeta($script);
 
-	##EDIT: Added requirement that the infile from lsof not match
-	##      AppendToPath so that tests would pass using MacOS system perl.
-	##      I should make this update to CLI, or a better update.
-	if($infile !~ m%/$scriptpat$% && $infile !~ m%/AppendToPath%)
+	if($infile !~ m%/$scriptpat$%)
 	  {return(1)}
       }
 
