@@ -26,8 +26,19 @@ use strict;
 use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev);
 use File::Glob ':glob';
 
+#Constants to track stages of command line processing
+use constant {CALLED    => 1,
+              STARTED   => 1,
+              DECLARED  => 2,
+              DEFAULTED => 3,
+              ARGSREAD  => 4,
+              VALIDATED => 5,
+              COMMITTED => 6,
+              LOGGING   => 7,
+              DONE      => 8};
+
 our
-  $VERSION = '4.135.1';
+  $VERSION = '5.004';
 our($compile_err);
 
 #Basic script info
@@ -42,53 +53,63 @@ my($script_version_number,
 #Variables that are not directly controlled by the command line
 my($default_stub,
    $preserve_args,
+   $active_args,
    $defaults_dir,
    $error_limit_default);
 
+#Run mode options
+my($help,
+   $dry_run,
+   $run,
+   $version,
+   $usage,
+
+   $def_help,
+   $def_dry_run,
+   $def_run,
+   $def_version,
+   $def_usage);
+
 #Standard variables controlled by the command line
 my($header,
-   $user_collide_mode,  #Overrides everything
+   $user_collide_mode,  #Overrides all option collision modes
    $error_limit,
-   $help,
    $extended,
-   $extended_def,
-   $version,
    $overwrite,
-   $overwrite_def,
    $skip_existing,
    $append,
-   $dry_run,
    $verbose,
-   $verbose_def,
    $quiet,
    $DEBUG,
-   $DEBUG_def,
    $force,
-   $force_def,
-   $pipeline_mode_def,
-   $pipeline_mode,
+   $pipeline,
+   $pipeline_auto,
    $use_as_default);
 
 #Variables controlled by the command line, but are user-configurable
 my($outfile_suffix_array,
    $input_files_array,
-   $default_infiles_array,
-   $outdirs_array,
-   $default_outdirs_array,
-   $array_defaults_hash);
+   $outdirs_array);
 
 #Variables for tracking the command line params, input files, and output_files
 my($GetOptHash,
+   $getopt_default_mode,
    $input_file_sets,
    $output_file_sets);
 
 #Former global variables converted to package variables
 my($stderr_buffer,
+   $flushing,
+   $last_flush_error,
+   $last_flush_warning,
    $verbose_freq_hash,
    $last_verbose_size,
    $last_verbose_state,
    $verbose_warning,
    $error_number,
+   $error_limit_met,
+   $cli_error_num,
+   $num_setup_errors,
    $error_hash,
    $warning_number,
    $warning_hash,
@@ -102,74 +123,87 @@ my($stderr_buffer,
    $header_str);
 
 #New variables for tracking internal workings of the code
-#All 1D arrays of indexes except required_suffix_types which holds arrays of 3
-#indexes (a $required_infile_types index, the index of the suffix, and the
-#suffix ID)
-my($required_infile_types,
-   $required_suffix_types,
-   $required_outfile_types,
-   $required_outdirs,
-   $required_opt_refs,
-   $required_relationships,
-   $outdirs_added,
-   $accepts_hash,
-   $primary_infile_type,       #Index into input_files_array
-   $exp_nonprimary_inf_types,  #Explicitly-set non-primary infile types hash
-   $flagless_multival_type,    #Index into usage_array
+my($outdirs_added,
+   $primary_infile_optid,      #Index into usage_array
+   $flagless_multival_optid,   #Index into usage_array
    $usage_array,
    $usage_lookup,
-   $infile_flag_array,
-   $suffix_flag_array,
-   $outdir_flag_array,
-   $general_flag_hash,
-   $suffix_id_lookup,
-   $suffix_primary_vals,
+   $unique_refs_hash,
    $file_set_num,
    $max_set_num,
    $unproc_file_warn,
-   $file_returned_before,
+   $optval_returned_before,
    $auto_file_iterate,
-   $command_line_processed,    #Whether GetOptions has run
-   $processCommandLine_called, #Whether processCommandLine has been called
-   $usage_file_indexes,
+   $command_line_stage,
    $outfile_types_hash,
    $outfile_tagteams,
-   $tagteam_to_supplied_oid,
-   $collid_modes_array,
+   $tagteam_to_supplied_optid,
    $def_collide_mode,          #Used if not specified per outfile type
    $def_collide_mode_suff,
    $def_collide_mode_outf,
+   $def_collide_mode_logf,
    $outfile_mode_lookup,
    $default_infile_added,
    $default_outfile_suffix_added,
    $default_outfile_added,
    $default_outdir_added,
    $default_tagteam_added,
+   $logfile_added,
+   $logfile_default_added,
+   $logfile_suffix_added,
    $default_infile_opt,
    $default_outfile_suffix_opt,
    $default_outfile_opt,
    $default_outdir_opt,
-   $default_outfile_id,
-   $default_outfile_suffix_id,
+   $default_logfile_opt,
+   $default_logfile_suffix_opt,
+   $default_outfile_optid,
+   $default_suffix_optid,
+   $dispdef_max,
+   $logfile_optid,
+   $logfile_suffix_optid,
    $file_group_num,
    $explicit_quit,
    $cleanup_mode,
-   $run,
-   $usage,
-   $explicit_run,
-   $explicit_dry_run,
-   $explicit_help,
-   $explicit_usage,
    $flag_check_hash,
-   $default_run_mode,
-   $inf_to_usage_hash,
-   $outf_to_usage_hash,
+   $bad_user_opts,              #Records option hashes of invalid user defaults
+   $file_indexes_to_usage,
+
    $genopt_types,
    $fileopt_types,
+
+   $scalar_genopt_types,
+   $array_genopt_types,
+   $array2d_genopt_types,
+
+   $scalar_fileopt_types,
+   $array2d_fileopt_types,
+
+   $scalaropt_types,
+   $array2dopt_types,
+
    $window_width,
    $window_width_def,
    $pipe_cache,
-   $lsof_cache);
+   $lsof_cache,
+   $lsof_debugged,
+   $runreport,
+   $log_handle,
+   $logging,
+   $log_verbose,
+   $log_debug,
+   $log_warnings,
+   $log_errors,
+   $log_header,
+   $log_report,
+   $log_mirror,
+   $def_option_hash,
+   $exclusive_options,
+   $exclusive_lookup,
+   $mutual_params,
+   $builtin_mutexes,
+   $builtin_add_failures,
+   $builtin_edit_failures);
 
 sub _init
   {
@@ -179,14 +213,60 @@ sub _init
 	(scalar(@ARGV) && scalar(@$preserve_args) &&
 	 $ARGV[0] ne $preserve_args->[0])))
       #Restore ARGV which is assumed to have been manipulated by GetOptions
-      {@ARGV               = @$preserve_args}
+      {@ARGV = @$preserve_args}
     else
       #Save the command line arguments before they are processed
-      {$preserve_args      = [@ARGV]}
+      {$preserve_args = [map {chomp;$_} @ARGV]}
+    #Get all the args before '--'
+    my $stop     = 0;
+    $active_args = [grep {$stop = 1 if($_ eq '--');!$stop} @$preserve_args];
+
+
+    #Set buffer-related vars 1st in case any errors are encountered during init
+    $command_line_stage        = 0;
+    $getopt_default_mode       = undef;
+    $stderr_buffer             = undef;
+    $flushing                  = 0;
+    $last_flush_error          = undef;
+    $last_flush_warning        = undef;
+    $verbose_freq_hash         = undef;
+    $last_verbose_size         = undef;
+    $last_verbose_state        = undef;
+    $verbose_warning           = undef;
+    $error_number              = undef;
+    $error_limit_met           = 0;
+    $cli_error_num             = undef;
+    $num_setup_errors          = 0;
+    $error_hash                = undef;
+    $warning_number            = undef;
+    $warning_hash              = undef;
+    $infile_line_buffer        = undef;
+    $debug_number              = undef;
+    $time_marks                = undef;
+    $open_out_handles          = undef;
+    $rejected_out_handles      = undef;
+    $closed_out_handles        = undef;
+    $open_in_handles           = undef;
+    $header_str                = undef;
+    $window_width              = undef;
+    $window_width_def          = 80;
+    $pipe_cache                = undef;
+    $lsof_cache                = undef;
+    $lsof_debugged             = 0;
+    $runreport                 = 1;
+    $log_handle                = undef;
+    $logging                   = undef;
+    $log_verbose               = undef;
+    $log_debug                 = undef;
+    $log_warnings              = undef;
+    $log_errors                = undef;
+    $log_header                = undef;
+    $log_report                = undef;
+    $log_mirror                = undef;
 
     #Basic script info
-    $script_version_number = undef;
-    $created_on_date       = undef;
+    $script_version_number = 'unknown';
+    $created_on_date       = 'UNKNOWN';
     $help_summary          = undef;
     $advanced_help         = undef;
     $script_author         = undef;
@@ -195,18 +275,15 @@ sub _init
     $script_license        = undef;
 
     #Set some early defaults
-    $defaults_dir          = (sglob('~/.rpst'))[0];
+    $defaults_dir          = (sglob('~/.rpst',1))[0];
     $default_stub          = 'STDIN';
     $error_limit_default   = 5;
-    $header                = 1;
+    $header                = undef;
 
     #These need to be initialized for later
     $outfile_suffix_array  = [];
     $input_files_array     = [];
-    $default_infiles_array = [];
     $outdirs_array         = [];
-    $default_outdirs_array = [];
-    $array_defaults_hash   = {};
     $GetOptHash            = {};
     $input_file_sets       = [];
     $output_file_sets      = [];
@@ -215,180 +292,555 @@ sub _init
     $user_collide_mode     = undef; #This has to be undef to know if user-set
     $def_collide_mode      = undef; #This has to be undef to know if prog-set
     $error_limit           = undef;
-    $help                  = undef;
     $extended              = undef;
-    $extended_def          = undef;
-    $version               = undef;
     $overwrite             = undef;
-    $overwrite_def         = undef;
     $skip_existing         = undef;
     $append                = undef;
-    $run                   = undef;
-    $dry_run               = undef;
     $verbose               = undef;
-    $verbose_def           = undef;
     $quiet                 = undef;
     $DEBUG                 = undef;
-    $DEBUG_def             = undef;
     $force                 = undef;
-    $force_def             = undef;
-    $pipeline_mode_def     = undef;
-    $pipeline_mode         = undef;
+    $pipeline              = undef;
+    $pipeline_auto         = undef;
     $use_as_default        = undef;
 
+    #Run mode options - only 1 can be non-zero
+    $usage                 = undef;
+    $help                  = undef;
+    $run                   = undef;
+    $dry_run               = undef;
+    $version               = undef;
+
+    $def_usage             = 1;
+    $def_help              = 0;
+    $def_run               = 0;
+    $def_dry_run           = 0;
+    $def_version           = 0;
+
     #Initialize the default command line params
-    $GetOptHash =
-      {
-       'overwrite:+'          => \$overwrite,                #OPTIONAL [Off]
-       'skip'                 => \$skip_existing,            #OPTIONAL [Off]
-       'append'               => \$append,                   #OPTIONAL [Off]
-       'force:+'              => \$force,                    #OPTIONAL [Off]
-       'verbose:+'            => \$verbose,                  #OPTIONAL [Off]
-       'quiet'                => \$quiet,                    #OPTIONAL [Off]
-       'debug:+'              => \$DEBUG,                    #OPTIONAL [Off]
-       'extended:+'           => \$extended,                 #OPTIONAL [Off]
-       'version'              => \$version,                  #OPTIONAL [Off]
-       'header!'              => \$header,                   #OPTIONAL [On]
-       'error-limit=i'        => \$error_limit,              #OPTIONAL [5]
-       'save-args'            => \$use_as_default,           #OPTIONAL [Off]
-       'collision-mode=s'     => \$user_collide_mode,        #OPTIONAL [error]
-       'pipeline!'            => \$pipeline_mode,            #OPTIONAL [auto]
-
-       #The presentation of these options varies, but they're always recognized
-       #so that the user can set an alternative default run mode.  Thus they
-       #are set here, but also get added by addRunModeOptions along with case-
-       #specific settings.  Detection of duplicate options is suppressed for
-       #these options.  * Default values are determined at run-time.
-
-       'help'                 => \$explicit_help,            #OPTIONAL [*]
-       'usage'                => \$explicit_usage,           #OPTIONAL [*]
-       'run'                  => \$explicit_run,             #OPTIONAL [*]
-       'dry-run'              => \$explicit_dry_run,         #OPTIONAL [*]
-      };
-
-    $required_infile_types        = [];
-    $required_suffix_types        = [];
-    $required_outfile_types       = [];
-    $required_outdirs             = 0;
-    $required_opt_refs            = [];
-    $required_relationships       = []; #Array of arrays: [[id1,id2,'1:M'],...]
-    $accepts_hash                 = {}; #A hash of array of scalars
-    $primary_infile_type          = undef;
-    $exp_nonprimary_inf_types     = {};
-    $flagless_multival_type       = undef;
+    $GetOptHash                   = {};
+    $primary_infile_optid         = undef;
+    $flagless_multival_optid      = undef;
     $usage_array                  = [];
     $usage_lookup                 = {};
-    $infile_flag_array            = []; #[file type index] = primary flag
-    $suffix_flag_array            = []; #[suffix id] = primary flag
-    $outdir_flag_array            = []; #[dir type index] = primary flag
-    $general_flag_hash            = {}; #{variable reference} = primary flag
-    $suffix_id_lookup             = []; #[suffix_id] = [file_type_index,
-                                        #               suffix_index]
-    $suffix_primary_vals          = []; #Like the outfile_suffix_array, only
-                                        #primary values for suffixes. Internal
-                                        #use only
+    $unique_refs_hash             = {}; #{variable reference} = primary flag
     $file_set_num                 = undef;
     $max_set_num                  = undef;
     $unproc_file_warn             = 1;
-    $file_returned_before         = {};
+    $optval_returned_before       = {};
     $auto_file_iterate            = 1;  #0=false,non-0=true. See nextFileCombo
-    $command_line_processed       = 0;
-    $processCommandLine_called    = 0;
-    $usage_file_indexes           = [];
     $outfile_types_hash           = {};
-    $outfile_tagteams             = {}; #id=>{SUFFID/OUTFID/PRIMARY/REQUIRED...
-    $tagteam_to_supplied_oid      = {};
-    $collid_modes_array           = [];
+    $outfile_tagteams             = {}; #id=>{SUFFOPTID/OTSFOPTID/PRIMARY/REQ..}
+    $tagteam_to_supplied_optid    = {};
     $outfile_mode_lookup          = {};
     $default_infile_added         = 0;
     $default_outfile_added        = 0;
     $default_outfile_suffix_added = 0;
     $default_outdir_added         = 0;
     $default_tagteam_added        = 0;
+    $logfile_added                = 0;
+    $logfile_default_added        = 0;
+    $logfile_suffix_added         = 0;
+    $builtin_add_failures         = 0;
+    $builtin_edit_failures        = 0;
     $default_infile_opt           = 'i|infile=s';
     $default_outfile_suffix_opt   = 'o|suffix=s';
     $default_outfile_opt          = 'outfile=s';
     $default_outdir_opt           = 'outdir=s';
-    $default_outfile_id           = undef;
-    $default_outfile_suffix_id    = undef;
+    $default_logfile_opt          = 'logfile=s';
+    $default_logfile_suffix_opt   = 'logfile-suffix=s';
+    $default_outfile_optid        = undef;
+    $default_suffix_optid         = undef;
+    $dispdef_max                  = 20;
+    $logfile_optid                = undef;
+    $logfile_suffix_optid         = undef;
     $file_group_num               = [];
     $explicit_quit                = 0;
     $cleanup_mode                 = 0;
     $flag_check_hash              = {};
-    $default_run_mode             = 'usage'; #usage,run,help,dry-run
+    $bad_user_opts                = [];
     $outdirs_added                = 0;
-    $inf_to_usage_hash            = {};
-    $outf_to_usage_hash           = {};
-    $genopt_types                 = {'bool'    => '',   #val is appended to key
+    $file_indexes_to_usage        = {};
+    $def_collide_mode_suff        = 'error'; #Use these 2 defaults for mode for
+    $def_collide_mode_outf        = 'merge'; #outfile option types' collide mode
+    $def_collide_mode_logf        = 'merge'; #logfile option types' collide mode
+    $exclusive_options            = [];      #[[optid1,...],...]
+    $exclusive_lookup             = {};      #{optid=>{exclusiveid1=>1,...}}
+    $mutual_params                = {};      #{exclusiveid1=>{...whatever}}
+    $builtin_mutexes              = {runmode => [qw(usage help run dry_run
+						    version)],
+				     debug   => [qw(debug quiet)],
+				     verbose => [qw(verbose quiet)],
+				     outmode => [qw(skip overwrite append)]};
+
+    $scalar_genopt_types          = {'bool'    => '',   #val is appended to key
 				     'negbool' => '!',
 				     'count'   => ':+',
 				     'string'  => '=s',
 				     'integer' => '=i',
 				     'float'   => '=f',
-				     'enum'    => '=s',
-				     'string_array'    => '=s',
+				     'enum'    => '=s'};
+    $array_genopt_types           = {'string_array'    => '=s',
 				     'integer_array'   => '=s',
 				     'float_array'     => '=s',
-				     'enum_array'      => '=s',
-				     'string_array2d'  => '=s',
+				     'enum_array'      => '=s'};
+    $array2d_genopt_types         = {'string_array2d'  => '=s',
 				     'integer_array2d' => '=s',
 				     'float_array2d'   => '=s',
 				     'enum_array2d'    => '=s'};
-    $fileopt_types                = {'infile'  => '=s',
+    $scalar_fileopt_types         = {'suffix'  => '=s',
+				     'logfile' => '=s',
+				     'logsuff' => '=s'};
+    $array2d_fileopt_types        = {'infile'  => '=s',
 				     'outfile' => '=s',
-				     'stub'    => '=s',
-				     'outdir'  => '=s',
-				     'suffix'  => '=s'};
+				     'stub'    => '=s',        #currently unused
+				     'outdir'  => '=s'};
+    $scalaropt_types              = {%$scalar_genopt_types,
+				     %$scalar_fileopt_types};
+    $array2dopt_types             = {%$array2d_genopt_types,
+				     %$array2d_fileopt_types};
+    $genopt_types                 = {%$scalar_genopt_types,
+				     %$array_genopt_types,
+				     %$array2d_genopt_types};
+    $fileopt_types                = {%$array2d_fileopt_types,
+				     %$scalar_fileopt_types};
 
-    $def_collide_mode_suff = 'error';  #Use these 2 defaults for mode for
-    $def_collide_mode_outf = 'merge';  #outfile option types' collide mode
+    $def_option_hash =
+      {verbose    => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editVerboseOption',
+		      DEFAULT  => 0, #CLI default
+		      EDITABLE => [qw(FLAG REQUIRED DEFAULT HIDDEN SHORT_DESC
+				      LONG_DESC ADVANCED HEADING DISPDEF)],
+		      PARAMS   => {FLAG        => 'verbose',
+				   VARREF      => \$verbose,
+				   TYPE        => 'count',
+				   REQUIRED    => 0,
+				   DISPDEF     => undef,
+				   DEFAULT     => 0,
+				   HIDDEN      => 0,
+				   SHORT_DESC  => getDesc('verbose',1),
+				   LONG_DESC   => getDesc('verbose',0),
+				   ACCEPTS     => undef,
+				   ADVANCED    => 0,
+				   USAGE_NAME  => 'verbose',  #Used internally
+				   USAGE_ORDER => undef,
+				   HEADING     => 'UNIVERSAL BASIC OPTIONS'}},
 
-    $stderr_buffer         = undef;
-    $verbose_freq_hash     = undef;
-    $last_verbose_size     = undef;
-    $last_verbose_state    = undef;
-    $verbose_warning       = undef;
-    $error_number          = undef;
-    $error_hash            = undef;
-    $warning_number        = undef;
-    $warning_hash          = undef;
-    $infile_line_buffer    = undef;
-    $debug_number          = undef;
-    $time_marks            = undef;
-    $open_out_handles      = undef;
-    $rejected_out_handles  = undef;
-    $closed_out_handles    = undef;
-    $open_in_handles       = undef;
-    $header_str            = undef;
-    $explicit_dry_run      = undef;
-    $explicit_run          = undef;
-    $explicit_help         = undef;
-    $explicit_usage        = undef;
-    $window_width          = undef;
-    $window_width_def      = 80;
-    $pipe_cache            = undef;
-    $lsof_cache            = undef;
+       quiet      => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editQuietOption',
+		      DEFAULT  => 0, #CLI default
+		      EDITABLE => [qw(FLAG DEFAULT HIDDEN SHORT_DESC LONG_DESC
+				      ADVANCED HEADING DISPDEF)],
+		      PARAMS   => {FLAG        => 'quiet',
+				   VARREF      => \$quiet,
+				   TYPE        => 'bool',
+				   REQUIRED    => 0,
+				   DISPDEF     => undef,
+				   DEFAULT     => 0,
+				   HIDDEN      => 0,
+				   SHORT_DESC  => getDesc('quiet',1),
+				   LONG_DESC   => getDesc('quiet',0),
+				   ACCEPTS     => undef,
+				   ADVANCED    => 0,
+				   USAGE_NAME  => 'quiet',  #Used internally
+				   USAGE_ORDER => undef,
+				   HEADING     => ''}},
+
+       overwrite  => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editOverwriteOption',
+		      DEFAULT  => 0, #CLI default
+		      EDITABLE => [qw(FLAG REQUIRED DEFAULT HIDDEN SHORT_DESC
+				      LONG_DESC ADVANCED HEADING DISPDEF)],
+		      PARAMS   => {FLAG        => 'overwrite',
+				   VARREF      => \$overwrite,
+				   TYPE        => 'count',
+				   REQUIRED    => 0,
+				   DISPDEF     => undef,
+				   DEFAULT     => 0,
+				   HIDDEN      => 0,
+				   SHORT_DESC  => getDesc('overwrite',1),
+				   LONG_DESC   => getDesc('overwrite',0),
+				   ACCEPTS     => undef,
+				   ADVANCED    => 0,
+				   USAGE_NAME  => 'overwrite',
+				   USAGE_ORDER => undef,
+				   HEADING     => ''}},
+
+       skip       => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editSkipOption',
+		      DEFAULT  => 0, #CLI default
+		      EDITABLE => [qw(FLAG DEFAULT HIDDEN SHORT_DESC
+				      LONG_DESC ADVANCED HEADING DISPDEF)],
+		      PARAMS   => {FLAG        => 'skip',
+				   VARREF      => \$skip_existing,
+				   TYPE        => 'bool',
+				   REQUIRED    => 0,
+				   DISPDEF     => undef,
+				   DEFAULT     => 0,
+				   HIDDEN      => 0,
+				   SHORT_DESC  => getDesc('skip',1),
+				   LONG_DESC   => getDesc('skip',0),
+				   ACCEPTS     => undef,
+				   ADVANCED    => 0,
+				   USAGE_NAME  => 'skip',  #Used internally
+				   USAGE_ORDER => undef,
+				   HEADING     => ''}},
+
+       header     => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editHeaderOption',
+		      DEFAULT  => 1, #CLI default
+		      EDITABLE => [qw(FLAG REQUIRED DEFAULT HIDDEN SHORT_DESC
+				      LONG_DESC ADVANCED HEADING DISPDEF)],
+		      PARAMS   => {FLAG        => 'header',
+				   VARREF      => \$header,
+				   TYPE        => 'negbool',
+				   REQUIRED    => 0,
+				   DISPDEF     => undef,
+				   DEFAULT     => 1,
+				   HIDDEN      => 0,
+				   SHORT_DESC  => getDesc('header',1),
+				   LONG_DESC   => getDesc('header',0),
+				   ACCEPTS     => undef,
+				   ADVANCED    => 0,
+				   USAGE_NAME  => 'header',  #Used internally
+				   USAGE_ORDER => undef,
+				   HEADING     => ''}},
+
+       version    => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editVersionOption',
+		      DEFAULT  => 0, #CLI default
+		      EDITABLE => [qw(FLAG HIDDEN SHORT_DESC LONG_DESC ADVANCED
+				      HEADING DEFAULT DISPDEF)],
+		      PARAMS   => {FLAG        => 'version',
+				   VARREF      => \$version,
+				   TYPE        => 'bool',
+				   REQUIRED    => 0,
+				   DEFAULT     => $def_version,
+				   HIDDEN      => 0,
+				   SHORT_DESC  => getDesc('version',1),
+				   LONG_DESC   => getDesc('version',0),
+				   ACCEPTS     => undef,
+				   ADVANCED    => 0,
+				   USAGE_NAME  => 'version',  #Used internally
+				   USAGE_ORDER => undef,
+				   HEADING     => ''}},
+
+       extended   => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editExtendedOption',
+		      DEFAULT  => 0, #CLI default
+		      EDITABLE => [qw(FLAG REQUIRED DEFAULT HIDDEN SHORT_DESC
+				      LONG_DESC ADVANCED HEADING DISPDEF)],
+		      PARAMS   => {FLAG        => 'extended',
+				   VARREF      => \$extended,
+				   TYPE        => 'count',
+				   REQUIRED    => 0,
+				   DISPDEF     => undef,
+				   DEFAULT     => 0,
+				   HIDDEN      => 0,
+				   SHORT_DESC  => getDesc('extended',1),
+				   LONG_DESC   => getDesc('extended',0),
+				   ACCEPTS     => undef,
+				   ADVANCED    => 0,
+				   USAGE_NAME  => 'extended',  #Used internally
+				   USAGE_ORDER => -1,
+				   HEADING     => ''}},
+
+       force      => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editForceOption',
+		      DEFAULT  => 0, #CLI default
+		      EDITABLE => [qw(FLAG REQUIRED DEFAULT HIDDEN SHORT_DESC
+				      LONG_DESC ADVANCED HEADING DISPDEF)],
+		      PARAMS   => {FLAG        => 'force',
+				   VARREF      => \$force,
+				   TYPE        => 'count',
+				   REQUIRED    => 0,
+				   DISPDEF     => undef,
+				   DEFAULT     => 0,
+				   HIDDEN      => 0,
+				   SHORT_DESC  => getDesc('force',1),
+				   LONG_DESC   => getDesc('force',0),
+				   ACCEPTS     => undef,
+				   ADVANCED    => 1,
+				   USAGE_NAME  => 'force',  #Used internally
+				   USAGE_ORDER => undef,
+				   HEADING     => ('UNIVERSAL ' .
+						   'ADVANCED ' .
+						   'OPTIONS')}},
+
+       debug      => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editDebugOption',
+		      DEFAULT  => 0, #CLI default
+		      EDITABLE => [qw(FLAG REQUIRED DEFAULT HIDDEN SHORT_DESC
+				      LONG_DESC ADVANCED HEADING DISPDEF)],
+		      PARAMS   => {FLAG        => 'debug',
+				   VARREF      => \$DEBUG,
+				   TYPE        => 'count',
+				   REQUIRED    => 0,
+				   DISPDEF     => undef,
+				   DEFAULT     => 0,
+				   HIDDEN      => 0,
+				   SHORT_DESC  => getDesc('debug',1),
+				   LONG_DESC   => getDesc('debug',0),
+				   ACCEPTS     => undef,
+				   ADVANCED    => 1,
+				   USAGE_NAME  => 'debug',  #Used internally
+				   USAGE_ORDER => undef,
+				   HEADING     => ''}},
+
+       save_args  => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editSaveArgsOption',
+		      DEFAULT  => 0, #CLI default
+		      EDITABLE => [qw(FLAG HIDDEN SHORT_DESC LONG_DESC ADVANCED
+				      HEADING)],
+		      PARAMS   => {FLAG        => 'save-args',
+				   VARREF      => \$use_as_default,
+				   TYPE        => 'bool',
+				   REQUIRED    => 0,
+				   DISPDEF     => join(' ',getUserDefaults()),
+				   DEFAULT     => undef,
+				   HIDDEN      => 0,
+				   SHORT_DESC  => getDesc('save_args',1),
+				   LONG_DESC   => getDesc('save_args',0),
+				   ACCEPTS     => undef,
+				   ADVANCED    => 0, #Changed by applyOptionAdd.
+				   USAGE_NAME  => 'save_args',  #Used internally
+				   USAGE_ORDER => undef,
+				   HEADING     => 'USER DEFAULTS'}},
+
+       pipeline   => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editPipelineOption',
+		      DEFAULT  => undef, #CLI default
+		      EDITABLE => [qw(FLAG REQUIRED DEFAULT HIDDEN SHORT_DESC
+				      LONG_DESC ADVANCED HEADING DISPDEF)],
+		      PARAMS   => {FLAG        => 'pipeline',
+				   VARREF      => \$pipeline,
+				   TYPE        => 'negbool',
+				   REQUIRED    => 0,
+				   DISPDEF     => undef,
+				   DEFAULT     => undef,
+				   HIDDEN      => 0,
+				   SHORT_DESC  => getDesc('pipeline',1),
+				   LONG_DESC   => getDesc('pipeline',0),
+				   ACCEPTS     => undef,
+				   ADVANCED    => 1,
+				   USAGE_NAME  => 'pipeline',  #Used internally
+				   USAGE_ORDER => undef,
+				   HEADING     => ''}},
+
+       error_lim  => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editErrorLimitOption',
+		      DEFAULT  => $error_limit_default, #CLI default
+		      EDITABLE => [qw(FLAG REQUIRED DEFAULT HIDDEN SHORT_DESC
+				      LONG_DESC ADVANCED HEADING DISPDEF)],
+		      PARAMS   => {FLAG        => 'error-limit',
+				   VARREF      => \$error_limit,
+				   TYPE        => 'integer',
+				   REQUIRED    => 0,
+				   DISPDEF     => undef,
+				   DEFAULT     => $error_limit_default,
+				   HIDDEN      => 0,
+				   SHORT_DESC  => getDesc('error_lim',1),
+				   LONG_DESC   => getDesc('error_lim',0),
+				   ACCEPTS     => undef,
+				   ADVANCED    => 1,
+				   USAGE_NAME  => 'error_lim',  #Used internally
+				   USAGE_ORDER => undef,
+				   HEADING     => ''}},
+
+       append     => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editAppendOption',
+		      DEFAULT  => 0, #CLI default
+		      EDITABLE => [qw(FLAG DEFAULT HIDDEN SHORT_DESC
+				      LONG_DESC ADVANCED HEADING DISPDEF)],
+		      PARAMS   => {FLAG        => 'append',
+				   VARREF      => \$append,
+				   TYPE        => 'bool',
+				   REQUIRED    => 0,
+				   DISPDEF     => undef,
+				   DEFAULT     => 0,
+				   HIDDEN      => 0,
+				   SHORT_DESC  => getDesc('append',1),
+				   LONG_DESC   => getDesc('append',0),
+				   ACCEPTS     => undef,
+				   ADVANCED    => 1,
+				   USAGE_NAME  => 'append',     #Used internally
+				   USAGE_ORDER => undef,
+				   HEADING     => ''}},
+
+       collision  => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editCollisionOption',
+		      DEFAULT  => 'error', #CLI default
+		      EDITABLE => [qw(FLAG REQUIRED HIDDEN SHORT_DESC LONG_DESC
+				      ADVANCED HEADING)],
+		      PARAMS   => {FLAG        => 'collision-mode',
+				   VARREF      => \$user_collide_mode,
+				   TYPE        => 'enum',
+				   REQUIRED    => 0,
+
+				   #DEFAULT is determined dynamically via
+				   #processCommandLine
+				   DISPDEF     => undef,
+				   DEFAULT     => undef,
+
+				   HIDDEN      => 1,
+				   SHORT_DESC  => getDesc('collision',1),
+				   LONG_DESC   => getDesc('collision',0),
+				   ACCEPTS     => ['merge','rename','error'],
+				   ADVANCED    => 1,
+				   USAGE_NAME  => 'collision',  #Used internally
+				   USAGE_ORDER => undef,
+				   HEADING     => ''}},
+
+       run        => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editRunOption',
+		      DEFAULT  => $def_run, #CLI default
+		      EDITABLE => [qw(FLAG HIDDEN SHORT_DESC LONG_DESC ADVANCED
+				      HEADING DEFAULT DISPDEF)],
+		      PARAMS   => {FLAG        => 'run',
+				   VARREF      => \$run,
+				   TYPE        => 'bool',
+				   REQUIRED    => 0,
+				   DISPDEF     => undef,
+				   DEFAULT     => $def_run,
+
+				   #HIDDEN is determined dynamically via
+				   #processCommandLine and can only
+				   #be modified to always be shown
+				   HIDDEN      => undef,
+
+				   SHORT_DESC  => getDesc('run',1),
+				   LONG_DESC   => getDesc('run',0),
+				   ACCEPTS     => undef,
+				   ADVANCED    => 0,
+				   USAGE_NAME  => 'run',  #Used internally
+				   USAGE_ORDER => undef,
+				   HEADING     => ''}},
+
+       dry_run    => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editDryRunOption',
+		      DEFAULT  => $def_dry_run, #CLI default
+		      EDITABLE => [qw(FLAG HIDDEN SHORT_DESC LONG_DESC DISPDEF
+				      ADVANCED HEADING DEFAULT DISPDEF)],
+		      PARAMS   => {FLAG        => 'dry-run',
+				   VARREF      => \$dry_run,
+				   TYPE        => 'bool',
+				   REQUIRED    => 0,
+				   DISPDEF     => undef,
+				   DEFAULT     => $def_dry_run,
+
+				   #HIDDEN is determined dynamically via
+				   #processCommandLine and can only
+				   #be modified to always be shown
+				   HIDDEN      => undef,
+
+				   SHORT_DESC  => getDesc('dry_run',1),
+				   LONG_DESC   => getDesc('dry_run',0),
+				   ACCEPTS     => undef,
+				   ADVANCED    => 0,
+				   USAGE_NAME  => 'dry_run',  #Used internally
+				   USAGE_ORDER => undef,
+				   HEADING     => ''}},
+
+       usage      => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editUsageOption',
+		      DEFAULT  => $def_usage, #CLI default
+		      EDITABLE => [qw(FLAG HIDDEN SHORT_DESC LONG_DESC DISPDEF
+				      ADVANCED HEADING DEFAULT DISPDEF)],
+		      PARAMS   => {FLAG        => 'usage',
+				   VARREF      => \$usage,
+				   TYPE        => 'bool',
+				   REQUIRED    => 0,
+				   DISPDEF     => undef,
+				   DEFAULT     => $def_usage,
+
+				   #HIDDEN is determined dynamically via
+				   #processCommandLine and can only
+				   #be modified to always be shown
+				   HIDDEN      => undef,
+
+				   SHORT_DESC  => getDesc('usage',1),
+				   LONG_DESC   => getDesc('usage',0),
+				   ACCEPTS     => undef,
+				   ADVANCED    => 0,
+				   USAGE_NAME  => 'usage',  #Used internally
+				   USAGE_ORDER => undef,
+				   HEADING     => ''}},
+
+	help      => {ADDED    => 0,
+		      CHANGED  => 0,
+                      METHOD   => 'editHelpOption',
+		      DEFAULT  => $def_help, #CLI default
+		      EDITABLE => [qw(FLAG HIDDEN SHORT_DESC LONG_DESC DISPDEF
+				      ADVANCED HEADING DEFAULT DISPDEF)],
+		      PARAMS   => {FLAG        => 'help',
+				   VARREF      => \$help,
+				   TYPE        => 'bool',
+				   REQUIRED    => 0,
+				   DISPDEF     => undef,
+				   DEFAULT     => $def_help,
+
+				   #HIDDEN is determined dynamically via
+				   #processCommandLine and can only
+				   #be modified to always be shown
+				   HIDDEN      => undef,
+
+				   SHORT_DESC  => getDesc('help',1),
+				   LONG_DESC   => getDesc('help',0),
+				   ACCEPTS     => undef,
+				   ADVANCED    => 0,
+				   USAGE_NAME  => 'help',  #Used internally
+				   USAGE_ORDER => undef,
+				   HEADING     => ''}}};
+
+    #Copy the default parameters to use as a fallback in case of a fatal config
+    #error
+    foreach my $opt (keys(%$def_option_hash))
+      {$def_option_hash->{$opt}->{FALLBACKS} =
+         {%{$def_option_hash->{$opt}->{PARAMS}}}}
   }
 
 sub setScriptInfo
   {
     my @params   = qw(VERSION HELP CREATED AUTHOR CONTACT COMPANY LICENSE
-		      DETAIL|DETAILED_HELP);
+		      DETAILED_HELP|DETAIL);
     my $check    = {map {$_ => 1} @params};
     my @in       = getSubParams([@params],[],[@_],1);
     my %infohash = map {$params[$_] => $in[$_]} 0..$#in;
 
-    if($command_line_processed && ($help || $version))
+    if($command_line_stage >= ARGSREAD)
       {
-	error("You cannot set the script information (i.e. call ",
-	      "setScriptInfo()) after the command line has already been ",
-	      "processed (i.e. processCommandLine()) without at least ",
-	      "re-initializing (i.e. calling _init()) because --help or ",
-	      "--version flags which return the information set by this ",
-	      "method have already been acted on during the processing ",
-	      "of the default options.  Call setScriptInfo before doing any ",
-	      "file processing.");
-	return(undef);
+	my $version = getVarref('version',1);
+	my $help    = getVarref('help',1);
+
+	if($help || $version)
+	  {
+	    error("You cannot set the script information (i.e. call ",
+		  "setScriptInfo()) after the command line has already been ",
+		  "processed (i.e. processCommandLine()) without at least ",
+		  "re-initializing (i.e. calling _init()) because --help or ",
+		  "--version flags which return the information set by this ",
+		  "method have already been acted on during the processing ",
+		  "of the default options.  Call setScriptInfo before doing ",
+		  "any file processing.");
+	    return(undef);
+	  }
       }
 
     debug({LEVEL => -1},"Keys passed in: [",join(',',keys(%infohash)),"].");
@@ -455,9 +907,9 @@ sub getRelationStr
       {return('1:1')}
     elsif($instr =~ /^(1|one)[\s\-_]?(:|to)[\s\-_]?(m|n|many)$/i)
       {return('1:M')}
-#TODO: Requirement 140 needs to be implemented to properyly support M:M
-#    elsif($instr =~ /^(m|n|many)[\s\-_]?(:|to)[\s\-_]?(m|n|many)$/i)
-#      {return('M:M')}
+    #TODO: Requirement 140 needs to be implemented to properyly support M:M
+    #    elsif($instr =~ /^(m|n|many)[\s\-_]?(:|to)[\s\-_]?(m|n|many)$/i)
+    #      {return('M:M')}
     elsif($instr =~ /^(1|one)[\s\-_]?(:|to)[\s\-_]?(1|one)
 		     [\s\-_]?(or|\|)[\s\-_]?(m|n|many)$/ix)
       {return('1:1orM')}
@@ -477,30 +929,34 @@ sub getRelationStr
 #Might add the ability to indicate what file types must have the same number of
 #input files
 #Returns a file type ID to be used in addOutfileSuffixOption
-#Globals used: $inf_to_usage_hash (and others)
 sub addInfileOption
   {
+    my $nokeysfound = 0;
     my @in = getSubParams([qw(FLAG|GETOPTKEY REQUIRED DEFAULT PRIMARY HIDDEN
-			      SMRY|SMRY_DESC|SHORT_DESC
-			      DETAIL|DETAIL_DESC|LONG_DESC FORMAT|FORMAT_DESC
-			      PAIR_WITH PAIR_RELAT FLAGLESS ADVANCED)],
+			      SHORT_DESC|SMRY|SMRY_DESC
+			      LONG_DESC|DETAIL|DETAIL_DESC FORMAT|FORMAT_DESC
+			      PAIR_WITH PAIR_RELAT FLAGLESS ADVANCED HEADING
+			      DISPDEF)],
 			  [scalar(@_) ? qw(FLAG|GETOPTKEY) : ()],
-			  [@_]);
-    my $get_opt_str = $in[0]; #e.g. 'i|infile=s'
-    my $required    = $in[1]; #Is file required?: 0 (false) or non-zero (true)
-    my $default     = $in[2]; #String, ref to a 1D or 2D array of strings/globs
-    my $primary     = $in[3]; #0 or non-0: true = flag optional & accepts pipe
-    my $hidden      = $in[4]; #0 or non-0. Non-0 requires a default or to be a
-                              #primary option (i.e. takes input on STDIN).
-                              #Excludes from usage output.
-    my $smry_desc   = $in[5]; #e.g. 'Input file(s).  See --help for format.'
-                              #Empty/undefined = exclude from short usage
-    my $detail_desc = $in[6]; #e.g. 'Input file(s).  Space separated, globs...'
-    my $format_desc = $in[7]; #e.g. 'Tab delimited text w/ columns: 1. Name...'
-    my $req_with    = $in[8]; #File type ID (as returned by this sub)
-    my $req_rel_str = getRelationStr($in[9]); #e.g. 1,1:1,1:M,1:1orM
-    my $flagless    = $in[10];#Whether the option can be supplied sans flag
-    my $advanced    = $in[11];#Advanced options print when extended >= 2
+			  [@_],0,\$nokeysfound);
+    my $get_opt_str  = $in[0]; #e.g. 'i|infile=s'
+    my $required     = $in[1]; #Is file required?: 0 (false) or non-zero (true)
+    my $default      = $in[2]; #String, ref to a 1D or 2D array of strings/globs
+    my $primary      = $in[3]; #0 or non-0: true = flag optional & accepts pipe
+    my $hidden       = $in[4]; #0 or non-0. Non-0 requires a default or to be a
+                               #primary option (i.e. takes input on STDIN).
+                               #Excludes from usage output.
+    my $smry_desc    = $in[5]; #e.g. 'Input file(s).  See --help for format.'
+                               #Empty/undefined = exclude from short usage
+    my $detail_desc  = $in[6]; #e.g. 'Input file(s).  Space separated, globs...'
+    my $format_desc  = $in[7]; #e.g. 'Tab delimited text w/ columns: 1. Name...'
+    my $req_with_opt = $in[8];
+    my $req_rel_str  = getRelationStr($in[9]);   #e.g. 1,1:1,1:M,1:1orM
+    my $flagless     = $in[10];#Whether the option can be supplied sans flag
+    my $advanced     = $in[11];#Advanced options print when extended >= 2
+    my $heading      = $in[12];#Section heading to print in extended usage
+    my $display_def  = $in[13];#The default to display in the usage
+    my($req_with_uhash);
 
     #Trim leading & trailing hard returns and white space characters (from
     #using '<<')
@@ -511,7 +967,7 @@ sub addInfileOption
     $format_desc =~ s/^\s+//s if(defined($format_desc));
     $format_desc =~ s/\s+$//s if(defined($format_desc));
 
-    if($command_line_processed)
+    if($command_line_stage >= ARGSREAD)
       {
 	error("You cannot add command line options (i.e. call ",
 	      "addInfileOption()) after the command line has already been ",
@@ -537,7 +993,8 @@ sub addInfileOption
 	  {
 	    error('Unable to add default input file type ',
 		  "[$default_infile_opt] due to redundant flags: [",
-		  join(',',getDupeFlags($default_infile_opt)),'].');
+		  join(',',getDupeFlags($default_infile_opt,
+                                        $default_infile_opt)),'].');
 	    $default_infile_opt = $get_opt_str;
 	    return(undef);
 	  }
@@ -551,67 +1008,87 @@ sub addInfileOption
 
     #Allow the flag to be an array of scalars and turn it into a get opt str
     my $save_getoptstr = $get_opt_str;
-    $get_opt_str = makeGetOptKey($get_opt_str,'infile',1,'addInfileOption');
+    $get_opt_str = makeGetOptKey($get_opt_str,'infile',0,'addInfileOption');
 
     if(defined($get_opt_str))
       {$get_opt_str = fixStringOpt($get_opt_str)}
+    else
+      {
+        error("Invalid option flag definition: [",
+              (defined($save_getoptstr) ? $save_getoptstr : 'undef'),"].");
+	$num_setup_errors++;
+	return(undef);
+      }
 
-    if(!isGetOptStrValid($get_opt_str,'infile'))
+    if(!isGetOptStrValid($get_opt_str,'infile',$default_infile_opt))
       {
 	if($adding_default)
 	  {warning("Unable to add default input file option.")}
 	else
-	  {
-	    error("Invalid GetOpt parameter flag definition: ",
-		  "[$save_getoptstr] for infile type.");
-	    quit(-5);
-	  }
+	  {$num_setup_errors++}
 	return(undef);
       }
 
     if(defined($required) && $required !~ /^\d+$/)
-      {error("Invalid required parameter: [$required].")}
-
-    if(defined($req_with))
       {
-	my $uhash = getInfileUsageHash($req_with);
-	if(!defined($uhash) || !exists($uhash->{OPTTYPE}))
-	  {error("Invalid PAIR_WITH input file ID: [$req_with].  Must be an ",
-		 "ID returned by addInfileOption.")}
+        my $msg = ["Invalid required parameter: [$required].",
+                   {DETAIL => ("The value will be treated as " .
+                               ($required ? 'true' : 'false') . '.')}];
+        if($nokeysfound)
+          {error(@$msg)}
+        else
+          {warning(@$msg)}
+      }
+
+    if(defined($req_with_opt))
+      {
 	#TODO: Requirement 280 will allow linking to either input or output
 	#      file types
-	elsif($uhash->{OPTTYPE} ne 'infile')
-	  {error("File type ID passed in using the PAIR_WITH parameter must ",
-		 "be an input file type ID.  Instead, received an ID of ",
-		 "type: [$uhash->{OPTTYPE}].")}
+	if(!isInt($req_with_opt) || $req_with_opt < 0 ||
+	   $req_with_opt > $#{$usage_array} ||
+	   $usage_array->[$req_with_opt]->{OPTTYPE} ne 'infile')
+	  {
+	    error("Invalid PAIR_WITH option ID: [$req_with_opt]",
+                  (!isInt($req_with_opt) || $req_with_opt < 0 ||
+                   $req_with_opt > $#{$usage_array} ? '' : ' for option [' .
+                   "$usage_array->[$req_with_opt]->{OPTFLAG_DEF}]"),
+                  ".  Must be an ID as returned by addInfileOption.");
+
+            $num_setup_errors++;
+            return(undef);
+	  }
+	$req_with_uhash = $usage_array->[$req_with_opt];
       }
 
     my $flags = [getOptStrFlags($get_opt_str)];
     my $flag  = getDefaultFlag($flags);
+    my $name  = createOptionNameFromFlags($flags);
 
     #If hidden is not defined and there is a linked file, default to the hidden
     #state of the file type this is linked to, otherwise 0.
-    if(!defined($hidden) && defined($req_with))
+    if(!defined($hidden) && defined($req_with_opt))
       {
-	if(defined($req_with) && isFileTypeHidden($req_with))
+	if(defined($req_with_opt) && $req_with_uhash->{HIDDEN})
 	  {$hidden = 1}
 	else
 	  {$hidden = 0}
       }
     elsif(!defined($hidden))
       {$hidden = 0}
-    elsif(!$hidden && defined($req_with))
+    elsif(!$hidden && defined($req_with_opt))
       {
 	#Error if this option is set to be visible and it is linked to a hidden
 	#file that has no default and is not primary
-	if(isFileTypeHidden($req_with) && !isFileTypeDefaulted($req_with) &&
-	   !isFileTypePrimary($req_with))
+	if($req_with_uhash->{HIDDEN} && !$req_with_uhash->{PRIMARY} &&
+	   !hasDefault($req_with_uhash))
 	  {
 	    error("Input file option [$flag] cannot be visible when its ",
-		  "PAIR_WITH linked file [",getInfileFlag($req_with,2),"] is ",
+		  "PAIR_WITH linked file [",
+		  getFlag($usage_array->[$req_with_opt],2),"] is ",
 		  "hidden, has no default value, and is not primary.",
 		  {DETAIL =>
-		   join('',("A linked file (e.g. [",getInfileFlag($req_with,2),
+		   join('',("A linked file (e.g. [",
+			    getFlag($usage_array->[$req_with_opt],2),
 			    "]) is required to be supplied if [$flag] is ",
 			    "supplied, but since the linked file type is ",
 			    "hidden, there's no way to tell the user of the ",
@@ -623,183 +1100,136 @@ sub addInfileOption
 	  }
       }
 
-    my $file_type_index = scalar(@$input_files_array);
-    push(@$input_files_array,[]);
+    my $varref      = [];
+    my $varref_copy = [];
 
-    if(!defined($primary))
-      {$primary = 0}
-    elsif(!$primary)
-      {$exp_nonprimary_inf_types->{$file_type_index} = 0}
-
-    if($hidden && !defined($default) && !$primary &&
+    if($hidden && !defined($default) && (!defined($primary) || !$primary) &&
        defined($required) && $required)
       {
-	warning("Cannot hide option [$flag] if",
-
-		(!defined($default) ? ' no default provided' : ''),
-
-		(!defined($default) && !$primary ? ' or' : ''),
-
-		(!$primary ?
-		 " it does't take standard input (i.e. it's not a primary " .
-		 'infile option)' : ''),
-
-		((!defined($default) && defined($required) && $required) ?
-		 (!defined($default) && !$primary ? ', and if' : ' and if') :
-		 ''),
-
-		(defined($required) && $required ? ' it is required' : ''),
-		".  Setting as not hidden.");
-
+	warning("Cannot hide option [$flag] if required, no default provided, ",
+                "and not primary (i.e. doesn't take input on standard in).  ",
+                'Setting as not hidden.');
 	$hidden = 0;
       }
-
-    my $default_str = '';
 
     #Add the default(s) to the default infiles array, to be globbed when the
     #command line is processed
     if(defined($default))
       {
-	my($twodarray);
-	($twodarray,$default_str) = makeCheck2DScalarArray($default);
+	my($twodarray,$default_str) = makeCheck2DFileArray($default);
 	if(defined($twodarray))
-	  {$default_infiles_array->[$file_type_index] = $twodarray}
+	  {$default = $twodarray}
 	else
-	  {quit(-2)}
+	  {
+            $num_setup_errors++;
+            return(undef);
+          }
       }
 
-    $infile_flag_array->[$file_type_index] = $flag;
+    if(defined($display_def) && (ref($display_def) ne '' || $display_def eq ''))
+      {
+	error("Invalid display default.  Must be a non-empty string.  ",
+	      "Ignoring.");
+	undef($display_def);
+      }
 
-    #Only set default if not defined and (detail desc not defined or required)
+    if(defined($smry_desc) && $smry_desc ne '' &&
+       (!defined($detail_desc) || $detail_desc eq ''))
+      {$detail_desc = $smry_desc}
+
     if((!defined($smry_desc) || $smry_desc eq '') &&
-       (!defined($detail_desc) || $required))
-      {$smry_desc = 'Input file(s).'}
+       ($required || !defined($detail_desc) || $detail_desc eq ''))
+      {$smry_desc = defined($detail_desc) && $detail_desc ne '' ?
+         $detail_desc : 'Input file(s).'}
 
     if(!defined($detail_desc) || $detail_desc eq '')
       {$detail_desc =
-	 join('',('Input file(s)',
-		  ($file_type_index ? " type " . ($file_type_index + 1) : ''),
-		  ".",(defined($format_desc) && $format_desc ne '' ?
-		       '  See --help for file format.' : '')))}
+	 join('',('Input file(s).',
+		  (defined($format_desc) && $format_desc ne '' ?
+		   '  See --help for file format.' : '')))}
     #If the description doesn't reference the help flag for the file format and
     #a file format was provided, add a reference to it
     elsif($detail_desc !~ /--help/ && defined($format_desc) &&
 	  $format_desc ne '')
       {$detail_desc .= "\n\nSee --help for file format."}
 
-    my $getoptsub = 'sub {push(@{$input_files_array->[' . $file_type_index .
-      ']},[sglob($_[1])])}';
-    $GetOptHash->{$get_opt_str} = eval($getoptsub);
+    $GetOptHash->{$get_opt_str} = getGetoptSub($name,0);
 
-    if($default_str ne '')
+    if(defined($primary) && $primary)
       {
-	#If the default value is simple, clean up its display
-	if($default_str !~ /\)\(/)
-	  {
-	    $default_str =~ s/^\(\(//;
-	    $default_str =~ s/\)\)$//;
-	  }
-      }
-
-    if($primary)
-      {
-	if(defined($primary_infile_type))
+	if(defined($primary_infile_optid))
 	  {
 	    error("Multiple primary input file options supplied ",
 		  "[$get_opt_str].  Only 1 is allowed.");
 	    return(undef);
 	  }
 
-	$primary_infile_type = $file_type_index;
+	$primary_infile_optid = getNextUsageIndex();
       }
 
     if(defined($flagless) && $flagless)
       {
-	if(defined($flagless_multival_type) && $flagless_multival_type > -1)
+	if(defined($flagless_multival_optid) && $flagless_multival_optid > -1)
 	  {
 	    error("An additional multi-value option has been designated as ",
 		  "'flagless': [$get_opt_str]: [$flagless].  Only 1 is ",
 		  "allowed.",
 		  {DETAIL => "First flagless option was: [" .
-		   getDefaultFlag($usage_array->[$flagless_multival_type]
-				  ->{OPTFLAG}) . "]."});
+		   $usage_array->[$flagless_multival_optid]->{OPTFLAG_DEF} .
+		   "]."});
 	    return(undef);
 	  }
 
-	$getoptsub = 'sub {checkFileOpt($_[0],1);push(@{$input_files_array->['.
-	  $file_type_index . ']},[sglob($_[0])])}';
-	$GetOptHash->{'<>'} = eval($getoptsub);
+	$GetOptHash->{'<>'} = getGetoptSub($name,1);
 
 	#This assumes that the call to addToUsage a few lines below is the
 	#immediate next call to addToUsage
-	$flagless_multival_type = getNextUsageIndex();
+	$flagless_multival_optid = getNextUsageIndex();
       }
 
-    if($required)
-      {push(@$required_infile_types,$file_type_index)}
+    my $oid = addToUsage($get_opt_str,
+                         $flags,
+                         $smry_desc,
+                         $detail_desc,
+                         $required,
+                         $display_def,
+                         $default,
+                         undef,         #accepts
+                         $hidden,
+                         'infile',
+                         $flagless,
+                         $advanced,
+                         $heading,
+                         undef,         #usage name
+                         undef,         #usage order
+                         [],            #VARREF_PRG - ref programmer supplied
+                         $req_with_opt,
+                         $req_rel_str,
+                         undef,
+                         $primary,
+                         $format_desc,
+                         undef);
 
-    addRequiredRelationship($file_type_index,$req_with,$req_rel_str);
+    if(!defined($oid))
+      {$num_setup_errors++}
+    else
+      {addRequiredRelationship($oid,$req_with_opt,$req_rel_str)}
 
-    push(@$usage_file_indexes,
-	 addToUsage($get_opt_str,$flags,$smry_desc,$detail_desc,$required,
-		    $default_str,undef,$hidden,'infile',$flagless,$advanced,
-		    undef,undef,$primary,$format_desc,$file_type_index));
-
-    debug({LEVEL => -1},"Adding input file type [$file_type_index] as a key ",
-	  "to inf_to_usage_hash, value: [$#{$usage_array}].");
-    #TODO: This will change with requirement 280
-    $inf_to_usage_hash->{$file_type_index} = $#{$usage_array};
-
-    return($file_type_index);
+    return($oid);
   }
 
-#Given an input file type ID, returns the usage hash for the file type
-#Globals used: $inf_to_usage_hash
-sub getInfileUsageHash
+#Globals used: $file_indexes_to_usage
+sub fileIndexesToOptionID
   {
-    my $file_type_id = $_[0];
-    if(defined($file_type_id) && exists($inf_to_usage_hash->{$file_type_id}) &&
-       scalar(@$usage_array) > $inf_to_usage_hash->{$file_type_id} &&
-       $inf_to_usage_hash->{$file_type_id} > -1)
-      {return($usage_array->[$inf_to_usage_hash->{$file_type_id}])}
-    debug({LEVEL => -1},"File type: [",
-	  (defined($file_type_id) ? $file_type_id : 'undef'),
-	  "] inf_to_usage_hash key [",
-	  (defined($file_type_id) &&
-	   exists($inf_to_usage_hash->{$file_type_id}) ?
-	   'exists' : 'does not exist'),
-	  "] usage index less than usage_array size: [",
-	  (defined($file_type_id) &&
-	   defined($inf_to_usage_hash->{$file_type_id}) &&
-	   scalar(@$usage_array) > $inf_to_usage_hash->{$file_type_id} ?
-	   'yes' : 'no'),"] usage index greater than -1: [",
-	  (defined($file_type_id) &&
-	   defined($inf_to_usage_hash->{$file_type_id}) &&
-	   $inf_to_usage_hash->{$file_type_id} > -1 ? 'yes' : 'no'),"].");
-    error('Invalid input file type ID: [',
-	  (defined($file_type_id) ? $file_type_id : 'undef'),
-	  '].  Must be an ID as returned by addInfileOption.');
-    return(undef);
-  }
+    my $file_type_index = $_[0];
+    my $suffix_index    = $_[1];
 
-#Given an output file suffix ID, returns the usage hash for the file type
-#defined *by the programmer*.  That is to say, a usage entry exists for both
-#the outfile index and the suffix index.  The usage for the one that
-#corresponds to the original function called is the one that is returned (i.e.
-#if the programmer called addOutfileOption, the 'outfile' usage is returned and
-#if the programmer called addOutfileSuffixOption, the 'suffix' usage is
-#returned).  This is significant because addOutfileOption calls
-#addOutfileSuffixOption.
-#Globals used: $outf_to_usage_hash
-sub getOutfileUsageHash
-  {
-    my $suffix_id = $_[0];
-    if(defined($suffix_id) && exists($outf_to_usage_hash->{$suffix_id}) &&
-       scalar(@$usage_array) > $outf_to_usage_hash->{$suffix_id} &&
-       $outf_to_usage_hash->{$suffix_id} > -1)
-      {return($usage_array->[$outf_to_usage_hash->{$suffix_id}])}
-    error('Invalid suffix ID: [',
-	  (defined($suffix_id) ? $suffix_id : 'undef'),'].');
+    if(exists($file_indexes_to_usage->{$file_type_index}) &&
+       defined($file_indexes_to_usage->{$file_type_index}) &&
+       exists($file_indexes_to_usage->{$file_type_index}->{$suffix_index}) &&
+       defined($file_indexes_to_usage->{$file_type_index}->{$suffix_index}))
+      {return($file_indexes_to_usage->{$file_type_index}->{$suffix_index})}
+
     return(undef);
   }
 
@@ -853,10 +1283,10 @@ sub makeGetOptKey
     my $get_opt_str = $_[0];
     my $type        = $_[1]; #Does not remove trailing flag type str if undef
     my $local_quiet = defined($_[2]) ? $_[2] : 0;
-    my $calling_sub = $_[3];
+    my $calling_sub = defined($_[3]) ? $_[3] : 'unspecified';
 
     my %types = %$genopt_types;
-    if(defined($type) && scalar(grep {$type eq $_} %$fileopt_types))
+    if(defined($type) && exists($fileopt_types->{$type}))
       {%types = %$fileopt_types}
 
     if(defined($get_opt_str))
@@ -865,33 +1295,34 @@ sub makeGetOptKey
 	  {
 	    if(scalar(grep {ref($_) ne ''} @$get_opt_str))
 	      {
-		error("FLAG supplied to $calling_sub must be either a scalar ",
-		      "or a reference to an array of scalars, but an array ",
-		      "containing [",join("','",map {ref($_)}
-					  grep {ref($_) ne ''} @$get_opt_str),
+		error("FLAG supplied to [$calling_sub] must be either a ",
+                      "scalar or a reference to an array of scalars, but an ",
+                      "array containing [",join("','",map {ref($_)}
+                                                grep {ref($_) ne ''}
+                                                @$get_opt_str),
 		      "] was supplied.")
-		  unless($local_quiet > 1);
-		quit(-100);
+		  if(!$local_quiet);
+                return(undef);
 	      }
 	    if(scalar(grep {defined($_) && /[=+:\@\%!].*/} @$get_opt_str))
 	      {
-		error("FLAG array supplied to $calling_sub [",
+		error("FLAG array supplied to [$calling_sub]: [",
 		      join(',',grep {defined($_)} @$get_opt_str),
 		      "] must not contain type information.",
 		      {DETAIL => ('Must not contain the following ' .
 				  'characters: [=+:\@\%!].')})
-		  unless($local_quiet > 1);
+		  if(!$local_quiet);
 		return(undef);
 	      }
 	    elsif(scalar(grep {!defined($_)} @$get_opt_str))
 	      {
-		error("FLAG array supplied to $calling_sub [",
+		error("FLAG array supplied to [$calling_sub]: [",
 		      join(',',map {defined($_) ? $_ : 'undef'} @$get_opt_str),
 		      "] must not contain undefined values.",
 		      {DETAIL => ('Must not contain the following ' .
 				  'characters: [=+:\@\%!].')})
-		  unless($local_quiet > 1);
-		quit(-101);
+		  if(!$local_quiet);
+                return(undef);
 	      }
 	    $get_opt_str = join('|',@$get_opt_str);
 	  }
@@ -903,22 +1334,29 @@ sub makeGetOptKey
 	       $get_opt_str =~ /[^a-zA-Z0-9\-_\?=+:\@\%!]/)
 	      {$get_opt_str = join('|',split(/[^a-zA-Z0-9\-_\?=+:\@\%!]+/,
 					     $get_opt_str))}
+            elsif($get_opt_str eq '')
+              {
+                error("Invalid FLAG string: [$get_opt_str].",
+                      {DETAIL => ("FLAG string [$get_opt_str] supplied to " .
+                                  "[$calling_sub] contains no flags.")})
+                  if(!$local_quiet);
+              }
 	  }
 	else
 	  {
-	    error("FLAG supplied to $calling_sub must be either a scalar ",
+	    error("FLAG supplied to [$calling_sub] must be either a scalar ",
 		  "or a reference to an array of scalars, but [",
 		  ref($get_opt_str),"] was supplied.")
-	      unless($local_quiet > 1);
+	      if(!$local_quiet);
 	    return(undef);
 	  }
       }
 
-    if(defined($type) && scalar(grep {$type eq $_} keys(%types)) == 0)
+    if(defined($type) && !exists($types{$type}))
       {
 	error("Invalid type: [$type] for [$calling_sub].",
 	      {DETAIL => 'Must be one of [' . join(',',keys(%types)) . '].'})
-	  unless($local_quiet > 1);
+	  if(!$local_quiet);
 	return(undef);
       }
 
@@ -931,36 +1369,30 @@ sub makeGetOptKey
 
     if(defined($type))
       {
-	if(!$local_quiet && $get_opt_str =~ /([=+:\@\%!].*)/)
-	  {warning("FLAG string [$get_opt_str] contains type information ",
-		   "[$1], but a TYPE [$type] was also supplied.  Setting ",
-		   "type information to [$types{$type}].")}
-
-	if($get_opt_str =~ /[=+:\@\%!]/)
+        $get_opt_str =~ /([=+:\@\%!].*)/;
+        my $typeinfo = defined($1) ? $1 : '';
+	if((defined($type) &&
+            (!exists($types{$type}) || $typeinfo ne $types{$type})) &&
+            $typeinfo ne '')
+	  {warning("Invalid FLAG string: [$get_opt_str].",
+                   {DETAIL =>
+                    join('',("FLAG string [$get_opt_str] supplied to ",
+                             "[$calling_sub] contains type information [$1], ",
+                             "but a TYPE [$type] was also supplied.  Setting ",
+                             "type information to [$types{$type}]."))})
+             if(!$local_quiet)}
+	elsif($typeinfo ne '' && exists($types{$type}))
 	  {
-	    if(($type eq 'suffix'          && $get_opt_str !~ /=s$/ ) ||
-	       ($type eq 'infile'          && $get_opt_str !~ /=s$/ ) ||
-	       ($type eq 'outfile'         && $get_opt_str !~ /=s$/ ) ||
-	       ($type eq 'outdir'          && $get_opt_str !~ /=s$/ ) ||
-	       ($type eq 'stub'            && $get_opt_str !~ /=s$/ ) ||
-	       ($type eq 'bool'                                     ) ||
-	       ($type eq 'negbool'         && $get_opt_str !~ /!$/  ) ||
-	       ($type eq 'string'          && $get_opt_str !~ /=s$/ ) ||
-	       ($type eq 'float'           && $get_opt_str !~ /=f$/ ) ||
-	       ($type eq 'enum'            && $get_opt_str !~ /=s$/ ) ||
-	       ($type eq 'count'           && $get_opt_str !~ /:\+$/) ||
-	       ($type eq 'integer'         && $get_opt_str !~ /=i$/ ) ||
-	       ($type eq 'float'           && $get_opt_str !~ /=f$/ ) ||
-	       ($type eq 'string_array'    && $get_opt_str !~ /=s$/ ) ||
-	       ($type eq 'float_array'     && $get_opt_str !~ /=s$/ ) ||
-	       ($type eq 'enum_array'      && $get_opt_str !~ /=s$/ ) ||
-	       ($type eq 'integer_array'   && $get_opt_str !~ /=s$/ ) ||
-	       ($type eq 'string_array2d'  && $get_opt_str !~ /=s$/ ) ||
-	       ($type eq 'float_array2d'   && $get_opt_str !~ /=s$/ ) ||
-	       ($type eq 'enum_array2d'    && $get_opt_str !~ /=s$/ ) ||
-	       ($type eq 'integer_array2d' && $get_opt_str !~ /=s$/ )    )
-	      {warning("Invalid flag definition: [$get_opt_str] for type ",
-		       "[$type] in [$calling_sub].")}
+	    my $pat = quotemeta($types{$type});
+	    if(exists($types{$type}) && $get_opt_str !~ /($pat)$/)
+	      {
+                $get_opt_str =~ /([=+:\@\%!].*)/;
+                warning("Invalid flag definition: [$get_opt_str] for type ",
+                        "[$type] in [$calling_sub].",
+                        {DETAIL => ("Type [$type] can only have a flag " .
+                                    'definition (if any) that ends with ' .
+                                    "[$types{$type}].  Ignoring the invalid " .
+                                    "portion of the flag definition: [$1].")})}
 	  }
 
 	#Remove anything following the flags
@@ -971,6 +1403,14 @@ sub makeGetOptKey
 
     #Remove any leading dashes
     $get_opt_str =~ s/^-+//;
+
+    if($get_opt_str eq '' || $get_opt_str =~ /^[=+:\@\%!]/)
+      {
+        error("Invalid FLAG string: [$get_opt_str].",
+              {DETAIL => ("FLAG string [$get_opt_str] supplied to " .
+                          "[$calling_sub] contains no flags.")})
+          if(!$local_quiet);
+      }
 
     return($get_opt_str);
   }
@@ -983,11 +1423,13 @@ sub getOptType
     my $get_opt_str = $_[1];
     my $accepts     = $_[2]; #Only used for assuming enum type
     my $get_opt_ref = $_[3]; #Only used to change bool to negbool if true
+    my $default     = $_[4];
+    my $opt_name    = $_[5];
     my %types       = (%$genopt_types,%$fileopt_types);
 
     if(defined($type_str) && scalar(grep {$type_str eq $_} keys(%types)) == 0)
       {error("Invalid type: [$type_str].")}
-    elsif(defined($type_str) && scalar(grep {$type_str eq $_} keys(%types)))
+    elsif(defined($type_str) && exists($types{$type_str}))
       {
 	if($type_str eq 'enum' &&
 	   (!defined($accepts) || ref($accepts) ne 'ARRAY' ||
@@ -1008,16 +1450,27 @@ sub getOptType
 				      @$accepts) . ')' :
 				 'a reference to an empty array'))) .
 			      "] was passed in.")});
-	    quit(-95);
+            $num_setup_errors++;
+            return(undef); #does not signify error - just no type determined
 	  }
 
 	#If the user defined this as a bool, but set the default value to true,
 	#assume they actually want a negbool
 	if($type_str eq 'bool' && ref($get_opt_ref) eq 'SCALAR' &&
-	   defined($$get_opt_ref) && $$get_opt_ref)
+
+	   #The option is not a builtin boolean option (because these already
+	   #exist in the GetOptHash and would have to be removed from there in
+	   #order to work correctly, because the processing order is not
+	   #guaranteed, they reference the same variable, and thus would step on
+	   #eachother's toes randomly).  See req #349
+	   !exists($GetOptHash->{$get_opt_str}) &&
+	   (!defined($opt_name) || !exists($def_option_hash->{$opt_name})) &&
+
+	   ((defined($$get_opt_ref) && $$get_opt_ref) ||
+	    (defined($default) && $default)))
 	  {
-	    warning("Initial value of a [bool] should evaluate to false.  ",
-		    "Changing type of [",
+	    warning("Initial value of a [bool] should evaluate to ",
+		    "false.  Changing type of [",
 		    getDefaultFlag(scalar(getOptStrFlags($get_opt_str))),
 		    "] to [negbool].");
 	    $type_str = 'negbool';
@@ -1043,20 +1496,20 @@ sub getOptType
 #or empty strings.
 #Copies the array sent in.
 #Returns a copy of the conformed array and a string version of the array
-sub makeCheck2DScalarArray
+sub makeCheck2DFileArray
   {
     my $inarray = copyArray($_[0]);
 
     #If the array is not defined
     if(!defined($inarray))
       {
-	error("Undefined default input file encountered.");
+	error("Undefined default file encountered.");
 	return(undef,'');
       }
     #If it's a scalar, but an empty string
     elsif(ref(\$inarray) eq 'SCALAR' && $inarray eq '')
       {
-	error("Default input file defined as empty string.");
+	error("Default file defined as empty string.");
 	return(undef,'');
       }
     #If it's just a valid scalar value
@@ -1075,13 +1528,13 @@ sub makeCheck2DScalarArray
     #If it's an invalid 1D array containing undefined values
     elsif(ref($inarray) eq 'ARRAY' && scalar(grep {!defined($_)} @$inarray))
       {
-	error("Undefined default input file in a 1D array encountered.");
+	error("Undefined default file in a 1D array encountered.");
 	return(undef,'');
       }
     #If it's an invalid 1D array containing empty strings
     elsif(ref($inarray) eq 'ARRAY' && scalar(grep {$_ eq ''} @$inarray))
       {
-	error("Default input file defined as empty string in a 1D array.");
+	error("Default file defined as empty string in a 1D array.");
 	return(undef,'');
       }
     #If it's an invalid 1D array containing a mix of strings and something else
@@ -1094,15 +1547,7 @@ sub makeCheck2DScalarArray
       }
 
     #If it's a valid 2D array
-    elsif(ref($inarray) eq 'ARRAY' && scalar(@$inarray) &&
-	  scalar(@$inarray) ==
-	  scalar(grep {defined($_) && ref($_) eq 'ARRAY' && scalar(@$_)}
-		 @$inarray) &&
-	  scalar(@$inarray) ==
-	  scalar(grep {my $a=$_;scalar(@$a) && scalar(@$a) ==
-			 scalar(grep {defined($_) && ref(\$_) eq 'SCALAR' &&
-					$_ ne ''}
-				@$a)} @$inarray))
+    elsif(isTwoDArray($inarray,0))
       {return($inarray,'((' . join(')(',map {join(',',@$_)} @$inarray) . '))')}
 
     error("Invalid 2D array of non-empty file strings encountered.  All ",
@@ -1112,52 +1557,72 @@ sub makeCheck2DScalarArray
     return(undef,'');
   }
 
-#This method will add a relationship between file types to the
-#required_relationships array.
-#Globals used: $primary_infile_type,$input_files_array,$required_relationships
+sub isTwoDArray
+  {
+    my $inarray = $_[0];
+    my $empty_str_ok = defined($_[1]) ? $_[1] : 1;
+
+    return(ref($inarray) eq 'ARRAY' && scalar(@$inarray) &&
+	   scalar(@$inarray) ==
+	   scalar(grep {defined($_) && ref($_) eq 'ARRAY' && scalar(@$_)}
+		  @$inarray) &&
+	   scalar(@$inarray) ==
+	   scalar(grep {my $a=$_;scalar(@$a) && scalar(@$a) ==
+			  scalar(grep {defined($_) && ref(\$_) eq 'SCALAR' &&
+					 ($empty_str_ok || $_ ne '')}
+				 @$a)} @$inarray));
+  }
+
+#This method will add a relationship between file types and will fill in a
+#default relationship if the user did not define one and one is possible.
+#Globals used: $primary_infile_optid
 sub addRequiredRelationship
   {
-    my $file_type1   = $_[0]; #The file type being added
-    my $file_type2   = $_[1]; #A file type that should have already been added
+    my $ftype1_optid = $_[0]; #The file type being added
+    my $ftype2_optid = $_[1]; #A file type that should have already been added
     my $relationship = $_[2]; #String matching: '1','1:1','1:M','1:1orM'
+    my $success      = 0;     #Default = failure
 
     ##
     ## Input validation
     ##
 
     #Enforce required params and fill in defaults
-    if(!defined($file_type1))
+    if(!defined($ftype1_optid))
       {
 	error("First parameter (file type being added) is required.");
-	return();
+        $num_setup_errors++;
+	return($success);
       }
-    #Silently return if the last 2 params are not defined/empty
-    elsif((!defined($file_type2)   || $file_type2 eq '') &&
+    #Silently/successfully return if the last 2 params are not defined/empty
+    elsif((!defined($ftype2_optid) || $ftype2_optid eq '') &&
 	  (!defined($relationship) || $relationship eq ''))
-      {return()}
-    elsif(!defined($file_type2) || $file_type2 eq '')
+      {return($success = 1)}
+    elsif(!defined($ftype2_optid) || $ftype2_optid eq '')
       {
-	my $def_prim_inf_type = getDefaultPrimaryInfileID();
+	my $def_prim_inf_optid = getDefaultPrimaryInfileID();
 	#If the paired file type doesn't matter, set it to the first file type,
 	#even if it is with itself
-	if($relationship =~ /^\d+$/ && defined($def_prim_inf_type))
-	  {$file_type2 = $def_prim_inf_type}
-	elsif(!defined($primary_infile_type))
+	if($relationship =~ /^\d+$/ && defined($def_prim_inf_optid))
+	  {$ftype2_optid = $def_prim_inf_optid}
+	elsif(!defined($primary_infile_optid))
 	  {
 	    error("No PAIR_WITH file type was provided and no primary input ",
 		  "file type has yet been added.  Please supply ",
 		  "addInfileOption with a previously added file type ID ",
 		  "using the PAIR_WITH option or remove the ",
 		  "PAIR_RELAT option.");
-	    quit(-3);
+            $num_setup_errors++;
+            return($success);
 	  }
-	elsif($primary_infile_type == $file_type1)
+	elsif($primary_infile_optid == $ftype1_optid)
 	  {
 	    error("No PAIR_WITH file type was provided and the default ",
 		  "primary input file type is what is being added.  Please ",
 		  "supply addInfileOption with a previously added file type ",
 		  "ID using the PAIR_WITH option.  ");
-	    quit(-4);
+            $num_setup_errors++;
+            return($success);
 	  }
 	else
 	  {
@@ -1175,78 +1640,107 @@ sub addRequiredRelationship
 			      'or one input file type has been set as ',
 			      'primary, it is set here automatically with ',
 			      'this warning.'))});
-	    $file_type2 = $primary_infile_type;
+	    $ftype2_optid = $primary_infile_optid;
 	  }
       }
     elsif(!defined($relationship) || $relationship eq '')
       {$relationship = '1:1orM'}
 
     #Make sure the first file type ID is an unsigned integer
-    if($file_type1 !~ /^\d+$/)
+    if($ftype1_optid !~ /^\d+$/)
       {
-	error('Invalid file type 1 ID (first parameter): [',$file_type1,']');
-	return();
+	error('Invalid file type 1 ID (first parameter): [',$ftype1_optid,']');
+        $num_setup_errors++;
+	return($success);
       }
 
     #If the relationship is '1' (only 1 file allowed regardless of any input
     #file type), set the file type 2 to undefined
     if($relationship eq '1')
-      {undef($file_type2)}
+      {undef($ftype2_optid)}
     #Make sure the second file type ID is an unsigned integer
-    elsif($file_type2 !~ /^\d+$/)
+    elsif($ftype2_optid !~ /^\d+$/)
       {
-	error('Invalid file type 2 ID (second parameter): [',$file_type2,']');
-	return();
+	error('Invalid file type 2 ID (second parameter): [',$ftype2_optid,']');
+        $num_setup_errors++;
+	return($success);
       }
     #Make sure the second file type ID pre-exists
-    elsif($file_type2 >= scalar(@$input_files_array) ||
-	  $file_type1 == $file_type2)
+    elsif($ftype2_optid > $#{$usage_array} ||
+	  ($usage_array->[$ftype2_optid]->{OPTTYPE} ne 'infile' &&
+	   $usage_array->[$ftype2_optid]->{OPTTYPE} ne 'outfile') ||
+	  $ftype1_optid == $ftype2_optid)
       {
 	error('Second file type ID supplied (second parameter): ',
-	      "[$file_type2] does not exist or is a duplicate.  The ",
-	      'PAIR_WITH option can only take file type IDs which have been ',
-	      'previously added using addInfileOption or addOutfileOption.');
-	return();
+	      "[$ftype2_optid] does not exist, is not a file option, or is a ",
+	      'duplicate.',
+	      {DETAIL => 'The PAIR_WITH option can only take IDs as have been ',
+	       'previously returned by addInfileOption or addOutfileOption.'});
+        $num_setup_errors++;
+	return($success);
       }
 
     ##
     ## Add the relationship
     ##
 
-    push(@$required_relationships,[$file_type1,$file_type2,$relationship]);
+    $success = 1;
+    $usage_array->[$ftype1_optid]->{PAIRID}   = $ftype2_optid;
+    $usage_array->[$ftype1_optid]->{RELATION} = $relationship;
+
+    return($success);
   }
 
 #Checks strings for 7 types of params: infile, outfile, suffix, outdir,
 #general, 1darray, and 2darray
 sub isGetOptStrValid
   {
-    my $get_opt_str = $_[0];
-    my $type        = $_[1];
-    my $allow_dupes = defined($_[2]) ? $_[2] : 0;
-    my $answer      = 1;
+    my $get_opt_str   = $_[0];
+    my $type          = $_[1];
+    my $name_or_gostr = $_[2]; #Builtin option name or getoptkey default (e.g.
+                               #$default_infile_opt)
+    my $answer        = 1;
 
     if(!defined($get_opt_str))
       {
 	error("Invalid option flag definition: [undef].");
-	return(0);
+        $answer = 0;
+        return($answer);
       }
 
-    my @existing = getDupeFlags($get_opt_str);
+    #Don't hold builtin options to the same standard
+    my $conflicts = [];
+    my @existing  = getDupeFlags($get_opt_str,$name_or_gostr,$conflicts);
     if(scalar(@existing))
       {
-	if(!$allow_dupes)
-	  {
-	    error("Duplicate flags detected: [",join(',',@existing),"].");
-	    debug({LEVEL => -1},"Existing flags: [",
-		  join(',',keys(%$GetOptHash)),
-		  "]. Adding Flag: [$get_opt_str]");
-	    $answer = 0;
-	    return($answer);
-	  }
-	else
-	  {debug({LEVEL => -2},
-		 "Duplicate flags detected: [",join(',',@existing),
-		 "], but allowed.")}
+        #Builtin option conflicts
+        my @bics = grep {exists($def_option_hash->{$_})} @$conflicts;
+        #Default file option conflicts
+        my @dfcs = grep {!exists($def_option_hash->{$_})} @$conflicts;
+        #Determine whether the dupes are due to conflicts with builtin options
+        my $detail = '';
+        $detail .= (scalar(@bics) == 0 ? '' :
+                    join('',('The flag(s) of the following builtin option(s) ',
+                             'must be edited to not conflict using: [' .
+                             join(',',
+                                  map {"$_: $def_option_hash->{$_}->{METHOD}"}
+                                  @bics),'].')));
+        $detail .= (scalar(@dfcs) == 0 ? '' :
+                    ($detail eq '' ? '' : '  ') .
+                    join('',('These flags conflict with default file options ',
+                             'and may need to be added explicitly with the ',
+                             'method shown here using a different flag value: ',
+                             '[',join(',',@dfcs) . '].')));
+
+        error("Duplicate flags detected: [",join(',',@existing),"].",
+              ($detail eq '' ? '' : {DETAIL => $detail}));
+        debug({LEVEL => -1},"Existing flags: [",
+              join(',',keys(%$flag_check_hash)),
+              "]. Adding Flag: [$get_opt_str]");
+
+        $answer = 0;
+
+        return($answer);
       }
 
     #General validity checks
@@ -1265,14 +1759,12 @@ sub isGetOptStrValid
     if($get_opt_str !~ /=s$/)
       {$ok = 0}
 
-    if($type eq 'infile' || $type eq 'outfile' ||
-       $type eq 'suffix' || $type eq 'outdir')
+    if(exists($fileopt_types->{$type}))
       {
 	if(!$ok)
 	  {
-	    error("In order to split the values the user passes in, the ",
-		  "option flag specification must end with '=s'.  ",
-		  "[$get_opt_str] was passed in.");
+	    error("The option flag specification for $type must end with ",
+		  "'=s'.  [$get_opt_str] was passed in.");
 	    $answer = 0;
 	  }
       }
@@ -1306,85 +1798,120 @@ sub isGetOptStrValid
 
 #This method populates and checks flags against the flag_check_hash and
 #Returns the specific -f or --flag values that have duplicates
-#globals used: $flag_check_hash, $GetOptHash
+#globals used: $flag_check_hash
 sub getDupeFlags
   {
-    my $get_opt_str = $_[0];
+    my $get_opt_str      = $_[0];
+    my $exclude_builtin  = defined($_[1]) ? $_[1] : '';
+    my $builtin_conflict = defined($_[2]) ? $_[2] : []; #For retrieval for errs
+    my $conflict_hash    = {};
+    my $new_flags        = getOptStrFlags($get_opt_str,1);
+    my $existing         = [];
+    my $self_check       = {};
 
-    my @opt_strs = ();
-    my $existing = [];
-    if(scalar(keys(%$flag_check_hash)) == 0 && scalar(keys(%$GetOptHash)))
-      {push(@opt_strs,keys(%$GetOptHash))}
+    debug({LEVEL => -2},"Looking for dupes of [",join(',',sort(@$new_flags)),
+          "] in: [",join(',',sort(keys(%$flag_check_hash))),"].");
 
-    push(@opt_strs,$get_opt_str);
+    my $builtin_check = {};
 
-    debug({LEVEL => -2},"Looking for dupes in: [",
-	  join(',',map {defined($_) ? $_ : 'undef'} @opt_strs),"].");
+    #Add the builtin general options
+    my $biopt_lookup = {};
+    my @builtins = (map {my $op = $_;my @flgs =
+                           getOptStrFlags(makeGetOptKey($def_option_hash->{$op}
+                                                        ->{PARAMS}->{FLAG},
+                                                        $def_option_hash->{$op}
+                                                        ->{PARAMS}->{TYPE},
+                                                        1,'getDupeFlags'));
+                         foreach(@flgs){$biopt_lookup->{$_} = $op}
+                         @flgs;
+                       }
+                    grep {$_ ne $exclude_builtin &&
+                            !$def_option_hash->{$_}->{ADDED}}
+                    keys(%{$def_option_hash}));
 
-    foreach my $opt_str (@opt_strs)
+    $biopt_lookup->{$default_infile_opt} =
+      "addInfileOption(FLAG => '$default_infile_opt')";
+    $biopt_lookup->{$default_outfile_suffix_opt} =
+      "addOutfileSuffixOption(FLAG => '$default_outfile_suffix_opt')";
+    $biopt_lookup->{$default_outfile_opt} =
+      "addOutfileOption(FLAG => '$default_outfile_opt')";
+    $biopt_lookup->{$default_outdir_opt} =
+      "addOutdirOption(FLAG => '$default_outdir_opt')";
+    $biopt_lookup->{$default_logfile_opt} =
+      "addLogfileOption(FLAG => '$default_logfile_opt')";
+    $biopt_lookup->{$default_logfile_suffix_opt} =
+      "addLogfileSuffixOption(FLAG => '$default_logfile_suffix_opt')";
+
+    if($get_opt_str ne $exclude_builtin || $exclude_builtin eq '')
       {
-	my $negatable = ($opt_str =~ /\!$/);
-
-	#Get rid of the flag modifiers, etc.
-	$opt_str =~ s/[=:!+].*//;
-
-	#Cycle through the flags (without the dashes)
-	foreach my $flag (split(/\|+/,$opt_str))
-	  {
-	    my $tflag = $flag;
-
-	    if(exists($flag_check_hash->{$flag}))
-	      {push(@$existing,(length($flag) == 1 ? "-$flag" : "--$flag"))}
-
-	    $flag_check_hash->{$tflag} = 0;
-
-	    if($negatable)
-	      {
-		$flag_check_hash->{"no$tflag"}  = 0;
-		$flag_check_hash->{"no-$tflag"} = 0;
-	      }
-	  }
+        #Make a hash for the flags being checked
+        my $nfhash = {map {my $nf=$_;$nf=~s/^-+//;$nf => 0} @$new_flags};
+        #Add the builtin file options (even though they may not be added)
+        foreach my $bikey (grep {$_ ne $exclude_builtin}
+                           ($default_infile_opt,$default_outfile_suffix_opt,
+                            $default_outfile_opt,$default_outdir_opt,
+                            $default_logfile_opt,$default_logfile_suffix_opt))
+          {
+            #Extract the end of the getopt string (e.g. ':+' or '=s')
+            my $bikeyend = $bikey;
+            $bikeyend =~ s/.*?(?=[=:!+])//;
+            #See if we can remove
+            my @biflags = (grep {!exists($nfhash->{$_})} map {s/^-+//;$_}
+                           getOptStrFlags($bikey));
+            my $newbikey = join('|',@biflags) . $bikeyend;
+            if(scalar(@biflags) == 0)
+              {
+                push(@builtins,getOptStrFlags($bikey));
+                foreach(getOptStrFlags($bikey))
+                  {$biopt_lookup->{$_} = $biopt_lookup->{$bikey}}
+              }
+            else
+              {
+                foreach my $biflag (grep {$_ eq $bikey && $bikey ne $newbikey}
+                                    grep {$_ ne $exclude_builtin}
+                                    ($default_infile_opt,
+                                     $default_outfile_suffix_opt,
+                                     $default_outfile_opt,$default_outdir_opt,
+                                     $default_logfile_opt,
+                                     $default_logfile_suffix_opt))
+                  {$biflag = $newbikey}
+              }
+          }
       }
 
-    if(wantarray)
-      {return(@$existing)}
+    #Create an on-the-fly hash of flags for builtin options not yet added
+    foreach my $f (@builtins)
+      {$builtin_check->{$f} = 0}
 
-    return($existing);
+    foreach my $flag (@$new_flags)
+      {
+	if(exists($flag_check_hash->{$flag}) || exists($self_check->{$flag}) ||
+           exists($builtin_check->{$flag}))
+	  {
+            push(@$existing,$flag);
+            if(exists($builtin_check->{$flag}))
+              {$conflict_hash->{$biopt_lookup->{$flag}}++}
+          }
+	$self_check->{$flag} = 0;
+      }
+
+    foreach my $f (sort(keys(%$conflict_hash)))
+      {push(@$builtin_conflict,$f)}
+
+    return(wantarray ? @$existing : $existing);
   }
 
-#Globals used: $GetOptHash
+#Globals used: $flag_check_hash, $usage_array
 sub removeDupeFlags
   {
     my $get_opt_str = $_[0];
 
     my @opt_strs = ();
     my $hash = {};
-    if(scalar(keys(%$GetOptHash)))
-      {push(@opt_strs,keys(%$GetOptHash))}
+    if(scalar(@$usage_array))
+      {push(@opt_strs,map {$_->{GETOPTKEY}} @$usage_array)}
     else
       {return($get_opt_str)}
-
-    foreach my $opt_str (@opt_strs)
-      {
-	my $negatable = ($opt_str =~ /\!$/);
-
-	#Get rid of the flag modifiers, etc.
-	$opt_str =~ s/[=:!+].*//;
-
-	#Cycle through the flags (without the dashes)
-	foreach my $flag (split(/\|+/,$opt_str))
-	  {
-	    my $tflag = $flag;
-
-	    $hash->{$tflag} = 0;
-
-	    if($negatable)
-	      {
-		$hash->{"no$tflag"}  = 0;
-		$hash->{"no-$tflag"} = 0;
-	      }
-	  }
-      }
 
     #Separate the end of the get opt str from the body
     my $get_opt_str_end = $get_opt_str;
@@ -1400,9 +1927,8 @@ sub removeDupeFlags
 
     $new_get_opt_str =
       join('|',
-	   grep {!exists($hash->{$_}) &&
-		   (!$negatable || (!exists($hash->{"no$_"}) &&
-				    !exists($hash->{"no-$_"})))}
+	   grep {my $s = $_;my @fs = getOptStrFlags("$s$get_opt_str_end",1);
+                 scalar(grep {exists($flag_check_hash->{$_})} @fs) == 0}
 	   split(/\|/,$new_get_opt_str));
 
     if($new_get_opt_str eq '')
@@ -1417,32 +1943,33 @@ sub removeDupeFlags
 #marks it as an outfile in the outfile_types_array.  It also adds a hidden
 #outfile_suffix option with a static default value of an empty string.  That
 #way, no functionality needs to change with regard to outfile checking.
-#Though, there needs to be checks added to the outfile_types_hash to not
-#complain about missing input files.
-#Globals used: $outf_to_usage_hash
 sub addOutfileOption
   {
     my @in = getSubParams([qw(FLAG|GETOPTKEY COLLISIONMODE REQUIRED PRIMARY
-			      DEFAULT SMRY|SMRY_DESC|SHORT_DESC
-			      DETAIL|DETAIL_DESC|LONG_DESC FORMAT|FORMAT_DESC
-			      HIDDEN PAIR_WITH PAIR_RELAT FLAGLESS ADVANCED)],
+			      DEFAULT SHORT_DESC|SMRY|SMRY_DESC
+			      LONG_DESC|DETAIL|DETAIL_DESC FORMAT|FORMAT_DESC
+			      HIDDEN PAIR_WITH PAIR_RELAT FLAGLESS ADVANCED
+			      HEADING DISPDEF)],
 			  [scalar(@_) ? qw(FLAG|GETOPTKEY) : ()],
 			  [@_]);
-    my $get_opt_str = $in[0]; #e.g. 'o|outfile=s'
-    my $collid_mode = getCollisionMode(undef,'outfile',$in[1]);
-    my $required    = $in[2]; #Is file required?: 0 (false) or non-zero (true)
-    my $primary     = defined($in[3]) ? $in[3] : 1; #non-0:stdout 0:no output
-    my $default     = $in[4]; #e.g. 'my_output_file.txt'
-    my $smry_desc   = $in[5]; #e.g. 'Input file(s).  See --help for format.'
-                              #Empty/undefined = exclude from short usage
-    my $detail_desc = $in[6]; #e.g. 'Input file(s).  Space separated, globs...'
-    my $format_desc = $in[7]; #e.g. 'Tab delimited text w/ columns: 1. Name...'
-    my $hidden      = $in[8]; #0 or non-0. Requires a default. Excludes from
-                              #usage output.
-    my $req_with    = $in[9]; #File type ID (as returned by this sub)
-    my $req_rel_str = getRelationStr($in[10]); #e.g. 1,1:1,1:M,1:1orM
-    my $flagless    = $in[11];#Whether the option can be supplied sans flag
-    my $advanced    = $in[12];#Advanced options print when extended >= 2
+    my $get_opt_str  = $in[0]; #e.g. 'o|outfile=s'
+    my $collide_mode = getCollisionMode(undef,'outfile',$in[1]);
+    my $required     = $in[2]; #Is file required?: 0 (false) or non-zero (true)
+    my $primary      = $in[3]; #non-0:stdout 0:no output
+    my $default      = $in[4]; #e.g. 'my_output_file.txt'
+    my $smry_desc    = $in[5]; #e.g. 'Input file(s).  See --help for format.'
+                               #Empty/undefined = exclude from short usage
+    my $detail_desc  = $in[6]; #e.g. 'Input file(s).  Space separated, globs...'
+    my $format_desc  = $in[7]; #e.g. 'Tab delimited text w/ columns: 1. Name...'
+    my $hidden       = $in[8]; #0 or non-0. Requires a default. Excludes from
+                               #usage output.
+    my $req_with_opt = $in[9];
+    my $req_rel_str  = getRelationStr($in[10]);  #e.g. 1,1:1,1:M,1:1orM
+    my $flagless     = $in[11];#Whether the option can be supplied sans flag
+    my $advanced     = $in[12];#Advanced options print when extended >= 2
+    my $heading      = $in[13];#Section heading to print in extended usage
+    my $display_def  = $in[14];#The default to display in the usage
+    my($req_with_uhash);
 
     #Trim leading & trailing hard returns and white space characters (from
     #using '<<')
@@ -1453,7 +1980,7 @@ sub addOutfileOption
     $format_desc =~ s/^\s+//s if(defined($format_desc));
     $format_desc =~ s/\s+$//s if(defined($format_desc));
 
-    if($command_line_processed)
+    if($command_line_stage >= ARGSREAD)
       {
 	error("You cannot add command line options (i.e. call ",
 	      "addOutfileOption()) after the command line has already been ",
@@ -1461,10 +1988,6 @@ sub addOutfileOption
 	      "re-initializing (i.e. calling _init()).");
 	return(undef);
       }
-
-    ##
-    ## Create the option associated with a faux entry in the input_files_array
-    ##
 
     #Defaults mode - Only call with no params once.
     my $adding_default = (scalar(@in) == 0);
@@ -1483,77 +2006,83 @@ sub addOutfileOption
 	  {
 	    error('Unable to add default output file type ',
 		  "[$default_outfile_opt] due to redundant flags: [",
-		  join(',',getDupeFlags($get_opt_str)),'].');
+		  join(',',getDupeFlags($default_outfile_opt,
+                                        $default_outfile_opt)),'].');
 	    $default_outfile_opt = $get_opt_str;
 	    return(undef);
 	  }
 	$default_outfile_opt = $get_opt_str;
 
-	$default_outfile_added = 1;
-	$default_outfile_id    = scalar(@$input_files_array);
 	#The descriptions are added below
 
-	#If a compatible outfile type exists that we will be tagteamed up with,
+	#If a compatible infile type exists that we will be linked to,
 	#match it.  (Returns undef if none.)
-	$req_with = getDefaultPrimaryLinkedInfileID();
+	$req_with_opt = getDefaultPrimaryLinkedInfileID();
 
-	if(defined($req_with))
+	if(defined($req_with_opt))
 	  {$req_rel_str = getRelationStr('1:1orM')}
       }
 
     #Allow the flag to be an array of scalars and turn it into a get opt str
     my $save_getoptstr = $get_opt_str;
-    $get_opt_str = makeGetOptKey($get_opt_str,'outfile',1,'addOutfileOption');
+    $get_opt_str = makeGetOptKey($get_opt_str,'outfile',0,'addOutfileOption');
 
     if(defined($get_opt_str))
       {$get_opt_str = fixStringOpt($get_opt_str)}
+    else
+      {
+	$num_setup_errors++;
+	return(undef);
+      }
 
-    if(!isGetOptStrValid($get_opt_str,'outfile'))
+    if(!isGetOptStrValid($get_opt_str,'outfile',$default_outfile_opt))
       {
 	if($adding_default)
 	  {warning("Unable to add default output file option.")}
 	else
-	  {
-	    error("Invalid GetOpt parameter flag definition: ",
-		  "[$save_getoptstr] for outfile type.");
-	    quit(-73);
-	  }
+	  {$num_setup_errors++}
 	return(undef);
       }
 
-    if(defined($collid_mode) && $collid_mode ne '' &&
-       $collid_mode ne 'error' && $collid_mode ne 'rename' &&
-       $collid_mode ne 'merge')
-      {error("Invalid COLLISIONMODE parameter: [$collid_mode].  Must be one ",
-	     "of ['error','merge','rename'].")}
+    if(defined($collide_mode) && $collide_mode ne '' &&
+       $collide_mode ne 'error' && $collide_mode ne 'rename' &&
+       $collide_mode ne 'merge')
+      {
+	my $defcoll = getCollisionMode(undef,'outfile');
+	error("Invalid COLLISIONMODE parameter: [$collide_mode].  Must be one ",
+	      "of ['error','merge','rename'].  Reverting to default: ",
+	      "[$defcoll].");
+	$collide_mode = $defcoll;
+      }
 
     if(defined($required) && $required !~ /^\d+$/)
       {error("Invalid REQUIRED parameter: [$required].")}
 
-    if(defined($req_with))
+    if(defined($req_with_opt))
       {
-	my $uhash = getInfileUsageHash($req_with);
-	if(!defined($uhash))
-	  {
-	    #getInfileUsageHash should have already issued an error
-	    quit(-68);
-	  }
-	elsif(!exists($uhash->{OPTTYPE}))
-	  {error("Invalid PAIR_WITH input file ID: [$req_with].  Must be an ",
-		 "ID returned by addInfileOption.")}
 	#TODO: Requirement 280 will allow linking to either input or output
 	#      file types
-	elsif($uhash->{OPTTYPE} ne 'infile')
-	  {error("File type ID passed in using the PAIR_WITH parameter must ",
-		 "be an input file type ID.  Instead, received an ID of ",
-		 "type: [$uhash->{OPTTYPE}].")}
+	if(!isInt($req_with_opt) || $req_with_opt < 0 ||
+	   $req_with_opt > $#{$usage_array} ||
+	   $usage_array->[$req_with_opt]->{OPTTYPE} ne 'infile')
+	  {
+	    error("Invalid PAIR_WITH option ID: [$req_with_opt]",
+                  (!isInt($req_with_opt) || $req_with_opt < 0 ||
+                   $req_with_opt > $#{$usage_array} ? '' : ' for option [' .
+                   "$usage_array->[$req_with_opt]->{OPTFLAG_DEF}]"),
+                  ".  Must be an ID as returned by addInfileOption.");
+            $num_setup_errors++;
+            return(undef);
+	  }
+	$req_with_uhash = $usage_array->[$req_with_opt];
       }
+
 
     #If hidden is not defined, default to the hidden state of whatever file
     #type this might be linked to, otherwise 0.
-    if(!defined($hidden) && defined($req_with))
+    if(!defined($hidden) && defined($req_with_opt))
       {
-	if(isFileTypeHidden($req_with))
+	if($req_with_uhash->{HIDDEN})
 	  {$hidden = 1}
 	else
 	  {$hidden = 0}
@@ -1563,55 +2092,59 @@ sub addOutfileOption
 
     my $flags = [getOptStrFlags($get_opt_str)];
     my $flag  = getDefaultFlag($flags);
+    my $name  = createOptionNameFromFlags($flags);
 
-    if(defined($required) && defined($hidden) && $required && $hidden)
-      {
-	warning('Required options cannot be hidden.  Setting option: [',
-		"$flag] as not hidden.");
-	$hidden = 0;
-      }
-
-    my $file_type_index = scalar(@$input_files_array);
-    push(@$input_files_array,[]);
-    $outfile_types_hash->{$file_type_index} = 1; #Uses existence 4 type determ.
-
-    my $default_str = '';
+    #Validity of hidden is checked in applyOptionAddendums in case this option
+    #ends up being part of a tagteam
 
     #Add the default(s) to the default infiles array, to be globbed when the
     #command line is processed
     if(defined($default))
       {
-	my($twodarray);
-	($twodarray,$default_str) = makeCheck2DScalarArray($default);
+	my($twodarray,$default_str) = makeCheck2DFileArray($default);
 	if(defined($twodarray))
-	  {$default_infiles_array->[$file_type_index] = $twodarray}
+	  {$default = $twodarray}
 	else
-	  {quit(-6)}
+	  {
+            $num_setup_errors++;
+            return(undef);
+          }
       }
 
-    $infile_flag_array->[$file_type_index] = $flag;
+    if(defined($display_def) && (ref($display_def) ne '' || $display_def eq ''))
+      {
+	error("Invalid display default.  Must be a non-empty string.  ",
+	      "Ignoring.");
+	undef($display_def);
+      }
+
+    #Note: primary defaults to true in addToUsage if not defined for outfile &
+    #suffix types
+    if(!defined($display_def) &&
+       (!defined($default) || scalar(@$default) == 0) &&
+       (!defined($primary) || $primary) && !$required)
+      {$display_def = 'STDOUT'}
 
     #Note, addToUsage won't include if set to empty string
     if(!defined($smry_desc) || $smry_desc eq '')
       {
 	if($required)
-	  {$smry_desc = 'Output file(s).'}
+	  {$smry_desc =
+             defined($detail_desc) ? $detail_desc : 'Output file(s).'}
 	elsif(!defined($smry_desc))
 	  {$smry_desc = ''}
       }
 
     if(!defined($detail_desc) || $detail_desc eq '')
       {$detail_desc =
-	 join('',('Output file(s)',
-		  ($file_type_index ?
-		   " " . (defined($req_with) &&
-			  !exists($outfile_types_hash->{$req_with}) ?
-			  "associated with [" . getInfileFlag($req_with) .
-			  "] input file(s)" .
-			  (defined($req_rel_str) ?
-			   " in a " . getDispRelStr($req_rel_str) .
-			   " relationship" : '') :
-			  "type " . ($file_type_index + 1)) : ''),
+	 join('',('Output file(s) ',
+		  (defined($req_with_opt) &&
+		   $usage_array->[$req_with_opt]->{OPTTYPE} eq 'infile' ?
+		   "associated with [" .
+		   getFlag($usage_array->[$req_with_opt]) . "] input file(s)" .
+		   (defined($req_rel_str) ?
+		    " in a " . getDispRelStr($req_rel_str) . " relationship" :
+		    '') : "type " . (getNextUsageIndex() + 1)),
 		  '.',(defined($format_desc) && $format_desc ne '' ?
 		       '  See --help for file format.' : '')))}
     #If the description doesn't reference the help flag for the file format and
@@ -1620,60 +2153,62 @@ sub addOutfileOption
 	  $format_desc ne '')
       {$detail_desc .= "\n\nSee --help for file format."}
 
-    my $getoptsub = 'sub {push(@{$input_files_array->[' . $file_type_index .
-      ']},[sglob($_[1])])}';
-    $GetOptHash->{$get_opt_str} = eval($getoptsub);
-
-    if($required)
-      {push(@$required_outfile_types,$file_type_index)}
+    $GetOptHash->{$get_opt_str} = getGetoptSub($name,0);
 
     if(defined($flagless) && $flagless)
       {
-	if(defined($flagless_multival_type) && $flagless_multival_type > -1)
+	if(defined($flagless_multival_optid) && $flagless_multival_optid > -1)
 	  {
 	    error("An additional multi-value option has been designated as ",
 		  "'flagless': [$get_opt_str]: [$flagless].  Only 1 is ",
 		  "allowed.",
 		  {DETAIL => "First flagless option was: [" .
-		   getDefaultFlag($usage_array->[$flagless_multival_type]
-				  ->{OPTFLAG}) . "]."});
+		   $usage_array->[$flagless_multival_optid]->{OPTFLAG_DEF} .
+		   "]."});
 	    return(undef);
 	  }
 
-	$getoptsub = 'sub {checkFileOpt($_[0],1);push(@{$input_files_array->['.
-	  $file_type_index . ']},[sglob($_[0])])}';
-	$GetOptHash->{'<>'} = eval($getoptsub);
+	$GetOptHash->{'<>'} = getGetoptSub($name,1);
 
 	#This assumes that the call to addToUsage a few lines below is the
 	#immediate next call to addToUsage
-	$flagless_multival_type = getNextUsageIndex();
+	$flagless_multival_optid = getNextUsageIndex();
       }
 
-    #If req_with is not defined, this call just returns without doing anything
-    addRequiredRelationship($file_type_index,$req_with,$req_rel_str);
+    my $usage_index = addToUsage($get_opt_str,
+                                 $flags,
+                                 $smry_desc,
+                                 $detail_desc,
+                                 $required,
+                                 $display_def,
+                                 $default,
+                                 undef,         #accepts
+                                 $hidden,
+                                 'outfile',
+                                 $flagless,
+                                 $advanced,
+                                 $heading,
+                                 undef,         #usage name
+                                 undef,         #usage order
+                                 [],            #VARREF_PRG: ref programmer spld
+                                 $req_with_opt,
+                                 $req_rel_str,
+                                 undef,
+                                 $primary,
+                                 $format_desc,
+                                 $collide_mode);
 
-    if($default_str eq '' && $primary && !$required)
-      {$default_str = 'STDOUT'}
-    elsif($default_str ne '')
+    if(!defined($usage_index))
       {
-	#If the default value is simple, clean up its display
-	if($default_str !~ /\)\(/)
-	  {
-	    $default_str =~ s/^\(\(//;
-	    $default_str =~ s/\)\)$//;
-	  }
+        $num_setup_errors++;
+        return(undef);
       }
 
-    push(@$usage_file_indexes,
-	 addToUsage($get_opt_str,$flags,$smry_desc,$detail_desc,$required,
-		    $default_str,undef,$hidden,'outfile',$flagless,$advanced,
-		    undef,undef,$primary,$format_desc,$file_type_index));
-
-    my $usage_index = $#{$usage_array};
-
-    ##
-    ## Create a hidden outfile_suffix_array element for the faux input file
-    ##
+    if($adding_default)
+      {
+	$default_outfile_added = 1;
+	$default_outfile_optid = $usage_index;
+      }
 
     my $hidden_opt_str = join('|',
 			      (map {if(/[\:\=\+\!]/){
@@ -1691,17 +2226,15 @@ sub addOutfileOption
     #We need to return the suffix_id returned by addOutfileSuffixOption so that
     #getOutfile returns the correct output file name.
 
-    my $suffix_id =
-      addOutfileSuffixOption($hidden_opt_str,$file_type_index,undef,1,$primary,
-			     '',1,'',$error_message,$error_message,
-			     $collid_mode);
+    my $suffix_optid = addOutfileSuffixOption($hidden_opt_str,$usage_index,
+					      undef,$required,$primary,'',1,'',
+					      $error_message,$error_message,
+					      $collide_mode);
 
-    #TODO: This will change with requirement 280
-    #This will overwrite the value set by addOutfileSuffixOption so that we get
-    #the actual usage hash of the desired option
-    $outf_to_usage_hash->{$suffix_id} = $usage_index;
+    #If req_with is not defined, this call just returns without doing anything
+    addRequiredRelationship($usage_index,$req_with_opt,$req_rel_str);
 
-    return($suffix_id);
+    return($usage_index);
   }
 
 #Makes relationship strings such as '1','1:1','1:M','1:1orM' human-readable
@@ -1723,338 +2256,260 @@ sub getDispRelStr
     return('ERROR');
   }
 
-#This method checks whether a file type (infile or outfile) is required.
-#If there is an error, returns false
-sub isFileTypeRequired
+#Globals used: usage_array
+sub getOutdirFlag
   {
-    my $file_type_id = $_[0];
+    my $usage_hash     = $_[0];
+    my $extended       = getVarref('extended',1,1,1);
+    my $local_extended = (defined($_[1]) ? (defined($extended) && $extended ?
+					    $extended : $_[1]) :
+			  (defined($extended) ? $extended : 0));
 
-    if(!defined($file_type_id) || $file_type_id >= scalar(@$input_files_array))
-      {
-	error("Invalid file type ID: [",
-	      (defined($file_type_id) ? $file_type_id : 'undef'),"].");
-	return(0);
-      }
+    ##TODO: The outdir options need to be fixed. See requirement 178.  This can
+    #be called before the outdir option has been added - and there's currently
+    #no support for more than one outdir.  The return here can be wrong if they
+    #add a custom outdir option later.
+    if(!defined($usage_hash) &&
+       scalar(grep {$_->{OPTTYPE} eq 'outdir'} @$usage_array) > 1)
+      {error("More than one outdir option and no usage hash supplied.",
+	     {DETAIL => 'See requirement 178.'})}
+    elsif(!defined($usage_hash) &&
+	  scalar(grep {$_->{OPTTYPE} eq 'outdir'} @$usage_array) == 0)
+      {warning("No outdir options exist and no usage hash supplied.",
+	       {DETAIL => 'See requirement 178.'})
+	 if($command_line_stage >= DONE)}
+    elsif(defined($usage_hash) && $usage_hash->{OPTTYPE} ne 'outdir')
+      {error('Invalid outdir usage hash.')}
 
-    my @required_types = @$required_infile_types;
-    push(@required_types,@$required_outfile_types)
-      if(scalar(@$required_outfile_types));
+    #Default to the yet-to-be-added default outdir option if there's still a
+    #chance it could be added
+    if(!defined($usage_hash) && $command_line_stage < DEFAULTED)
+      {return(getDefaultFlag([getOptStrFlags($default_outdir_opt)]))}
+    elsif(!defined($usage_hash) &&
+	  scalar(grep {$_->{OPTTYPE} eq 'outdir'} @$usage_array) == 1)
+      {return(getFlag((grep {$_->{OPTTYPE} eq 'outdir'} @$usage_array)[0],
+		      $local_extended))}
+    elsif(!defined($usage_hash))
+      {return('')}
 
-    if(scalar(@required_types) == 0)
-      {return(0)}
-
-    #If the supplied type is among the required file types
-    if(scalar(grep {$_ == $file_type_id} @required_types))
-      {return(1)}
-
-    return(0)
+    return(getFlag(@_));
   }
 
-sub isFileTypeHidden
+sub getRepresentativeFlag
   {
-    my $file_type_id = $_[0];
-
-    if(!defined($file_type_id) || $file_type_id >= scalar(@$input_files_array))
+    my $usage_hash = $_[0];
+    if(defined($usage_hash))
       {
-	error("Invalid file type ID: [",
-	      (defined($file_type_id) ? $file_type_id : 'undef'),"].");
-	return(0);
+	#If the command line has been processed, use the flag that the user
+	#supplied (if they used a flag)
+	if($command_line_stage >= ARGSREAD && $usage_hash->{SUPPLIED} &&
+	   defined($usage_hash->{OPTFLAG_SUP}) &&
+	   isFlag($usage_hash,$usage_hash->{OPTFLAG_SUP}))
+	  {
+	    my $match = getMatchingFlag($usage_hash,$usage_hash->{OPTFLAG_SUP});
+	    if($match ne '')
+	      {return(getMatchingFlag($usage_hash,$usage_hash->{OPTFLAG_SUP}))}
+	    else
+	      {warning("Error finding matching flag.")}
+	  }
+
+	if(scalar(@{$usage_hash->{OPTFLAGS}}))
+	  {return(getDefaultFlag($usage_hash->{OPTFLAGS}))}
       }
 
-    my $uhash = {};
-    if(exists($outfile_types_hash->{$file_type_id}))
-      {
-	#This assumes there's only 1 (hidden) suffix when the type is outfile
-	$uhash = getOutfileUsageHash((getSuffixIDs($file_type_id))[0]);
-      }
-    else
-      {$uhash = getInfileUsageHash($file_type_id)}
-
-    if(!defined($uhash) || !exists($uhash->{HIDDEN}) ||
-       !defined($uhash->{HIDDEN}))
-      {
-	warning("Usage hash for file type ID [$file_type_id] invalid/not ",
-		"found.");
-	return(0);
-      }
-
-    return($uhash->{HIDDEN})
+    return('');
   }
 
-sub isFileTypePrimary
+sub getBestFlag
   {
-    my $file_type_id = $_[0];
-
-    if(!defined($file_type_id) || $file_type_id >= scalar(@$input_files_array))
-      {
-	error("Invalid file type ID: [",
-	      (defined($file_type_id) ? $file_type_id : 'undef'),"].");
-	return(0);
-      }
-
-    my $uhash = {};
-    if(exists($outfile_types_hash->{$file_type_id}))
-      {
-	#This assumes there's only 1 (hidden) suffix when the type is outfile
-	$uhash = getOutfileUsageHash((getSuffixIDs($file_type_id))[0]);
-      }
-    else
-      {$uhash = getInfileUsageHash($file_type_id)}
-
-    if(!defined($uhash) || !exists($uhash->{PRIMARY}) ||
-       !defined($uhash->{PRIMARY}))
-      {
-	warning("Usage hash for file type ID [$file_type_id] invalid/not ",
-		"found.");
-	return(0);
-      }
-
-    return($uhash->{PRIMARY})
+    my $uh = $_[0];
+    return(defined($uh) ?
+	   ($uh->{SUPPLIED} ? $uh->{OPTFLAG_SUP} :
+	    ($uh->{SUPPLIED_UDF} ? $uh->{OPTFLAG_SUP_UDF} :
+	     $uh->{OPTFLAG_DEF})) : '');
   }
 
-#Determines whether a file type (infile or outfile) has an actual default
-#value.  This does not count the display default in the usage hash - only the
-#actual default set.
-#Globals used: $default_infiles_array
-sub isFileTypeDefaulted
+sub isFlag
   {
-    my $file_type_id = $_[0];
+    my $usage_hash    = $_[0];
+    my $possible_flag = $_[1];
+    my $possible_flag_pat = quotemeta($possible_flag);
 
-    if(!defined($file_type_id) || $file_type_id >= scalar(@$input_files_array))
-      {
-	error("Invalid file type ID: [",
-	      (defined($file_type_id) ? $file_type_id : 'undef'),"].");
-	return(0);
-      }
-
-    #If the default infile array is defined, is large enough for this file
-    #type, there's a sub-array defined for this file type, it has a sub array
-    #in it, and at least 1 of the sub-sub-arrays has something in it
-    #(regardless of whether it's valid or not), we will return true
-    if(defined($default_infiles_array) &&
-       scalar(@$default_infiles_array) > $file_type_id &&
-       defined($default_infiles_array->[$file_type_id]) &&
-       scalar(@{$default_infiles_array->[$file_type_id]}) &&
-       scalar(grep {scalar(@$_)} @{$default_infiles_array->[$file_type_id]}))
+    if($possible_flag =~ /^\-\-?\S/ &&
+       scalar(grep {/^$possible_flag_pat/} @{$usage_hash->{OPTFLAGS}}))
       {return(1)}
 
     return(0);
   }
 
-#This returns a file flag and/or 'stdin' or the default file name(s) depending
-#on whether the file option is hidden, primary, or has a default.  Supplying
-#--extended 2+ will always show the flag, hidden or not.
-#Globals used: $extended
-sub getFileFlag
+sub getMatchingFlag
   {
-    my $file_type_index = $_[0];
-    #Always use --extended if supplied and non-0, else use the supplied param
-    #Special case: force flag only when extended == -1
-    my $local_extended  = (defined($_[1]) ?
-			   (defined($extended) && $extended ?
-			    $extended : $_[1]) :
-			   (defined($extended) ? $extended : 0));
+    my $usage_hash    = $_[0];
+    my $possible_flag = $_[1];
 
-    if(!defined($file_type_index) || $file_type_index < 0 ||
-       $file_type_index >= scalar(@$infile_flag_array))
+    my $exact_flags = [grep {$_ eq $possible_flag} @{$usage_hash->{OPTFLAGS}}];
+    if(scalar(@$exact_flags))
+      {return($exact_flags->[0])}
+
+    my $possible_flag_pat = quotemeta($possible_flag);
+    my $matching_flags    = [grep {/^$possible_flag_pat/}
+			     sort {length($a) <=> length($b)}
+			     @{$usage_hash->{OPTFLAGS}}];
+    if(scalar(@$matching_flags))
+      {return($matching_flags->[0])}
+
+    return('');
+  }
+
+#This returns a flag and/or 'stdin/stdout' or a default file name depending
+#on whether a file option is hidden, primary, or has a default.  Supplying
+#--extended 2+ will always show the flag, hidden or not.
+sub getFlag
+  {
+    my $usage_hash     = $_[0];
+    my $extended       = getVarref('extended',1,1,1);
+    my $local_extended = (defined($_[1]) ? (defined($extended) && $extended ?
+					    $extended : $_[1]) :
+			  (defined($extended) ? $extended : 0));
+    my $flag = '';
+
+    #This will use the version of the flag that the user supplied
+    my $representative_flag = getRepresentativeFlag($usage_hash);
+
+    #Validate
+    if(defined($usage_hash))
       {
-	error("Invalid file type ID: [",
-	      (defined($file_type_index) ? $file_type_index : 'undef'),
-	      "].  Index is ",(defined($file_type_index) ?
-			       "out of range." : 'undefined.'));
-	return('');
+	if(ref($usage_hash) eq 'HASH' && exists($usage_hash->{OPTTYPE}) &&
+	   defined($usage_hash->{OPTTYPE}) &&
+	   ref($usage_hash->{OPTFLAGS}) eq 'ARRAY' &&
+	   scalar(@{$usage_hash->{OPTFLAGS}}) > 0)
+	  {
+	    $flag = $representative_flag;
+	    if($local_extended == -1)
+	      {return($flag)}
+	  }
+	else
+	  {
+	    error("Invalid usage hash.",
+		  {DETAIL => ((ref($usage_hash) eq 'HASH' ?
+			       (exists($usage_hash->{OPTTYPE}) ?
+				(defined($usage_hash->{OPTTYPE}) ?
+				 (ref($usage_hash->{OPTFLAGS}) eq 'ARRAY' ?
+				  (scalar(@{$usage_hash->{OPTFLAGS}}) > 0 ?
+				   'internal error' : 'OPTFLAGS is empty') :
+				  'OPTFLAGS not an ARRAY.') :
+				 'OPTTYPE not defined.') :
+				'No OPTTYPE key.') :
+			       'Not a HASH.'))});
+	    return($flag);
+	  }
+      }
+    else
+      {
+	error("Usage hash undefined.");
+	return($flag);
       }
 
-    if($local_extended != -1)
+    if($usage_hash->{OPTTYPE} eq 'infile' ||
+       $usage_hash->{OPTTYPE} eq 'outfile')
       {
 	#If primary and (visible or extended > 1)
-	if(isFileTypePrimary($file_type_index) &&
-	   (!isFileTypeHidden($file_type_index) || $local_extended > 1))
-	  {return($infile_flag_array->[$file_type_index] .
-		  ($local_extended > 1 ? ' (or "STD' .
-		   (exists($outfile_types_hash->{$file_type_index}) ?
-		    'OUT' : 'IN') . '")' : ''))}
+	if($usage_hash->{PRIMARY} &&
+	   (!$usage_hash->{HIDDEN} || $local_extended > 1))
+	  {return($flag . ($local_extended > 1 ? ' (or "STD' .
+			   ($usage_hash->{OPTTYPE} eq 'outfile' ?
+			    'OUT' : 'IN') . '")' : ''))}
 	#If primary and hidden
-	elsif(isFileTypePrimary($file_type_index) &&
-	      isFileTypeHidden($file_type_index))
-	  {return('"STD' . (exists($outfile_types_hash->{$file_type_index}) ?
+	elsif($usage_hash->{PRIMARY} && $usage_hash->{HIDDEN})
+	  {return('"STD' . ($usage_hash->{OPTTYPE} eq 'outfile' ?
 			   'OUT"' : 'IN"'))}
 	#Guaranteed not primary, so if defaulted and hidden and extended < 2
-	elsif(isFileTypeDefaulted($file_type_index) &&
-	      isFileTypeHidden($file_type_index) && $local_extended < 2)
+	elsif(hasDefault($usage_hash) &&
+	      $usage_hash->{HIDDEN} && $local_extended < 2)
 	  {
-	    if(scalar(@{$default_infiles_array->[$file_type_index]}) == 1)
+	    my $defaults =
+	      (defined($usage_hash->{DEFAULT_USR}) &&
+	       scalar(@{$usage_hash->{DEFAULT_USR}}) ?
+	       $usage_hash->{DEFAULT_USR} :
+	       ((defined($usage_hash->{DEFAULT_PRG}) &&
+		 scalar(@{$usage_hash->{DEFAULT_PRG}})) ?
+		 $usage_hash->{DEFAULT_PRG} : []));
+	    if(scalar(@$defaults) == 1)
 	      {return(join(',',map {defined($_) ? $_ : 'undef'}
-			   @{$default_infiles_array->[$file_type_index]
-			       ->[0]}))}
+			   @{$defaults->[0]}))}
 	    else
 	      {return('(' .
 		      join('),(',
 			   map {my $a = $_;
 				join(',',map {defined($_) ? $_ : 'undef'} @$a)}
-			   @{$default_infiles_array->[$file_type_index]}) .
-		      ')')}
+			   @$defaults) . ')')}
 	  }
-	elsif(isFileTypeHidden($file_type_index) && $local_extended < 2)
+	elsif($usage_hash->{HIDDEN} && $local_extended < 2)
 	  {return('[HIDDEN - use `--extended --extended` to reveal]')}
       }
-
-    return($infile_flag_array->[$file_type_index]);
-  }
-
-sub getInfileFlag
-  {
-    my $file_type_index = $_[0];
-    #Always use --extended if supplied and non-0, else use the supplied param
-    #Special case: force flag only when extended == -1
-    my $local_extended  = (defined($_[1]) ?
-			   (defined($extended) && $extended ?
-			    $extended : $_[1]) :
-			   (defined($extended) ? $extended : 0));
-
-    if(!defined($file_type_index) || $file_type_index < 0 ||
-       $file_type_index >= scalar(@$infile_flag_array) ||
-       exists($outfile_types_hash->{$file_type_index}))
-      {
-	error("Invalid input file type ID: [",
-	      (defined($file_type_index) ? $file_type_index : 'undef'),"].",
-	      (defined($file_type_index) ?
-	       ("  Index is ",
-		($file_type_index < 0 ||
-		 $file_type_index >= scalar(@$infile_flag_array) ?
-		 'out of range.' : 'for an outfile type.')) : ''));
-	return('');
-      }
-
-    return(getFileFlag($file_type_index,$local_extended));
-  }
-
-sub getOutfileFlag
-  {
-    my $file_type_index = $_[0];
-    #Always use --extended if supplied and non-0, else use the supplied param
-    #Special case: force flag only when extended == -1
-    my $local_extended  = (defined($_[1]) ?
-			   (defined($extended) && $extended ?
-			    $extended : $_[1]) :
-			   (defined($extended) ? $extended : 0));
-
-    if(!defined($file_type_index) || $file_type_index < 0 ||
-       $file_type_index >= scalar(@$infile_flag_array) ||
-       !exists($outfile_types_hash->{$file_type_index}))
-      {
-	error("Invalid output file type ID: [",
-	      (defined($file_type_index) ? $file_type_index : 'undef'),"].");
-	return('');
-      }
-
-    return(getFileFlag($file_type_index,$local_extended));
-  }
-
-sub getOutfileSuffixFlag
-  {
-    my $suffix_id = $_[0];
-    #Always use --extended if supplied and non-0, else use the supplied param
-    #Special case: force flag only when extended == -1
-    my $local_extended  = (defined($_[1]) ?
-			   (defined($extended) && $extended ?
-			    $extended : $_[1]) :
-			   (defined($extended) ? $extended : 0));
-
-    if(!defined($suffix_id) || $suffix_id < 0 ||
-       $suffix_id >= scalar(@$suffix_flag_array))
-      {
-	error("Invalid output file suffix ID: [",
-	      (defined($suffix_id) ? $suffix_id : 'undef'),"].");
-	return('');
-      }
-
-    my $flag = $suffix_flag_array->[$suffix_id];
-    my $uhash = getFileUsageHash($suffix_id,'suffix');
-
-    if($local_extended != -1)
+    elsif($usage_hash->{OPTTYPE} eq 'suffix')
       {
 	#If primary and (visible or extended > 1)
-	if($uhash->{PRIMARY} && (!$uhash->{HIDDEN} || $local_extended > 1))
+	if($usage_hash->{PRIMARY} && (!$usage_hash->{HIDDEN} ||
+				      $local_extended > 1))
 	  {return($flag . ($local_extended > 1 ? ' (or "STDOUT")' : ''))}
 	#If primary and hidden
-	elsif($uhash->{PRIMARY} && $uhash->{HIDDEN})
+	elsif($usage_hash->{PRIMARY} && $usage_hash->{HIDDEN})
 	  {return('"STDOUT"')}
 	#Guaranteed not primary, so if defaulted and hidden and extended < 2
-	elsif(defined($uhash->{DEFAULT}) && $uhash->{HIDDEN} &&
+	elsif(defined($usage_hash->{DISPDEF}) && $usage_hash->{HIDDEN} &&
 	      $local_extended < 2)
-	  {return($uhash->{DEFAULT})}
-	elsif($uhash->{HIDDEN} && $local_extended < 2)
+	  {return($usage_hash->{DISPDEF})}
+	elsif($usage_hash->{HIDDEN} && $local_extended < 2)
+	  {return('[HIDDEN - use `--extended --extended` to reveal]')}
+      }
+    elsif($usage_hash->{OPTTYPE} eq 'outdir')
+      {
+	#If defaulted and hidden and extended < 2
+	if(defined($usage_hash->{DISPDEF}) && $usage_hash->{HIDDEN} &&
+	   $local_extended < 2)
+	  {return($usage_hash->{DISPDEF})}
+	elsif($usage_hash->{HIDDEN} && $local_extended < 2)
+	  {return('[HIDDEN - use `--extended --extended` to reveal]')}
+      }
+    #Any other option type
+    else
+      {
+	if(defined($usage_hash->{DISPDEF}) && $usage_hash->{HIDDEN} &&
+	   $local_extended < 2)
+	  {return($usage_hash->{DISPDEF})}
+	elsif($usage_hash->{HIDDEN} && $local_extended < 2)
 	  {return('[HIDDEN - use `--extended --extended` to reveal]')}
       }
 
     return($flag);
   }
 
-#Globals used: usage_array
-sub getOutdirFlag
-  {
-    my $local_extended  = (defined($_[0]) ?
-			   (defined($extended) && $extended ?
-			    $extended : $_[0]) :
-			   (defined($extended) ? $extended : 0));
-
-    ##TODO: The outdir options need to be fixed. See requirement 178
-    my $flag = (defined($outdir_flag_array->[0]) ? $outdir_flag_array->[0] :
-		getDefaultFlag(getOptStrFlags($default_outdir_opt)));
-
-    if(defined($outdir_flag_array->[0]))
-      {
-	##TODO: The outdir options need to be fixed. See requirement 178
-	my $oduhashes = [grep {$_->{OPTTYPE} eq 'outdir'} @$usage_array];
-	my $uhash = {};
-	if(scalar(@$oduhashes))
-	  {$uhash = $oduhashes->[0]}
-
-	if($local_extended != -1)
-	  {
-	    #If visible or extended > 1
-	    if(!$uhash->{HIDDEN} || $local_extended > 1)
-	      {return($flag)}
-	    #If defaulted and hidden and extended < 2
-	    elsif(defined($uhash->{DEFAULT}) && $uhash->{HIDDEN} &&
-		  $local_extended < 2)
-	      {return($uhash->{DEFAULT})}
-	    elsif($uhash->{HIDDEN} && $local_extended < 2)
-	      {return('[HIDDEN - use `--extended --extended` to reveal]')}
-	  }
-      }
-
-    return($flag);
-  }
-
-#Returns the suffix sub-index in the array indexed the same as the file type
-#index gotten from addInfileOption
-#Globals used: $outfile_suffix_array, $input_files_array, $outf_to_usage_hash
+#Returns a usage_array index
 sub addOutfileSuffixOption
   {
     debug({LEVEL => -1},"Params sent in BEFORE: [",
 	  join(',',map {defined($_) ? $_ : 'undef'} @_),"].");
     my @in = getSubParams([qw(FLAG|GETOPTKEY FILETYPEID VARREF|GETOPTVAL
 			      REQUIRED PRIMARY DEFAULT HIDDEN
-			      SMRY|SMRY_DESC|SHORT_DESC
-			      DETAIL|DETAIL_DESC|LONG_DESC FORMAT|FORMAT_DESC
-			      COLLISIONMODE ADVANCED)],
+			      SHORT_DESC|SMRY|SMRY_DESC
+			      LONG_DESC|DETAIL|DETAIL_DESC FORMAT|FORMAT_DESC
+			      COLLISIONMODE ADVANCED HEADING DISPDEF)],
 			  #If there are any params sent in, require the first
 			  [scalar(@_) ?
 			   #If there are at least 2 input file types, also
 			   #require the FILETYPEID
-			   (scalar(@$input_files_array) < 2 ?
+			   (getNumInfileTypes() < 2 ?
 			    qw(FLAG|GETOPTKEY) :
 			    qw(FLAG|GETOPTKEY FILETYPEID)) : ()],
 			  [@_]);
     debug({LEVEL => -1},"Params sent in AFTER: [",
 	  join(',',map {defined($_) ? $_ : 'undef'} @in),"].");
     my $get_opt_str     = $in[0]; #e.g. 'o|suffix=s'
-    my $file_type_index = $in[1]; #Val returned from addInfileOption
+    my $req_with_opt    = $in[1];
     my $get_opt_val     = $in[2]; #A reference to a scalar
     my $required        = $in[3]; #Is suff required?: 0 (false) or non-0 (true)
-    my $primary         = defined($in[4]) ? $in[4] : 1; #non-0=STDOUT if no suf
+    my $primary         = $in[4]; #non-0=STDOUT if no suf
     my $default         = $in[5]; #e.g. '.out'
     my $hidden          = $in[6]; #0 or non-0. Non-0 requires a default.
                                   #Excludes from usage output.
@@ -2062,8 +2517,11 @@ sub addOutfileSuffixOption
                                   #Empty/undefined = exclude from short usage
     my $detail_desc     = $in[8]; #e.g. 'Input file(s).  Space separated,...'
     my $format_desc     = $in[9]; #e.g. 'Tab delimited text w/ cols: 1.Name...'
-    my $loc_collid_mode = getCollisionMode(undef,'suffix',$in[10]);
+    my $collide_mode    = getCollisionMode(undef,'suffix',$in[10]);
     my $advanced        = $in[11];#Advanced options print when extended >= 2
+    my $heading         = $in[12];#Section heading to print in extended usage
+    my $display_def     = $in[13];#The default to display in the usage
+    my($req_with_uhash);
     ##TODO: Don't use the generic/global collide_mode here - implement an
     #output mode that the user can control per outfile type.  See requirement
     #114
@@ -2077,22 +2535,40 @@ sub addOutfileSuffixOption
     $format_desc =~ s/^\s+//s if(defined($format_desc));
     $format_desc =~ s/\s+$//s if(defined($format_desc));
 
-    if(defined($get_opt_val) && ref($get_opt_val) ne 'SCALAR')
+    if(defined($req_with_opt) && (!isInt($req_with_opt) || $req_with_opt < 0 ||
+				  $req_with_opt > $#{$usage_array}))
+      {
+        error("Invalid PAIR_WITH option ID: [$req_with_opt]",
+              (!isInt($req_with_opt) || $req_with_opt < 0 ||
+               $req_with_opt > $#{$usage_array} ? '' : ' for option [' .
+               "$usage_array->[$req_with_opt]->{OPTFLAG_DEF}]"),
+              ".  Must be an ID as returned by addInfileOption.");
+        $num_setup_errors++;
+        return(undef);
+      }
+
+    if(defined($get_opt_val) &&
+       ref($get_opt_val) ne 'SCALAR' && ref($get_opt_val) ne 'CODE')
       {
 	error("GETOPTVAL must be a reference to a SCALAR to hold the value ",
 	      "for the outfile suffix string, but instead, a [",
 	      (ref($get_opt_val) eq '' ?
 	       'SCALAR' : 'reference to a ' . ref($get_opt_val)),
 	      "] was received.  Unable to add outfile suffix option.");
+        $num_setup_errors++;
 	return(undef);
       }
+    #Create a scalar reference to undef
+    elsif(!defined($get_opt_val))
+      {$get_opt_val = \my $junk}
 
-    if($command_line_processed)
+    if($command_line_stage >= ARGSREAD)
       {
 	error("You cannot add command line options (i.e. call ",
 	      "addOutfileSuffixOption()) after the command line has already",
 	      " been processed (i.e. processCommandLine()) without at ",
 	      "least re-initializing (i.e. calling _init()).");
+        $num_setup_errors++;
 	return(undef);
       }
 
@@ -2106,6 +2582,7 @@ sub addOutfileSuffixOption
 	  {
 	    error('The default output file suffix type has already been ',
 		  'added.');
+            $num_setup_errors++;
 	    return(undef);
 	  }
 
@@ -2117,21 +2594,21 @@ sub addOutfileSuffixOption
 	  {
 	    error('Unable to add default output file suffix type ',
 		  "[$default_outfile_suffix_opt] due to redundant flags: [",
-		  join(',',getDupeFlags($get_opt_str)),'].');
+		  join(',',getDupeFlags($default_outfile_suffix_opt,
+                                        $default_outfile_suffix_opt)),'].');
 	    $default_outfile_suffix_opt = $get_opt_str;
+            $num_setup_errors++;
 	    return(undef);
 	  }
 	$default_outfile_suffix_opt = $get_opt_str;
 
-	$default_outfile_suffix_added = 1;
-	$default_outfile_suffix_id    = scalar(@$suffix_id_lookup);
-	$required                     = 0;
-	$loc_collid_mode              = getCollisionMode(undef,'suffix');
+	$required     = 0;
+	$collide_mode = getCollisionMode(undef,'suffix');
 	##TODO: Use a command line flag specific to the outfile type instead of the current def_collide_mode which applies to all outfile types.  Create the flag when the outfile suffix option is created (but only if the programmer specified that the user is to choose).  See requirement 114
 
 	#If a compatible outfile type exists that we will be tagteamed up with,
 	#match it.  (Returns undef if none.)
-	$file_type_index = getDefaultPrimaryLinkedInfileID();
+	$req_with_opt = getDefaultPrimaryLinkedInfileID();
 
 	#The descriptions are added below
       }
@@ -2147,70 +2624,90 @@ sub addOutfileSuffixOption
     if(!defined($get_opt_str) || $get_opt_str eq '')
       {
 	error("The first parameter (Getopt::Long key string) is required.");
-	quit(-91);
+        $num_setup_errors++;
+        return(undef);
       }
 
     #If the file type ID is not an integer
-    if(defined($file_type_index) && $file_type_index !~ /^\d+$/)
+    if(defined($req_with_opt) && $req_with_opt !~ /^\d+$/)
       {
-	error("Invalid FILETYPEID parameter: [$file_type_index].  Must be an ",
-	      "unsigned integer.");
-	quit(-92);
+	error("Invalid FILETYPEID parameter: [$req_with_opt].  Must be an ",
+	      "unsigned integer as returned by addInfileOption.");
+        $num_setup_errors++;
+        return(undef);
       }
     #If the integer is defined, was supplied by the programmer, and references
-    #an output file type
-    elsif(defined($file_type_index) && !isCaller('addOutfileOption') &&
-	  exists($outfile_types_hash->{$file_type_index}))
+    #a type other than an intput file type
+    elsif(defined($req_with_opt) && !isCaller('addOutfileOption') &&
+	  $usage_array->[$req_with_opt]->{OPTTYPE} ne 'infile')
       {
-	error("Invalid FILETYPEID parameter: [$file_type_index].  Must refer ",
-	      "to an input file type, not an output file type.");
-	quit(-93);
+        error("Invalid FILETYPEID option ID: [$req_with_opt] for option [",
+              "$usage_array->[$req_with_opt]->{OPTFLAG_DEF}].  Must be an ID ",
+              "as returned by addInfileOption.");
+        $num_setup_errors++;
+        return(undef);
       }
     #If the file type is not defined
-    elsif(!defined($file_type_index))
+    elsif(!defined($req_with_opt))
       {
-	$file_type_index = getDefaultPrimaryInfileID();
+	$req_with_opt = getDefaultPrimaryInfileID();
 
-	if(!defined($file_type_index))
+	if(!defined($req_with_opt))
 	  {
-	    error("No input file types have been added.  Unable to determine ",
-		  "default FILETYPEID.");
-	    quit(-94);
+	    error('An input file type must be added before an outfile suffix ',
+                  'option.',
+                  {DETAIL => ('Explicitly adding a default outfile suffix ' .
+                              '(or tagteam) requires an infile option to ' .
+                              'have been added first in order to link the ' .
+                              'suffix to an infile option.')});
+            $num_setup_errors++;
+            return(undef);
 	  }
       }
     #If the valid file type ID was added as a part of creating a default
     elsif($adding_default)
       {debug({LEVEL => -1},"Input file type is: [",
-	     getInfileFlag($file_type_index,-1),"].")}
+	     getFlag($usage_array->[$req_with_opt],-1),"].")}
 
     #If the file type looked right, but was supplied by the programmer, double-
     #check they actually got the file type ID from addInfileOption
-    if(defined($file_type_index) && !$called_implicitly)
+    if(defined($req_with_opt) && !$called_implicitly)
       {
-	my $uhash = getInfileUsageHash($file_type_index);
-	if(!defined($uhash))
+	$req_with_uhash = $usage_array->[$req_with_opt];
+	if(!defined($req_with_uhash) || ref($req_with_uhash) ne 'HASH' ||
+	   !exists($req_with_uhash->{OPTTYPE}))
 	  {
-	    #getInfileUsageHash should have already issued an error
-	    quit(-69);
+	    error("Invalid FILETYPEID option ID: [$req_with_opt].  Must be an ",
+		  "ID as returned by addInfileOption.");
+            $num_setup_errors++;
+            return(undef);
 	  }
-	elsif(!exists($uhash->{OPTTYPE}))
-	  {error("Invalid FILETYPEID: [$file_type_index].  Must be an ID ",
-		 "returned by addInfileOption.")}
+	elsif(!exists($req_with_uhash->{OPTTYPE}))
+	  {
+            error("Invalid FILETYPEID: [$req_with_opt].  Must be an ID ",
+                  "returned by addInfileOption.");
+            $num_setup_errors++;
+            return(undef);
+          }
 	#TODO: Requirement 280 will allow linking to either input or output
 	#      file types
-	elsif($uhash->{OPTTYPE} ne 'infile')
-	  {error("FILETYPEID passed in must be an input file type ID as ",
-		 "returned by addInfileOption.  Instead, received an ID of ",
-		 "type: [$uhash->{OPTTYPE}].")}
+	elsif($req_with_uhash->{OPTTYPE} ne 'infile')
+	  {
+            error("FILETYPEID passed in must be an input file type ID as ",
+                  "returned by addInfileOption.  Instead, received an ID of ",
+                  "type: [$req_with_uhash->{OPTTYPE}].");
+            $num_setup_errors++;
+            return(undef);
+          }
       }
 
     #If hidden is not defined, default to the hidden state of whatever file
     #type this might be linked to, except when called via addOutfileOption,
     #otherwise 0.
-    if(!defined($hidden) && defined($file_type_index) &&
+    if(!defined($hidden) && defined($req_with_opt) &&
        !isCaller('addOutfileOption'))
       {
-	if(isFileTypeHidden($file_type_index))
+	if($req_with_uhash->{HIDDEN})
 	  {$hidden = 1}
 	else
 	  {$hidden = 0}
@@ -2220,135 +2717,113 @@ sub addOutfileSuffixOption
 
     #Allow the flag to be an array of scalars and turn it into a get opt str
     my $save_getoptstr = $get_opt_str;
-    $get_opt_str = makeGetOptKey($get_opt_str,'suffix',1,
+    $get_opt_str = makeGetOptKey($get_opt_str,'suffix',0,
 				 'addOutfileSuffixOption');
+    if(!defined($get_opt_str))
+      {
+	$num_setup_errors++;
+	return(undef);
+      }
 
-    if(!defined($get_opt_str) || !isGetOptStrValid($get_opt_str,'suffix'))
+    if(!isGetOptStrValid($get_opt_str,'suffix',$default_outfile_suffix_opt))
       {
 	if($adding_default)
 	  {warning("Unable to add default output file suffix option.")}
 	else
 	  {
-	    error("Invalid flag definition: [$save_getoptstr] for outfile-",
-		  "suffix type.");
-	    quit(-74);
+            $num_setup_errors++;
 	  }
+	return(undef);
       }
 
     $get_opt_str = fixStringOpt($get_opt_str);
 
     my $flags = [getOptStrFlags($get_opt_str)];
     my $flag  = getDefaultFlag($flags);
+    my $name  = createOptionNameFromFlags($flags);
 
-    if($hidden && !defined($default) && (defined($required) && $required))
+    if(defined($get_opt_val) && !isOptRefUnique($get_opt_val,$flag))
       {
-	warning("Cannot hide option [$flag] if",
-		(!defined($default) ? ' no default provided' : ''),
-		((!defined($default) && defined($required) && $required) ?
-		 ' and if' : ''),
-		(defined($required) && $required ? ' it is required' : ''),
-		".  Setting as not hidden.");
-	$hidden = 0;
+        $num_setup_errors++;
+        return(undef);
       }
 
-    if($file_type_index < 0 || $file_type_index =~ /\D/)
+    #Validity of hidden is checked in applyOptionAddendums in case this option
+    #ends up as part of an outfile tagteam
+
+    if($req_with_opt < 0 || $req_with_opt =~ /\D/)
       {
-	error("Invalid file type id: [$file_type_index].  Must be a value ",
+	error("Invalid file type id: [$req_with_opt].  Must be a value ",
 	      "returned from addInfileOption.");
+        $num_setup_errors++;
 	return(undef);
       }
 
-    if($file_type_index >= scalar(@$input_files_array))
+    if($req_with_opt > $#{$usage_array} ||
+       ($usage_array->[$req_with_opt]->{OPTTYPE} ne 'infile' &&
+        $usage_array->[$req_with_opt]->{OPTTYPE} ne 'outfile'))
       {
-	error("Outfile suffix option [$get_opt_str] has been added to take ",
-	      "a suffix that is appended to input file type ",
-	      "[$file_type_index], but that input file type has not been ",
-	      "created yet.  File types should be created by addInfileOption ",
-	      "before specifying an outfile suffix is added to be appended ",
-	      "to those files.");
+	error("Outfile suffix option [$flag] has been added to take a suffix ",
+	      "that is appended to input file type [$req_with_opt], but that ",
+	      "input file type has either not been created yet or is not an ",
+	      "infile option.",
+	      {DETAIL => ("File types should be created by addInfileOption " .
+                          "before specifying an outfile suffix is added to " .
+                          "be appended to those files.")});
+        $num_setup_errors++;
 	return(undef);
       }
 
-    #We can add the default suffix directly to the 2D suffix array because
-    #we're going to pass a reference to the value in the array to Getopt::Long
-    #for it to change directly in the 2D array if the user supplies a value
-    my($suffix_index);
-    my $suffix_id = scalar(@$suffix_id_lookup);
-    if((scalar(@$outfile_suffix_array) - 1) < $file_type_index ||
-       !defined($outfile_suffix_array->[$file_type_index]))
+    if(ref($get_opt_val) eq 'SCALAR')
       {
-	$outfile_suffix_array->[$file_type_index] = [$default];
-	$suffix_index = 0;
+	if(defined($$get_opt_val) && defined($default) &&
+	   $$get_opt_val ne $default)
+	  {
+	    error('Multiple conflicting default suffix values.  Both VARREF ',
+		  'and DEFAULT parameters have defined values.  Define only ',
+		  '1.');
+            $num_setup_errors++;
+            return(undef);
+	  }
+	elsif(defined($$get_opt_val))
+	  {$default = $$get_opt_val}
       }
-    else
+
+    if(defined($collide_mode) && $collide_mode ne '' &&
+       $collide_mode ne 'error' && $collide_mode ne 'rename' &&
+       $collide_mode ne 'merge')
       {
-	$suffix_index = scalar(@{$outfile_suffix_array->[$file_type_index]});
-	push(@{$outfile_suffix_array->[$file_type_index]},$default);
+	my $defcoll = getCollisionMode(undef,'suffix');
+	error("Invalid COLLISIONMODE parameter: [$collide_mode].  Must be one ",
+	      "of ['error','merge','rename'].  Reverting to default: ",
+	      "[$defcoll].");
+	$collide_mode = $defcoll;
       }
-    debug({LEVEL => -1},"Default suffix for input file type [",
-	  getInfileFlag($file_type_index,-1),"] added is [",
-	  (defined($default) ? $default : 'undef'),"].")
-      if(!exists($outfile_types_hash->{$file_type_index}));
-    push(@$suffix_id_lookup,[$file_type_index,$suffix_index]);
 
-    #Save the primary value for this type and suffix index
-    $suffix_primary_vals->[$file_type_index]->[$suffix_index] = $primary;
+    $GetOptHash->{$get_opt_str} = getGetoptSub($name,0);
 
-    $collid_modes_array->[$file_type_index]->[$suffix_index] =
-      $loc_collid_mode;
-
-    #Fix any subarrays in the middle that are undefined
-    foreach my $omi (0..$#{$collid_modes_array})
-      {if(!defined($collid_modes_array->[$omi]))
-	 {$collid_modes_array->[$omi] = []}}
-
-    debug({LEVEL=>-1},"Creating an outfile suffix option at infile type ",
-	  "index [$file_type_index] and suffix index [$suffix_index].");
-
-    my $suffix_ref =
-      \$outfile_suffix_array->[$file_type_index]->[$suffix_index];
-
-    #Fix any subarrays in the middle that are undefined
-    foreach my $osi (0..$#{$outfile_suffix_array})
-      {if(!defined($outfile_suffix_array->[$osi]))
-	 {$outfile_suffix_array->[$osi] = []}}
-
-    #Set both the variable sent in from main and the internal suffix tracking
-    my $getoptsub = (defined($get_opt_val) ?
-		     sub {$$get_opt_val = $$suffix_ref = $_[1]} : $suffix_ref);
-
-    $GetOptHash->{$get_opt_str} = $getoptsub;
-
-    if($required)
-      {push(@$required_suffix_types,
-	    [$file_type_index,$suffix_index,$suffix_id])}
-
-    $suffix_flag_array->[$suffix_id] = $flag;
+    if(defined($smry_desc) && $smry_desc ne '' &&
+       (!defined($detail_desc) || $detail_desc eq ''))
+      {$detail_desc = $smry_desc}
 
     #If smry_desc is not defined or is an empty string
     if(!defined($smry_desc) || $smry_desc eq '')
       {
-	#If the option is not hidden (we have to check this because we cannot
-	#call getFileFlag on some hidden options because they are output files
-	#made in addOutfileOption) and the option is required or this type
-	#hasn't been setup as an outfile type yet (i.e. it's not the already
-	#default-added -o being replaced), and detail_desc is undefined, then
-	#set a default summary description
-	if((!defined($hidden) || !$hidden) &&
-	   ($required || (!exists($outfile_types_hash->{$file_type_index}) &&
-			  !defined($detail_desc))))
-	  {$smry_desc = 'Outfile suffix appended to file names supplied to [' .
-	     getInfileFlag($file_type_index) . '].'}
+	if(($required || !defined($detail_desc)) &&
+           $usage_array->[$req_with_opt]->{OPTTYPE} eq 'infile')
+	  {$smry_desc = defined($detail_desc) ? $detail_desc :
+             'Outfile suffix appended to file names supplied to [' .
+               getFlag($usage_array->[$req_with_opt]) . '].'}
 	else
 	  {$smry_desc = ''}
       }
 
     if((!defined($detail_desc) || $detail_desc eq '') &&
-       !exists($outfile_types_hash->{$file_type_index}))
+       $usage_array->[$req_with_opt]->{OPTTYPE} eq 'infile')
       {$detail_desc =
 	 join('',
 	      ('Outfile suffix appended to file names supplied to [',
-	       getInfileFlag($file_type_index),
+	       getFlag($usage_array->[$req_with_opt]),
 	       '].  See --help for file format.'))}
     #If the description doesn't reference the help flag for the file format and
     #a file format was provided, add a reference to it
@@ -2356,32 +2831,547 @@ sub addOutfileSuffixOption
 	  $format_desc ne '')
       {$detail_desc .= "\n\nSee --help for file format."}
 
-    if((!defined($default) || $default eq '') && $primary && !$required)
-      {$default = 'STDOUT'}
-    elsif(!defined($default))
-      {$default = ''}
+    #Note: primary defaults to true in addToUsage for outfile and suffix types
+    if(!defined($display_def) && !defined($default) &&
+       (!defined($primary) || $primary) && !$required)
+      {$display_def = 'STDOUT'}
 
-    addToUsage($get_opt_str,
-	       $flags,
-	       $smry_desc,
-	       $detail_desc,
-	       $required,
-	       $default,
-	       undef,
-	       $hidden,
-	       'suffix',
-	       0,
-	       $advanced,
-	       undef,
-	       undef,
-	       $primary,
-	       $format_desc,
-	       $suffix_id);
+    if(defined($display_def) && (ref($display_def) ne '' || $display_def eq ''))
+      {
+	error("Invalid display default.  Must be a non-empty string.  ",
+	      "Ignoring.");
+	undef($display_def);
+      }
 
-    #TODO: This will change with requirement 280
-    $outf_to_usage_hash->{$suffix_id} = $#{$usage_array};
+    my $optid = addToUsage($get_opt_str,
+			   $flags,
+			   $smry_desc,
+			   $detail_desc,
+			   $required,
+			   $display_def,
+			   $default,
+			   undef,         #accepts
+			   $hidden,
+			   'suffix',
+			   0,
+			   $advanced,
+			   $heading,
+			   undef,         #usage name
+			   undef,         #usage order
+			   $get_opt_val,
+			   $req_with_opt,
+			   getRelationStr('1:M'),
+			   undef,
+			   $primary,
+			   $format_desc,
+			   $collide_mode);
 
-    return($suffix_id);
+    if(!defined($optid))
+      {
+        $num_setup_errors++;
+        return(undef);
+      }
+
+    if($adding_default)
+      {
+	$default_suffix_optid         = $optid;
+	$default_outfile_suffix_added = 1;
+      }
+
+    return($#{$usage_array});
+  }
+
+#This sub should only be called once.
+sub addLogfileOption
+  {
+    my @in = getSubParams([qw(FLAG|GETOPTKEY APPEND|APPEND_MODE REQUIRED DEFAULT
+			      SHORT_DESC|SMRY|SMRY_DESC
+			      LONG_DESC|DETAIL|DETAIL_DESC HIDDEN ADVANCED
+			      HEADING DISPDEF VERBOSE DEBUG WARN ERROR MIRROR
+                              HEADER|RUNINFO RUNREPORT)],
+			  [],
+			  [@_]);
+    my $get_opt_str  = $in[0]; #e.g. 'l|logfile=s'
+    my $append_mode  = $in[1]; #e.g. 0 or1
+    my $required     = $in[2]; #Is file required?: 0 (false) or non-zero (true)
+    my $default      = $in[3]; #e.g. 'my_output_file.txt'
+    my $smry_desc    = $in[4]; #e.g. 'Log file.' undef = exclude from short usg
+    my $detail_desc  = $in[5]; #e.g. 'Input file(s).  Space separated, globs...'
+    my $hidden       = $in[6]; #0 or non-0. Requires default. Excludes from usg.
+    my $advanced     = $in[7]; #Advanced options print when extended >= 2
+    my $heading      = $in[8]; #Section heading to print in extended usage
+    my $display_def  = $in[9]; #The default to display in the usage
+    my $verboses     = defined($in[10]) ? $in[10] : 1; #Log verbose messages
+    my $debugs       = defined($in[11]) ? $in[11] : 1; #Log debug messages
+    my $warnings     = defined($in[12]) ? $in[12] : 1; #Log warning messages
+    my $errors       = defined($in[13]) ? $in[13] : 1; #Log errors
+    my $stderr       = defined($in[14]) ? $in[14] : 0; #Mirror log to STDERR
+    my $runinfo      = defined($in[15]) ? $in[15] : 1; #Put header in log
+    my $runreport    = defined($in[16]) ? $in[16] : 1; #Put run report in log
+
+    #Trim leading & trailing hard returns and white space characters (from
+    #using '<<')
+    $smry_desc   =~ s/^\s+//s if(defined($smry_desc));
+    $smry_desc   =~ s/\s+$//s if(defined($smry_desc));
+    $detail_desc =~ s/^\s+//s if(defined($detail_desc));
+    $detail_desc =~ s/\s+$//s if(defined($detail_desc));
+
+    if($command_line_stage >= ARGSREAD)
+      {
+	error("You cannot add command line options (i.e. call ",
+	      "addLogfileOption()) after the command line has already been ",
+	      "processed (i.e. processCommandLine()) without at least ",
+	      "re-initializing (i.e. calling _init()).");
+	return(undef);
+      }
+
+    if($logfile_added)
+      {
+	error('The logfile type has already been added.');
+	return(undef);
+      }
+
+    #Defaults mode - Only call with no params once.
+    my $adding_default = (scalar(@in) == 0);
+    #If we are adding a default logfile option, a logfile suffix option exists,
+    #and this was called through addDefaultFileOptions, set hidden to true
+    if($adding_default && $logfile_suffix_added &&
+       isCaller('addDefaultFileOptions'))
+      {
+	$hidden   = 1;
+	$required = $usage_array->[$logfile_suffix_optid]->{REQUIRED};
+      }
+
+    if(!defined($get_opt_str) || $get_opt_str eq '')
+      {
+	$get_opt_str = removeDupeFlags($default_logfile_opt);
+	if(!defined($get_opt_str) || $get_opt_str eq '')
+	  {
+	    error("Unable to add default log file type [$default_logfile_opt] ",
+		  'due to redundant flags: [',
+		  join(',',getDupeFlags($default_logfile_opt,
+                                        $default_logfile_opt)),'].');
+	    return(undef);
+	  }
+	$default_logfile_opt = $get_opt_str;
+      }
+
+    #Allow the flag to be an array of scalars and turn it into a get opt str
+    my $save_getoptstr = $get_opt_str;
+    $get_opt_str = makeGetOptKey($get_opt_str,'logfile',0,'addLogfileOption');
+
+    if(defined($get_opt_str))
+      {$get_opt_str = fixStringOpt($get_opt_str)}
+    else
+      {
+	$num_setup_errors++;
+	return(undef);
+      }
+
+    if(!isGetOptStrValid($get_opt_str,'logfile',$default_logfile_opt))
+      {
+	if($adding_default)
+	  {warning("Unable to add default log file option.")}
+	else
+	  {
+            $num_setup_errors++;
+            return(undef);
+	  }
+	return(undef);
+      }
+
+    #Set globals for what to put in the log and stderr
+    $log_verbose  = $verboses;
+    $log_debug    = $debugs;
+    $log_warnings = $warnings;
+    $log_errors   = $errors;
+    $log_mirror   = $stderr;
+    $log_header   = $runinfo;
+    $log_report   = $runreport;
+
+    if(!defined($append_mode))
+      {$append_mode = 1}
+
+    if(defined($required) && $required !~ /^\d+$/)
+      {error("Invalid REQUIRED parameter: [$required].")}
+
+    #If hidden is not defined, default to 0.
+    if(!defined($hidden))
+      {$hidden = 0}
+
+    my $flags = [getOptStrFlags($get_opt_str)];
+    my $flag  = getDefaultFlag($flags);
+    my $name  = createOptionNameFromFlags($flags);
+
+    #Add the default(s) to the default infiles array, to be globbed when the
+    #command line is processed
+    if(defined($default))
+      {
+	my($twodarray,$default_str) = makeCheck2DFileArray($default);
+	if(defined($twodarray))
+	  {$default = $twodarray->[0]->[0]}
+	else
+	  {
+            $num_setup_errors++;
+            return(undef);
+          }
+      }
+
+    if(defined($display_def) && (ref($display_def) ne '' || $display_def eq ''))
+      {
+	error("Invalid display default.  Must be a non-empty string.  ",
+	      "Ignoring.");
+	undef($display_def);
+      }
+
+    if((!defined($detail_desc) || $detail_desc eq '') &&
+       (defined($smry_desc) && $smry_desc ne ''))
+      {$detail_desc = $smry_desc}
+
+    #Note, addToUsage won't include if set to empty string
+    if(!defined($smry_desc) || $smry_desc eq '')
+      {
+	if($required)
+	  {$smry_desc = defined($detail_desc) ? $detail_desc : 'Log file.'}
+	elsif(!defined($smry_desc))
+	  {$smry_desc = ''}
+      }
+
+    if(!defined($detail_desc) || $detail_desc eq '')
+      {$detail_desc = join('',('Log file.  All standard error output will be ' .
+			       'mirrored here (except for messages on a ' .
+			       'single line that get over-written, i.e. end ' .
+			       'with a carriage return instead of a newline ' .
+			       'character).'))}
+
+    $GetOptHash->{$get_opt_str} = getGetoptSub($name,0);
+
+    my $usage_index = addToUsage($get_opt_str,
+                                 $flags,
+                                 $smry_desc,
+                                 $detail_desc,
+                                 $required,
+                                 $display_def,
+                                 $default,
+                                 undef,         #accepts
+                                 $hidden,
+                                 'logfile',
+                                 0,             #flagless
+                                 $advanced,
+                                 $heading,
+                                 undef,         #usage name
+                                 undef,         #usage order
+                                 \my $junk,     #VARREF_PRG: ref programmer spld
+                                 undef,         #req_with_opt
+                                 undef,         #req_rel_str
+                                 undef,         #delimiter
+                                 undef,         #primary
+                                 undef,         #format
+                                 'merge',       #collision mode
+                                 $append_mode);
+
+    if(!defined($usage_index))
+      {
+        $num_setup_errors++;
+        return(undef);
+      }
+
+    $logfile_added  = 1;
+    $logfile_optid  = $usage_index;
+
+    return($usage_index);
+  }
+
+sub addLogfileSuffixOption
+  {
+    my @in = getSubParams([qw(PAIRID FLAG|GETOPTKEY VARREF|GETOPTVAL REQUIRED
+			      DEFAULT HIDDEN SHORT_DESC|SMRY|SMRY_DESC
+			      LONG_DESC|DETAIL|DETAIL_DESC APPEND|APPEND_MODE
+			      ADVANCED HEADING DISPDEF VERBOSE DEBUG WARN ERROR
+			      MIRROR HEADER|RUNINFO RUNREPORT)],
+			  [qw(PAIRID)], #Require PAIRID only
+			  [@_]);
+    my $req_with_opt = $in[0]; #The only required option
+    my $get_opt_str  = $in[1]; #e.g. 'o|suffix=s' - default: --logfile-suffix
+    my $get_opt_val  = $in[2]; #A reference to a scalar
+    my $required     = $in[3]; #Is suff required?: 0 (false) or non-0 (true)
+    my $default      = $in[4]; #e.g. '.out'
+    my $hidden       = $in[5]; #0 or non-0. Non-0 requires a default.
+                                  #Excludes from usage output.
+    my $smry_desc    = $in[6]; #e.g. Input file(s).  See --help for format.
+                                  #Empty/undefined = exclude from short usage
+    my $detail_desc  = $in[7]; #e.g. 'Input file(s).  Space separated,...'
+    my $append_mode  = $in[8]; #e.g. 0 or 1
+    my $advanced     = $in[9]; #Advanced options print when extended >= 2
+    my $heading      = $in[10];#Section heading to print in extended usage
+    my $display_def  = $in[11];#The default to display in the usage
+    my $verboses     = defined($in[12]) ? $in[12] : 1; #Log verbose messages
+    my $debugs       = defined($in[13]) ? $in[13] : 1; #Log debug messages
+    my $warnings     = defined($in[14]) ? $in[14] : 1; #Log warning messages
+    my $errors       = defined($in[15]) ? $in[15] : 1; #Log errors
+    my $stderr       = defined($in[16]) ? $in[16] : 0; #Also allow STDERR output
+    my $runinfo      = defined($in[17]) ? $in[17] : 1; #Put header in log
+    my $runreport    = defined($in[18]) ? $in[18] : 1; #Put run report in log
+    my($req_with_uhash);
+    ##TODO: Don't use the generic/global collide_mode here - implement an
+    #output mode that the user can control per outfile type.  See requirement
+    #114
+
+    #Trim leading & trailing hard returns and white space characters (from
+    #using '<<')
+    $smry_desc   =~ s/^\s+//s if(defined($smry_desc));
+    $smry_desc   =~ s/\s+$//s if(defined($smry_desc));
+    $detail_desc =~ s/^\s+//s if(defined($detail_desc));
+    $detail_desc =~ s/\s+$//s if(defined($detail_desc));
+
+    if(defined($req_with_opt) && (!isInt($req_with_opt) || $req_with_opt < 0 ||
+				  $req_with_opt > $#{$usage_array}))
+      {
+	error("Invalid PAIRID: [$req_with_opt].  Must be an ID as returned by ",
+	      "addOption.");
+        $num_setup_errors++;
+        return(undef);
+      }
+
+    if(defined($get_opt_val) && ref($get_opt_val) ne 'SCALAR')
+      {
+	error("GETOPTVAL must be a reference to a SCALAR to hold the value ",
+	      "for the logfile suffix string, but instead, a [",
+	      (ref($get_opt_val) eq '' ?
+	       'SCALAR' : 'reference to a ' . ref($get_opt_val)),
+	      "] was received.  Unable to add logfile suffix option.");
+        $num_setup_errors++;
+	return(undef);
+      }
+    #Create a scalar reference to undef
+    elsif(!defined($get_opt_val))
+      {$get_opt_val = \my $junk}
+
+    if($command_line_stage >= ARGSREAD)
+      {
+	error("You cannot add command line options (i.e. call ",
+	      "addLogfileSuffixOption()) after the command line has already ",
+	      "been processed (i.e. processCommandLine()) without at ",
+	      "least re-initializing (i.e. calling _init()).");
+	return(undef);
+      }
+
+    if($logfile_suffix_added)
+      {
+	warning('A log file suffix type has already been added.');
+	return(undef);
+      }
+
+    if(defined($get_opt_str) && $get_opt_str eq '')
+      {
+	warning("FLAG cannot be an empty string.  Using default.");
+	undef($get_opt_str);
+      }
+
+    #If the file type ID is not an integer
+    if(defined($req_with_opt) && $req_with_opt !~ /^\d+$/)
+      {
+	error("Invalid PAIRID parameter: [$req_with_opt].  Must be an ",
+	      "unsigned integer as returned by addOption.");
+        $num_setup_errors++;
+        return(undef);
+      }
+    #If the integer is defined, was supplied by the programmer, and references
+    #an output file type
+    elsif(defined($req_with_opt) &&
+	  $usage_array->[$req_with_opt]->{OPTTYPE} ne 'string')
+      {
+	error("Invalid PIARID parameter: [$req_with_opt].  Must refer ",
+	      "to a string option type added by addOption, instead of a ",
+	      "[$usage_array->[$req_with_opt]->{OPTTYPE}].");
+        $num_setup_errors++;
+        return(undef);
+      }
+
+    #If required and the paired string option's REQUIRED is false and has no
+    #default - this has to be handled elsewhere due to test760
+
+    #If required and the paired string option's HIDDEN is true
+    elsif(defined($req_with_opt) && defined($required) && $required &&
+	  $usage_array->[$req_with_opt]->{HIDDEN} &&
+	  (!defined($usage_array->[$req_with_opt]->{DEFAULT}) ||
+	   $usage_array->[$req_with_opt]->{DEFAULT} eq ''))
+      {
+	error("Paired string option [",
+	      $usage_array->[$req_with_opt]->{OPTFLAG_DEF},"] must either be ",
+	      "not HIDDEN or have a non-empty default when the logfile suffix ",
+	      "is REQUIRED.");
+        $num_setup_errors++;
+        return(undef);
+      }
+    #If the file type is not defined
+    elsif(!defined($req_with_opt))
+      {
+	error("Invalid PAIRID or unsupplied.");
+        $num_setup_errors++;
+        return(undef);
+      }
+    #If required and the paired string option's SUMMARY is empty
+    elsif(defined($req_with_opt) && defined($required) && $required &&
+	  (!defined($usage_array->[$req_with_opt]->{SUMMARY}) ||
+           $usage_array->[$req_with_opt]->{SUMMARY} eq ''))
+      {
+        ##TODO: Change this to a warning once the ability to add a hash param
+        #for only warning in debug mode
+	debug('Paired string option [',
+              $usage_array->[$req_with_opt]->{OPTFLAG_DEF},'] must have a ',
+              'summary usage when the logfile suffix is REQUIRED.  Setting ',
+              'SUMMARY using DETAILS.');
+        $usage_array->[$req_with_opt]->{SUMMARY} =
+          $usage_array->[$req_with_opt]->{DETAILS};
+      }
+
+    #If hidden is not defined, default to not hidden
+    if(!defined($hidden))
+      {$hidden = 0}
+
+    if(!defined($get_opt_str))
+      {$get_opt_str = $default_logfile_suffix_opt}
+
+    #Allow the flag to be an array of scalars and turn it into a get opt str
+    my $save_getoptstr = $get_opt_str;
+    $get_opt_str = makeGetOptKey($get_opt_str,'logsuff',0,
+				 'addLogfileSuffixOption');
+
+    if(!defined($get_opt_str))
+      {
+	$num_setup_errors++;
+	return(undef);
+      }
+
+    if(!isGetOptStrValid($get_opt_str,'logsuff',$default_logfile_suffix_opt))
+      {
+        $num_setup_errors++;
+	return(undef);
+      }
+
+    $get_opt_str = fixStringOpt($get_opt_str);
+
+    my $flags = [getOptStrFlags($get_opt_str)];
+    my $flag  = getDefaultFlag($flags);
+    my $name  = createOptionNameFromFlags($flags);
+
+    if(defined($get_opt_val) && !isOptRefUnique($get_opt_val,$flag))
+      {
+        $num_setup_errors++;
+        return(undef);
+      }
+
+    if($req_with_opt < 0 || $req_with_opt =~ /\D/)
+      {
+	error("Invalid PAIRID: [$req_with_opt].  Must be a value returned ",
+	      "from addOption of type string.");
+        $num_setup_errors++;
+	return(undef);
+      }
+
+    if($req_with_opt > $#{$usage_array} ||
+       $usage_array->[$req_with_opt]->{OPTTYPE} ne 'string')
+      {
+	error("Logfile suffix option [$flag] has been added to take a suffix ",
+	      "that is appended to string option type [$req_with_opt], but ",
+	      "that string type has either not been created yet or is not a ",
+	      "string option.",
+	      {DETAIL => ("String types should be created by addOption " .
+                          "before specifying a logfile suffix option type.")});
+        $num_setup_errors++;
+	return(undef);
+      }
+
+    if(defined($$get_opt_val) && defined($default) && $$get_opt_val ne $default)
+      {
+	error("Multiple conflicting default logfile suffix values.  Both ",
+	      "VARREF and DEFAULT parameters have defined (and differing) ",
+	      "values.  Define only 1.");
+        $num_setup_errors++;
+        return(undef);
+      }
+    elsif(defined($$get_opt_val))
+      {$default = $$get_opt_val}
+
+    #Set globals for what to put in the log and stderr
+    $log_verbose  = $verboses;
+    $log_debug    = $debugs;
+    $log_warnings = $warnings;
+    $log_errors   = $errors;
+    $log_mirror   = $stderr;
+    $log_header   = $runinfo;
+    $log_report   = $runreport;
+
+    if(!defined($append_mode))
+      {$append_mode = 1}
+
+    $GetOptHash->{$get_opt_str} = getGetoptSub($name,0);
+
+    if(defined($smry_desc) && $smry_desc ne '' &&
+       (!defined($detail_desc) || $detail_desc eq ''))
+      {$detail_desc = $smry_desc}
+
+    #If smry_desc is not defined or is an empty string
+    if(!defined($smry_desc) || $smry_desc eq '')
+      {
+	if($required)
+	  {$smry_desc = defined($detail_desc) ? $detail_desc :
+             'Logfile suffix appended to string supplied to [' .
+               getFlag($usage_array->[$req_with_opt]) . '].'}
+	else
+	  {$smry_desc = ''}
+      }
+
+    if((!defined($detail_desc) || $detail_desc eq '') &&
+       $usage_array->[$req_with_opt]->{OPTTYPE} eq 'string')
+      {$detail_desc = 'Logfile suffix appended to string supplied to [' .
+	 getFlag($usage_array->[$req_with_opt]) . '].'}
+
+    if(!defined($display_def) && !defined($default) && !$required)
+      {$display_def = 'STDERR'}
+
+    if(defined($display_def) && (ref($display_def) ne '' || $display_def eq ''))
+      {
+	error("Invalid display default.  Must be a non-empty string.  ",
+	      "Ignoring.");
+	undef($display_def);
+      }
+
+    my $optid = addToUsage($get_opt_str,
+			   $flags,
+			   $smry_desc,
+			   $detail_desc,
+			   $required,
+			   $display_def,
+			   $default,
+			   undef,         #accepts
+			   $hidden,
+			   'logsuff',
+			   0,
+			   $advanced,
+			   $heading,
+			   undef,         #usage name
+			   undef,         #usage order
+			   $get_opt_val,
+			   $req_with_opt,
+			   getRelationStr('1:1'),
+			   undef,         #delimiter
+			   undef,         #primary
+			   undef,         #format
+			   'merge',       #collision mode
+			   $append_mode);
+
+    if(!defined($optid))
+      {
+        $num_setup_errors++;
+        return(undef);
+      }
+
+    $logfile_suffix_optid = $optid;
+    $logfile_suffix_added = 1;
+
+    return($#{$usage_array});
   }
 
 sub addOutfileTagteamOption
@@ -2391,17 +3381,17 @@ sub addOutfileTagteamOption
 		       FILETYPEID|PAIR_WITH PAIR_RELAT VARREF_SUFF|GETOPTVAL
 		       REQUIRED PRIMARY FORMAT|FORMAT_DESC DEFAULT
 		       DEFAULT_IS_FILE HIDDEN_SUFF HIDDEN_FILE
-		       SMRY_SUFF|SMRY_DESC_SUFF|SHORT_DESC_SUFF
-		       SMRY_FILE|SMRY_DESC_FILE|SHORT_DESC_FILE
-		       DETAIL_SUFF|DETAIL_DESC_SUFF|LONG_DESC_SUFF
-		       DETAIL_FILE|DETAIL_DESC_FILE|LONG_DESC_FILE
+		       SHORT_DESC_SUFF|SMRY_SUFF|SMRY_DESC_SUFF
+		       SHORT_DESC_FILE|SMRY_FILE|SMRY_DESC_FILE
+		       LONG_DESC_SUFF|DETAIL_SUFF|DETAIL_DESC_SUFF
+		       LONG_DESC_FILE|DETAIL_FILE|DETAIL_DESC_FILE
 		       COLLISIONMODE_SUFF COLLISIONMODE_FILE ADVANCED_SUFF
-		       ADVANCED_FILE)],
+		       ADVANCED_FILE DISPDEF HEADING)],
 		   #If there are any params sent in, require the first
 		   [scalar(@_) == 0 ? () :
 		    #If there are at least 2 input file types, also require the
 		    # FILETYPEID
-		    (scalar(@$input_files_array) < 2 ?
+		    (getNumInfileTypes() < 2 ?
 		     qw(FLAG_SUFF|GETOPTKEY_SUFF FLAG_FILE|GETOPTKEY_FILE) :
 		     qw(FLAG_SUFF|GETOPTKEY_SUFF FLAG_FILE|GETOPTKEY_FILE
 			FILETYPEID|PAIR_WITH))],
@@ -2426,12 +3416,12 @@ sub addOutfileTagteamOption
                                     #Empty/undefined = exclude from short usage
     my $detail_desc_suff = $in[14]; #e.g. Outfile suffix.  See --help for...
     my $detail_desc_file = $in[15]; #e.g. Output file.  See --help for...
-    my $loc_collide_suff = $in[16]; #Adds to collid_modes_array
-			            #1 of: merge,rename,error
-    my $loc_collide_file = $in[17]; #Adds to collid_modes_array
-			            #1 of: merge,rename,error
-    my $advanced_suff    = $in[18];#Advanced options print when extended >= 2
-    my $advanced_file    = $in[19];#Advanced options print when extended >= 2
+    my $collid_mode_suff = $in[16]; #1 of: merge,rename,error
+    my $collid_mode_file = $in[17]; #1 of: merge,rename,error
+    my $advanced_suff    = $in[18]; #Advanced options print when extended >= 2
+    my $advanced_file    = $in[19]; #Advanced options print when extended >= 2
+    my $display_def      = $in[20]; #The default to display in the usage
+    my $heading          = $in[21]; #Section heading for first option
     my($suffix_id,$outfile_id);
 
     #If no parameters were submitted, add the default options
@@ -2440,7 +3430,7 @@ sub addOutfileTagteamOption
 	if($default_tagteam_added)
 	  {
 	    error("A default outfile tagteam has already been added.");
-	    return(undef);
+	    return(undef,undef);
 	  }
 	$default_tagteam_added = 1;
 
@@ -2453,6 +3443,9 @@ sub addOutfileTagteamOption
 	my($default_suff,$default_file) =
 	  (defined($default_is_file) && $default_is_file ?
 	   (undef,$default) : ($default,undef));
+	my($dispdef_suff,$dispdef_file) =
+	  (defined($default_is_file) && $default_is_file ?
+	   (undef,$display_def) : ($display_def,undef));
 
 	$suffix_id  = addOutfileSuffixOption($get_opt_str_suff,
 					     $file_type_index,
@@ -2464,9 +3457,24 @@ sub addOutfileTagteamOption
 					     $smry_desc_suff,
 					     $detail_desc_suff,
 					     $format_desc,
-					     $loc_collide_suff);
+					     $collid_mode_suff,
+					     $advanced_suff,
+					     $heading,
+					     $dispdef_suff);
+
+        #Assuming errors already printed if suffix_id is undef
+        if(!defined($suffix_id))
+          {return(undef,undef)}
+
+        #If the suffix option assigned a file type index by default (and none
+        #was defined in the call to this sub, define it for the call to
+        #addOutfileOption (because it does not assign this by default).
+        if(!defined($file_type_index) && defined($suffix_id) &&
+           defined($usage_array->[$suffix_id]->{PAIRID}))
+          {$file_type_index = $usage_array->[$suffix_id]->{PAIRID}}
+
 	$outfile_id = addOutfileOption($get_opt_str_file,
-				       $loc_collide_file,
+				       $collid_mode_file,
 				       $required,
 				       $primary,
 				       $default_file,
@@ -2475,10 +3483,25 @@ sub addOutfileTagteamOption
 				       $format_desc,
 				       $hidden_file,
 				       $file_type_index,
-				       $relationship);
+				       $relationship,
+				       undef, #flagless
+				       $advanced_file,
+				       undef, #heading
+				       $dispdef_file);
+
+        #Assuming errors already printed if outfile_id is undef
+        if(!defined($outfile_id))
+          {return(undef,undef)}
       }
 
-    return(createSuffixOutfileTagteam($suffix_id,$outfile_id,0));
+    my $ttid = createSuffixOutfileTagteam($suffix_id,$outfile_id,0);
+
+    if(!defined($ttid))
+      {return(undef,undef)}
+
+    #It should not matter which usage index we return.  We will return both.  If
+    #they assign a scalar to the return value, they will get the last one.
+    return($suffix_id,$outfile_id);
   }
 
 #This sub links options created by addOutfileSuffixOption and addOutfileOption
@@ -2489,51 +3512,54 @@ sub addOutfileTagteamOption
 #DEFAULT and SUMMARY can change IF they contin default values that were
 #inflenced by PRIMARY and/or REQUIRED values.  Other variables are also edited
 #if PRIMARY and/or REQUIRED change: values in $usage_array,
-#$suffix_primary_vals, $required_outfile_types, & $required_suffix_types
 sub createSuffixOutfileTagteam
   {
-    my $suffix_id     = $_[0];
-    my $outfile_id    = $_[1];
+    my $suffix_optid  = $_[0];
+    my $outfile_optid = $_[1];
     my $skip_existing = defined($_[2]) ? $_[2] : 0; #See addDefaultFileOptions
-    my $ttid          = -1 - scalar(keys(%$outfile_tagteams));
 
-    if(!defined($suffix_id) ||
-       scalar(@$suffix_id_lookup) <= $suffix_id ||
-       !defined($suffix_id_lookup->[$suffix_id]))
+    #Tagteam IDs will be negative numbers so they do not collide with outfile
+    #suffix IDs.  This gets a unique one.
+    my $ttid = -1 - scalar(keys(%$outfile_tagteams));
+
+    #Get the option ID of the hidden suffix associated with the outfile option
+    my $outfile_suffix_optid = (map {$_->{OPTION_ID}}
+				grep {$_->{OPTTYPE} eq 'suffix' &&
+					$_->{PAIRID} == $outfile_optid}
+				@$usage_array)[0];
+
+    if(!defined($suffix_optid) || $#{$usage_array} < $suffix_optid ||
+       $usage_array->[$suffix_optid]->{OPTTYPE} ne 'suffix')
       {
-	error("Invalid suffix ID: [",
-	      (defined($suffix_id) ? $suffix_id : 'undef'),"].");
+	error("Invalid suffix option ID: [",
+	      (defined($suffix_optid) ? $suffix_optid : 'undef'),"].");
+        $num_setup_errors++;
 	return(undef);
       }
     else
-      {debug({LEVEL => -2},"suffix ID: [$suffix_id] is in the ",
-	     "suffix_id_lookup and has: [",
-	     join(',',@{$suffix_id_lookup->[$suffix_id]}),"].")}
+      {debug({LEVEL => -2},"Suffix option ID: [$suffix_optid] is a valid ",
+	     "[$usage_array->[$suffix_optid]->{OPTTYPE}] linked to a [",
+	     $usage_array->[$usage_array->[$suffix_optid]->{PAIRID}]->{OPTTYPE},
+	     "].")}
 
-    if(!defined($outfile_id) ||
-       scalar(@$suffix_id_lookup) <= $outfile_id ||
-       !defined($suffix_id_lookup->[$outfile_id]))
+    if(!defined($outfile_optid) || $#{$usage_array} < $outfile_optid ||
+       $usage_array->[$outfile_optid]->{OPTTYPE} ne 'outfile')
       {
-	error("Invalid outfile ID: [",
-	      (defined($outfile_id) ? $outfile_id : 'undef'),"].");
+	error("Invalid outfile option ID: [",
+	      (defined($outfile_optid) ? $outfile_optid : 'undef'),"].");
+        $num_setup_errors++;
 	return(undef);
       }
     else
-      {debug({LEVEL => -2},"outfile ID: [$outfile_id] is in the ",
-	     "suffix_id_lookup and has: [",
-	     join(',',@{$suffix_id_lookup->[$outfile_id]}),"].")}
+      {debug({LEVEL => -2},"Outfile option ID: [$outfile_optid] is a valid ",
+	     "[$usage_array->[$outfile_optid]->{OPTTYPE}] linked to a [",
+	     $usage_array->[$usage_array->[$outfile_optid]->{PAIRID}]
+	     ->{OPTTYPE},"].")}
 
-    #Outfile defaults are saved in default_infiles_array, but there is no save
-    #of any default suffixes.  The defaults are needed by getOutfile in order
-    #to know the difference between a default suffix/outfile and an explicitly
-    #supplied suffix/outfile so that it can return the correct type of outfile.
-    #If one has a default, but the other was supplied on the command line, the
-    #supplied one is what must be returned.  Thus, we must save the default
-    #suffix:
-    my $infile_index         = $suffix_id_lookup->[$suffix_id]->[0];
-    my $suffix_index         = $suffix_id_lookup->[$suffix_id]->[1];
-    my $outfile_index        = $suffix_id_lookup->[$outfile_id]->[0];
-    my $outfile_suffix_index = $suffix_id_lookup->[$outfile_id]->[1];
+    my $if_opt_id    = $usage_array->[$suffix_optid]->{PAIRID};
+    my $of_usage     = $usage_array->[$outfile_optid];
+    my $ofsuff_usage = $usage_array->[$outfile_suffix_optid];
+    my $sf_usage     = $usage_array->[$suffix_optid];
 
     #If this is being called from addDefaultFileOptions, figure out which
     #type was not default-added (if any) so that we can change the tagteam ID
@@ -2543,134 +3569,132 @@ sub createSuffixOutfileTagteam
     my $suff_explicit = 1;
     if(isCaller('addDefaultFileOptions'))
       {
-	my $def_outf_suff_id = '';
+	my $def_outf_suff_optid = -1;
 	if($default_outfile_added)
-	  {$def_outf_suff_id = (getSuffixIDs($default_outfile_id))[0]}
+	  {$def_outf_suff_optid =
+	     (map {$_->{OPTION_ID}}
+	      grep {$_->{OPTTYPE} eq 'suffix' && defined($_->{PAIRID}) &&
+		      $_->{PAIRID} == $default_outfile_optid}
+	      @$usage_array)[0]}
 
 	if($default_outfile_suffix_added && $default_outfile_added &&
-	   $def_outf_suff_id eq $outfile_id &&
-	   $default_outfile_suffix_id eq $suffix_id)
+	   $def_outf_suff_optid == $outfile_suffix_optid &&
+	   $default_suffix_optid == $suffix_optid)
 	  {
-	    $ttid = 0;
+	    $ttid          = 0;
 	    $outf_explicit = 0;
 	    $suff_explicit = 0;
 	  }
 	elsif($default_outfile_suffix_added && !$default_outfile_added &&
-	      $default_outfile_suffix_id eq $suffix_id)
+	      $default_suffix_optid == $suffix_optid)
 	  {
-	    $ttid = $outfile_id;
+	    $ttid          = $outfile_suffix_optid;
 	    $suff_explicit = 0;
 	  }
 	elsif($default_outfile_added && !$default_outfile_suffix_added &&
-	      $def_outf_suff_id eq $outfile_id)
+	      $def_outf_suff_optid == $outfile_suffix_optid)
 	  {
-	    $ttid = $suffix_id;
+	    $ttid          = $suffix_optid;
 	    $outf_explicit = 0;
 	  }
       }
 
     #Make sure these IDs aren't involved in any other tagteams
     my $dupe = 0;
-    if(scalar(grep {$_->{SUFFID} eq $suffix_id} values(%$outfile_tagteams)))
+    if(scalar(grep {$_->{SUFFOPTID} eq $suffix_optid}
+	      values(%$outfile_tagteams)))
       {
-	my $already_outf_index =
-	  $suffix_id_lookup->[(grep {$_->{SUFFID} eq $suffix_id}
-			       values(%$outfile_tagteams))[0]->{OUTFID}]->[0];
+	my $already_outsf_index =
+	  (grep {$_->{SUFFOPTID} eq $outfile_suffix_optid}
+	   values(%$outfile_tagteams))[0]->{OTSFOPTID};
+	my $already_outf_index = $usage_array->[$already_outsf_index]->{PAIRID};
 	error("The outfile suffix supplied as [",
-	      getOutfileSuffixFlag($suffix_id),"] already belongs to an ",
-	      "outfile tagteam with outfiles supplied as [",
-	      getOutfileFlag($already_outf_index),"].  Unable to add to ",
-	      "another tagteam.") unless($skip_existing);
+	      getFlag($usage_array->[$suffix_optid]),
+	      "] already belongs to an outfile tagteam with outfiles supplied ",
+	      "as [",$usage_array->[$already_outf_index]->{OPTFLAG_DEF},
+	      "].  Unable to add to another tagteam.") unless($skip_existing);
 	$dupe = 1;
       }
-    if(scalar(grep {$_->{OUTFID} eq $outfile_id} values(%$outfile_tagteams)))
+    if(scalar(grep {$_->{OTSFOPTID} eq $outfile_suffix_optid}
+	      values(%$outfile_tagteams)))
       {
-	my $already_suff_id = (grep {$_->{OUTFID} eq $outfile_id}
-			       values(%$outfile_tagteams))[0]->{SUFFID};
-	error("Outfiles supplied as [",getOutfileFlag($outfile_index),
+	my $already_suff_id = (grep {$_->{OTSFOPTID} eq $outfile_suffix_optid}
+			       values(%$outfile_tagteams))[0]->{SUFFOPTID};
+	error("Outfiles supplied as [",getFlag($usage_array->[$outfile_optid]),
 	      "] already belong to an outfile tagteam with outfiles created ",
 	      "with suffixes supplied as [",
-	      getOutfileSuffixFlag($already_suff_id),"].  Unable to add ",
-	      "to another tagteam.") unless($skip_existing);
+	      getFlag($usage_array->[$already_suff_id]),
+	      "].  Unable to add to another tagteam.") unless($skip_existing);
 	$dupe = 1;
       }
     if($dupe)
-      {return(undef)}
+      {
+        $num_setup_errors++;
+        return(undef);
+      }
 
     #If the suffix ID is not from addOutfileSuffixOption
-    if(exists($outfile_types_hash->{$infile_index}))
+    if($if_opt_id > $#{$usage_array} ||
+       $usage_array->[$if_opt_id]->{OPTTYPE} ne 'infile')
       {
-	error("The outfile suffix ID submitted: [$suffix_id] does not appear ",
-	      "to be an outfile suffix ID, as the file option it is linked ",
-	      "to is an output file: [",getOutfileFlag($infile_index),
+	error("The outfile suffix option ID submitted: [$suffix_optid] does ",
+	      "not appear to be an outfile suffix, as the file option it is ",
+	      "linked to is not an input file: [",
+	      getFlag($usage_array->[$if_opt_id]),
 	      "], and not an input file as expected.");
+        $num_setup_errors++;
 	return(undef);
       }
-    if(!exists($outfile_types_hash->{$outfile_index}))
+    if($outfile_optid > $#{$usage_array} ||
+       $usage_array->[$outfile_optid]->{OPTTYPE} ne 'outfile')
       {
-	error("The outfile ID submitted: [$outfile_id] does not appear to be ",
-	      "an outfile ID, as the file option it is linked to is an ",
-	      "input file, [",getInfileFlag($outfile_index),"], and not an ",
-	      "output file as expected.");
+	error("The outfile ID submitted: [$outfile_optid] does not appear to ",
+	      "be an outfile option, as the file option it is linked to is an ",
+	      "input file, [",getFlag($usage_array->[$outfile_optid]),
+	      "], and not an output file as expected.");
+        $num_setup_errors++;
 	return(undef);
       }
 
-    if(scalar(@$outfile_suffix_array) <= $infile_index ||
-       scalar(@{$outfile_suffix_array->[$infile_index]}) <= $suffix_index)
-      {
-	error("Could not find the suffix for suffix ID: [$suffix_id].");
-	return(undef);
-      }
-
-    #Make sure that if the outfile option has a PAIR_WITH value, it is the same
+    #Make sure that if the outfile option has a PAIR_WITH value, it is the same.
     #as the FILETYPEID of the suffix option, otherwise - fatal error.
-    if(scalar(grep {$outfile_index == $_->[0] &&
-		      (!defined($_->[1]) || $infile_index != $_->[1])}
-	      @$required_relationships))
+    #If there is any relationship that the outfile links to that is not this
+    #infile...
+    if(defined($of_usage->{PAIRID}) && $of_usage->{PAIRID} != $if_opt_id)
       {
-	my $relat_index = (map {$_->[1]} grep {$outfile_index == $_->[0]}
-			   @$required_relationships)[0];
-	if(defined($relat_index))
+	if(defined($of_usage->{PAIRID}))
 	  {error('Outfile tagteam error: suffix [',
-		 getOutfileSuffixFlag($suffix_id),'] and outfile(s) [',
-		 getOutfileFlag($outfile_index),'] are not associated with ',
-		 'the same input file(s): [',getInfileFlag($infile_index),
-		 '] and [',getInfileFlag($relat_index),'], respectively.',
+		 getFlag($usage_array->[$suffix_optid]),
+		 '] and outfile(s) [',getFlag($usage_array->[$outfile_optid]),
+		 '] are not associated with the same input file(s): [',
+		 getFlag($usage_array->[$if_opt_id]),'] and [',
+		 getFlag($usage_array->[$of_usage->{PAIRID}]),
+		 '], respectively.',
 		 {DETAIL => ('An outfile tagteam must be between an outfile ' .
-			     "suffix type [ID: $suffix_id] and an outfile " .
-			     "type [ID: $outfile_id OUTFILE INDEX: " .
-			     "$outfile_index] that are associated with the " .
-			     'same input file type [INFILE INDEX ' .
-			     "$infile_index != PAIR_RELAT $relat_index].")})}
+			     "suffix type [ID: $suffix_optid] and an outfile " .
+			     "type [ID: $outfile_optid] that are associated " .
+			     "with the same input file type [ID: $if_opt_id " .
+			     "!= PAIR_RELAT $of_usage->{PAIRID}].")})}
 	else
 	  {error('Outfile tagteam error: suffix [',
-		 getOutfileSuffixFlag($suffix_id),'] and outfile(s) [',
-		 getOutfileFlag($outfile_index),'] are not associated with ',
-		 'the same input file(s): [',getInfileFlag($infile_index),
-		 '] versus [no input file type relationship defined] ',
-		 'respectively.',
+		 getFlag($usage_array->[$suffix_optid]),
+		 '] and outfile(s) [',getFlag($usage_array->[$outfile_optid]),
+		 '] are not associated with the same input file(s): [',
+		 getFlag($usage_array->[$if_opt_id]),'] versus ',
+		 '[no input file type relationship defined] respectively.',
 		 {DETAIL => ('An outfile tagteam must be between an outfile ' .
-			     "suffix type [ID: $suffix_id] and an outfile " .
-			     "type [ID: $outfile_id OUTFILE INDEX: " .
-			     "$outfile_index] that are associated with the " .
-			     'same input file type [INFILE INDEX ' .
-			     "$infile_index != PAIR_RELAT $relat_index].")})}
+			     "suffix type [ID: $suffix_optid] and an outfile " .
+			     "type [ID: $outfile_optid] that are associated " .
+			     'with the same input file type [ID: ' .
+			     "$if_opt_id != PAIR_RELAT undef].")})}
+        $num_setup_errors++;
 	return(undef);
       }
     #Else if a relationship wasn't saved at all
-    elsif(scalar(grep {$outfile_index == $_->[0]}
-		 @$required_relationships) == 0)
-      {addRequiredRelationship($outfile_index,
-			       $infile_index,
+    elsif(!defined($of_usage->{PAIRID}))
+      {addRequiredRelationship($outfile_optid,
+			       $if_opt_id,
 			       getRelationStr('1:1orM'))}
-
-    my $default_suffix =
-      $outfile_suffix_array->[$infile_index]->[$suffix_index];
-
-    #Grab all the usage info for the outfile and suffix options
-    my $of_usage     = getFileUsageHash($outfile_index,'outfile');
-    my $ofsuff_usage = getFileUsageHash($outfile_id,   'suffix');
-    my $sf_usage     = getFileUsageHash($suffix_id,    'suffix');
 
     #Set $primary from the file IDs
     debug({LEVEL => -2},"Arbitrarily setting PRIMARY to the value from ",
@@ -2685,21 +3709,18 @@ sub createSuffixOutfileTagteam
 	warning("Tagteam outfile conflict for PRIMARY output settings.  ",
 		"An outfile tagteam is set as ",($primary ? '' : 'NOT '),
 		"PRIMARY, but outfiles supplied as [",
-		getOutfileFlag($outfile_index),"] were explicitly and ",
-		"independently set as ",($of_usage->{PRIMARY} ? '' : 'NOT '),
-		"PRIMARY.")
+		getFlag($usage_array->[$outfile_optid]),
+		"] were explicitly and independently set as ",
+		($of_usage->{PRIMARY} ? '' : 'NOT '),"PRIMARY.")
 	  if($outf_explicit);
 
 	$of_usage->{PRIMARY} = $primary;
 
 	#If the default was automatically set based on its own primary value,
 	#reset it based on the value supplied here
-	if($of_usage->{DEFAULT} eq 'STDOUT' ||
-	   $of_usage->{DEFAULT} eq '')
-	  {$of_usage->{DEFAULT} = ($primary ? 'STDOUT' : '')}
-
-	$suffix_primary_vals->[$outfile_index]->[$outfile_suffix_index] =
-	  $primary;
+	if($of_usage->{DISPDEF} eq 'STDOUT' ||
+	   $of_usage->{DISPDEF} eq '')
+	  {$of_usage->{DISPDEF} = ($primary ? 'STDOUT' : undef)}
 
 	$ofsuff_usage->{PRIMARY} = $primary;
       }
@@ -2710,12 +3731,9 @@ sub createSuffixOutfileTagteam
 	warning("Tagteam outfile's hidden suffix conflict for PRIMARY ",
 		"output settings.  The tagteam output is set as ",
 		($primary ? '' : 'NOT '),"PRIMARY, but its suffix [",
-		getOutfileSuffixFlag($outfile_id),"] is set as ",
+		getFlag($ofsuff_usage),"] is set as ",
 		($ofsuff_usage->{PRIMARY} ? '' : 'NOT '),"PRIMARY.")
 	  if($outf_explicit);
-
-	$suffix_primary_vals->[$outfile_index]->[$outfile_suffix_index] =
-	  $primary;
 
 	$ofsuff_usage->{PRIMARY} = $primary;
       }
@@ -2723,12 +3741,9 @@ sub createSuffixOutfileTagteam
       {
 	warning("Tagteam suffix conflict for PRIMARY output settings.  ",
 		"The tagteam output is set as ",($primary ? '' : 'NOT '),
-		"PRIMARY, but the settings for its suffix [",
-		getOutfileSuffixFlag($suffix_id),"] is set as ",
-		($sf_usage->{PRIMARY} ? '' : 'NOT '),"PRIMARY.")
+		"PRIMARY, but the settings for its suffix [",getFlag($sf_usage),
+		"] is set as ",($sf_usage->{PRIMARY} ? '' : 'NOT '),"PRIMARY.")
 	  if($suff_explicit);
-
-	$suffix_primary_vals->[$infile_index]->[$suffix_index] = $primary;
 
 	$sf_usage->{PRIMARY} = $primary;
       }
@@ -2748,9 +3763,9 @@ sub createSuffixOutfileTagteam
 	warning("Tagteam outfile conflict for REQUIRED output settings.  ",
 		"An outfile tagteam is set as ",($required ? '' : 'NOT '),
 		"REQUIRED, but outfiles supplied as [",
-		getOutfileFlag($outfile_index),"] were explicitly and ",
-		"independently set as ",($of_usage->{REQUIRED} ? '' : 'NOT '),
-		"REQUIRED.")
+		getFlag($usage_array->[$outfile_optid]),
+		"] were explicitly and independently set as ",
+		($of_usage->{REQUIRED} ? '' : 'NOT '),"REQUIRED.")
 	  if($outf_explicit);
 
 	#We will leave the SUMMARY for the usage as-is, since we want required
@@ -2762,8 +3777,9 @@ sub createSuffixOutfileTagteam
 	warning("Tagteam suffix conflict for REQUIRED output settings.  ",
 		"The tagteam output is set as ",($required ? '' : 'NOT '),
 		"REQUIRED, but the settings for its suffix [",
-		getOutfileSuffixFlag($suffix_id),"] is set as ",
-		($sf_usage->{REQUIRED} ? '' : 'NOT '),"REQUIRED.")
+		getFlag($sf_usage),
+		"] is set as ",($sf_usage->{REQUIRED} ? '' : 'NOT '),
+		"REQUIRED.")
 	  if($suff_explicit);
 
 	#We will leave the SUMMARY for the usage as-is, since we want required
@@ -2774,90 +3790,25 @@ sub createSuffixOutfileTagteam
     #Set the options' REQUIRED value to false
     #Regardless of the value of required for the tagteam, the individual
     #options will always be set to not be required so that the tagteam
-    #requirement can be enforced without individual required options will not
-    #interfere..
-    if($of_usage->{REQUIRED})
-      {
-	#Remove this type from the required outfile types
-	@$required_outfile_types =
-	  grep {$_ != $outfile_index} @$required_outfile_types;
-      }
-    $of_usage->{REQUIRED} = 0;
-    if($ofsuff_usage->{REQUIRED})
-      {
-	#Remove this type from the required suffix types
-	@$required_suffix_types =
-	  grep {$_->[2] != $outfile_id} @$required_suffix_types;
-      }
+    #requirement can be enforced without individual required options interfering
+    $of_usage->{REQUIRED}     = 0;
     $ofsuff_usage->{REQUIRED} = 0;
-    if($sf_usage->{REQUIRED})
-      {
-	#Remove this type from the required suffix types
-	@$required_suffix_types =
-	  grep {$_->[2] != $suffix_id} @$required_suffix_types;
-      }
-    $sf_usage->{REQUIRED} = 0;
+    $sf_usage->{REQUIRED}     = 0;
 
     #Check whether any options are hidden
+    #Both being defaulted is handled by the mutex code
     my $hidden = $of_usage->{HIDDEN} + $sf_usage->{HIDDEN};
-
-    if($required && !$primary && $hidden == 2)
+    if($required && !$primary && $hidden == 2 &&
+       !hasDefault($of_usage) && !hasDefault($sf_usage))
       {
-	warning("The suffix [",getOutfileSuffixFlag($suffix_id),
-		"] and outfile(s) [",getOutfileFlag($outfile_index),
-		"] involved in a tagteam cannot both be hidden and ",
-		"required unless the output is primary.  Un-hiding.  Please ",
-		"unhide at least one of the two options or change the ",
-		"required state of the tagteam to false/0 to eliminate this ",
-		"warning.",
-		{DETAIL =>
-		 join(',',('If both options that specify where output should ',
-			   'go are required and not primary (note: primary ',
-			   'output goes to STDOUT when no file is ',
-			   'specified), they cannot be hidden from the usage ',
-			   'output because the user has no way to know how ',
-			   'to supply the required option(s).'))});
+	warning('Cannot hide both [',getBestFlag($sf_usage),'] and [',
+		getBestFlag($usage_array->[$outfile_optid]),'] when required, ',
+                'non-primary, and no default provided.  Unhiding.',
+                {DETAIL =>
+                 'Non-primary means the do not output to standard out.'});
 	$of_usage->{HIDDEN} = 0;
 	$sf_usage->{HIDDEN} = 0;
       }
-
-    #Append cross-referenced statements that mention that these options are
-    #mutually exclusive unless one of them is hidden.
-    if($hidden != 1)
-      {
-	$of_usage->{DETAILS} .= ($of_usage->{DETAILS} eq '' ? '' : "\n\n") .
-	  "Mutually exclusive with [" . getOutfileSuffixFlag($suffix_id) .
-	    "] (both options specify an outfile name in different ways for " .
-	      "the same output).";
-	$sf_usage->{DETAILS} .= ($sf_usage->{DETAILS} eq '' ? '' : "\n\n") .
-	  "Mutually exclusive with [" . getOutfileFlag($outfile_index) .
-	    "] (both options specify an outfile name in different ways for " .
-	      "the same output).";
-
-	if($required)
-	  {
-	    #NOTE: "^" is used in the required column of the usage in this same
-	    #condition to reference the following note about one of the tagteam
-	    #options being required
-	    $of_usage->{DETAILS} .= "\n^ Required if outfile suffix [" .
-	      getOutfileSuffixFlag($suffix_id) . "] is not supplied.";
-	    $sf_usage->{DETAILS} .= "\n^ Required if outfile [" .
-	      getOutfileFlag($outfile_index) . "] is not supplied.";
-	  }
-      }
-
-    #We do not want to include a note about 1 of 2 options being required if
-    #the other option is hidden (or rather 1 of the options is hidden).  Note,
-    #both cannot be hidden and required.
-    $of_usage    ->{TTHIDN} = $hidden == 1;
-    $ofsuff_usage->{TTHIDN} = $hidden == 1;
-    $sf_usage    ->{TTHIDN} = $hidden == 1;
-
-    #Mark a flag as to whether it's required as a part of a tagteam for the
-    #usage output
-    $of_usage    ->{TTREQD} = $required;
-    $ofsuff_usage->{TTREQD} = $required;
-    $sf_usage    ->{TTREQD} = $required;
 
     #Mark these items as being involved in a tagteam, so they can be skipped in
     #customHelp
@@ -2873,14 +3824,14 @@ sub createSuffixOutfileTagteam
 
     #These are the hash keys of the hashes in the usage_array that are used in
     #the customHelp method.  The same keys will be created in the
-    #outfile_tagteams hash: HIDDEN, OPTFLAG, PRIMARY, OPTTYPE, & FORMAT
+    #outfile_tagteams hash: HIDDEN, OPTFLAGS, PRIMARY, OPTTYPE, & FORMAT
     #The options will still appear individually in the usage output (though
     #they were edited above to do things like append mutual-exclusion cross-
     #references and required messages).
     my $flags = ($hidden == 1 && $of_usage->{HIDDEN} ?
-		 [] : [@{$of_usage->{OPTFLAG}}]);
+		 [] : [@{$of_usage->{OPTFLAGS}}]);
     if($hidden != 1 || !$sf_usage->{HIDDEN})
-      {push(@$flags,@{$sf_usage->{OPTFLAG}})}
+      {push(@$flags,@{$sf_usage->{OPTFLAGS}})}
 
     my $type = (!$hidden ? 'tagteam' : ($of_usage->{HIDDEN} ?
 					'suffix' : 'outfile'));
@@ -2890,255 +3841,28 @@ sub createSuffixOutfileTagteam
 		  ($suff_explicit && defined($sf_usage->{FORMAT}) ?
 		   $sf_usage->{FORMAT} : ''));
 
-    $outfile_tagteams->{$ttid} = {SUFFID   => $suffix_id,
-				  OUTFID   => $outfile_id,
-				  REQUIRED => $required,
-				  PRIMARY  => $primary,
+    my $mtxid =
+      makeMutuallyExclusive(OPTIONIDS   => [$suffix_optid,$outfile_optid],
+			    MUTUALS     => {SUFFOPTID => $suffix_optid,
+					    OTSFOPTID => $outfile_suffix_optid,
 
-				  #TODO: This is here to allow the teagteam
-				  #code to know whether the user supplied a
-				  #value different from the hard-coded default
-				  #so that it can decide whether to use the
-				  #suffix or the outfile or whether the user
-				  #inappropriately used both mutually exclusive
-				  #flags.  This really should be handled the
-				  #same way the default_outfiles_array is
-				  #handled.  See requirement #289.
-				  SUFFDEF  => $default_suffix,
+					    REQUIRED  => $required,    #Used in
+					    PRIMARY   => $primary,     #custom-
+					    HIDDEN    => $hidden == 2, #Help
+					    OPTFLAGS  => $flags,       #
+					    OPTTYPE   => $type,        #
+					    FORMAT    => $format},     #
+			    REQUIRED    => $required,
+			    OVERRIDABLE => 1,
+                            NAME        => ('outfile tagteam ' .
+                                            scalar(keys(%$outfile_tagteams))));
 
-				  HIDDEN   => $hidden == 2,
-				  OPTFLAG  => $flags,
-				  OPTTYPE  => $type,
-				  FORMAT   => $format};
+    if(!defined($mtxid))
+      {return(undef)}
+
+    $outfile_tagteams->{$ttid} = $mutual_params->{$mtxid};
 
     return($ttid);
-  }
-
-#This sub is intended to be called after user defaults have been processed
-#It updates the SUFFDEF values in the outfile_tagteams hash and clears out any
-#defaults stored in default_infiles_array if the user supplied a default of
-#their own to either the suffix or the outfile.  It also transfers the default
-#output file values that end up in the input_files_array to the
-#default_input_files
-##TODO: Do not manipulate the default values like this.  See requirement #289
-##TODO: Save defaults in the usage_array.  See requirement #288
-sub updateTagteamDefaults
-  {
-    foreach my $ttid (keys(%$outfile_tagteams))
-      {
-	#In order to evaluate whether the SUFFID option was supplied a value or
-	#has a default value, we need the 2 indexes into the
-	#outfile_suffix_array to obtain the value to compare to the SUFFDEF
-	#key's value in the outfile_tagteams hash
-	my $suffid_infile_index =
-	  $suffix_id_lookup->[$outfile_tagteams->{$ttid}->{SUFFID}]->[0];
-	my $suffid_suffix_index =
-	  $suffix_id_lookup->[$outfile_tagteams->{$ttid}->{SUFFID}]->[1];
-	#Same for the OUTFID
-	my $outfid_infile_index =
-	  $suffix_id_lookup->[$outfile_tagteams->{$ttid}->{OUTFID}]->[0];
-	my $outfid_suffix_index =
-	  $suffix_id_lookup->[$outfile_tagteams->{$ttid}->{OUTFID}]->[1];
-
-	#Retrieve the default values
-	my $suff_default = $outfile_tagteams->{$ttid}->{SUFFDEF};
-	my $outf_default = []; #A 2D array reference
-	if($outfid_infile_index < scalar(@$default_infiles_array) &&
-	   defined($default_infiles_array->[$outfid_infile_index]) &&
-	   scalar(@{$default_infiles_array->[$outfid_infile_index]}) &&
-	   scalar(grep {defined($_)} map {@$_}
-		  @{$default_infiles_array->[$outfid_infile_index]}))
-	  {$outf_default = $default_infiles_array->[$outfid_infile_index]}
-
-	#Retrieve the post-user-default-load values
-	my $suff_value = $outfile_suffix_array->[$suffid_infile_index]
-	  ->[$suffid_suffix_index];
-	my $outf_value = $input_files_array->[$outfid_infile_index];
-
-	my $is_suff_default = (defined($suff_default) &&
-			       $suff_default eq $suff_value);
-	my $is_outf_default =
-	  (defined($outf_value) && scalar(@$outf_value) > 0 &&
-	   defined($outf_default) &&
-	   scalar(@$outf_value) == scalar(@$outf_default) &&
-	   scalar(grep {scalar(@{$outf_value->[$_]}) !=
-			  scalar(@{$outf_default->[$_]})}
-		  (0..$#{$outf_value})) == 0 &&
-	   scalar(grep {my $i=$_;scalar(grep {$outf_value->[$i]->[$_] ne
-						$outf_default->[$i]->[$_]}
-					(0..$#{$outf_value->[$i]}))}
-		  (0..$#{$outf_value})) == 0);
-
-	#If the user saved a default for both mutually exclusive options
-	if(!$is_suff_default && defined($suff_value) &&
-	   !$is_outf_default && defined($outf_value) &&
-	   scalar(@$outf_value) > 0)
-	  {
-	    error("Invalid user defaults saved.  Mutually exclusive options ",
-		  "have been saved in the user defaults.");
-	    quit(-72);
-	  }
-	elsif(!$is_suff_default && defined($suff_value))
-	  {
-	    $outfile_tagteams->{$ttid}->{SUFFDEF} = $suff_value;
-	    $outfile_suffix_array->[$suffid_infile_index]
-	      ->[$suffid_suffix_index] = $suff_value;
-	    debug({LEVEL => -2},"New (user) default suffix: [$suff_value].");
-	    if(defined($outf_default) && scalar(@$outf_default))
-	      {
-		debug({LEVEL => -1},"Clearing out old outfile default.");
-		@{$default_infiles_array->[$outfid_infile_index]} = ();
-	      }
-	  }
-	elsif(!$is_outf_default &&
-	      defined($outf_value) && scalar(@$outf_value) > 0)
-	  {
-	    @{$default_infiles_array->[$outfid_infile_index]} =
-	      @{$input_files_array->[$outfid_infile_index]};
-
-	    #Clear out the input files array because defaults are added after
-	    #the user has added stuff to it from the command line (instead of
-	    #how suffix defaults are handled - just check if the value is the
-	    #same as the default)
-	    @{$input_files_array->[$outfid_infile_index]} = ();
-
-	    debug({LEVEL => -1},"New (user) default outfiles: [",
-		  join(' ',map {@$_}
-		       @{$default_infiles_array->[$outfid_infile_index]}),
-		  "].");
-
-	    if(defined($suff_default))
-	      {
-		$outfile_tagteams->{$ttid}->{SUFFDEF} = undef;
-		#The value for the suffix has to be manipulated because the
-		#default is stored in the actual array for the values.
-		$outfile_suffix_array->[$suffid_infile_index]
-		  ->[$suffid_suffix_index] = undef;
-	      }
-	  }
-	else
-	  {debug({LEVEL => -1},"Tagteam [$ttid] doesn't have an option that ",
-		 "was changed by user defaults.")}
-      }
-  }
-
-#This clears out the programmer's array variables so that the user can supply
-#default values or explicit values on the command line that replace the
-#defaults.  This should be called just before loading the user defaults.
-sub clearArrayDefaults
-  {
-    #Update the default array and 2D array options in case the user supplied
-    #defaults.
-    foreach my $array_ref (keys(%$array_defaults_hash))
-      {if(scalar(@{$array_defaults_hash->{$array_ref}->{VALUES}}))
-	 {@{$array_defaults_hash->{$array_ref}->{VALUES}} = ()}}
-  }
-
-
-#This sub is intended to be called after user defaults are loaded, but before
-#the command line is processed so that default values can be transferred.  It
-#saves any default values and clears out their variables so that if the user
-#explicitly supplies any, they will replace the default values instead of add
-#to them
-sub updateDefaults
-  {
-    my $user_defaults_exist = $_[0];
-
-    if($user_defaults_exist)
-      {
-	updateTagteamDefaults();
-
-	#Update the default array and 2D array options in case the user
-	#supplied defaults.  If they didn't, the defaults will be added back
-	#later in loadDefaults.
-	foreach my $array_ref (keys(%$array_defaults_hash))
-	  {
-	    if(scalar(@{$array_defaults_hash->{$array_ref}->{VALUES}}))
-	      {
-		@{$array_defaults_hash->{$array_ref}->{DEFAULTS}} =
-		  @{$array_defaults_hash->{$array_ref}->{VALUES}};
-		@{$array_defaults_hash->{$array_ref}->{VALUES}} = ();
-	      }
-	  }
-      }
-
-    #Update the file options to clear them out.  They will be added back later
-    #in loadDefault
-    foreach my $file_type_id (0..$#{$input_files_array})
-      {
-	#If there were any user defaults supplied for the in/outfiles
-	if(scalar(@{$input_files_array->[$file_type_id]}))
-	  {
-	    #Replace any programmer-supplied defaults with the user defaults
-	    @{$default_infiles_array->[$file_type_id]} =
-	      @{$input_files_array->[$file_type_id]};
-	    #Clear the user defaults out of the input_files_array
-	    @{$input_files_array->[$file_type_id]} = ();
-	  }
-      }
-
-    #Update the outdir options to clear them out.  They will be added back
-    #later in loadDefault
-    #If there were any user defaults supplied for the in/outfiles
-    if(scalar(@$outdirs_array))
-      {
-	#Replace any programmer-supplied defaults with the user defaults
-	@$default_outdirs_array = @$outdirs_array;
-	#Clear the user defaults out of the outdirs_array
-	@$outdirs_array = ();
-      }
-  }
-
-#Takes an outfile type index and returns the suffix IDs associated with it
-sub getSuffixIDs
-  {
-    my $file_type_index = $_[0];
-    if(!defined($file_type_index) ||
-       $file_type_index >= scalar(@$input_files_array))
-      {
-	error("Invalid file type index: [",
-	      (defined($file_type_index) ? $file_type_index : 'undef'),
-	      "].");
-	return(wantarray ? () : []);
-      }
-    my $suffix_ids = [grep {$suffix_id_lookup->[$_]->[0] == $file_type_index}
-		      0..$#{$suffix_id_lookup}];
-    return(wantarray ? @$suffix_ids : $suffix_ids);
-  }
-
-#Takes an file type index and a suffix index and returns the suffix ID
-
-sub getSuffixID
-  {
-    my $file_type_index = $_[0];
-    my $suffix_index    = $_[1];
-    if(!defined($file_type_index) ||
-       $file_type_index >= scalar(@$input_files_array))
-      {
-	error("Invalid file type index: [",
-	      (defined($file_type_index) ? $file_type_index : 'undef'),
-	      "].");
-	return(undef);
-      }
-    elsif(!defined($suffix_index) ||
-	  $suffix_index >=
-	  scalar(@{$outfile_suffix_array->[$file_type_index]}))
-      {
-	error("Invalid suffix index: [",
-	      (defined($suffix_index) ? $suffix_index : 'undef'),"].");
-	return(undef);
-      }
-    my $suffix_ids = [grep {$suffix_id_lookup->[$_]->[0] == $file_type_index &&
-			      $suffix_id_lookup->[$_]->[1] == $suffix_index}
-		      0..$#{$suffix_id_lookup}];
-    if(scalar(@$suffix_ids) != 1)
-      {
-	error("Unable to determine suffix ID from outfile index ",
-	      "[$file_type_index] and suffix index [$suffix_index] because ",
-	      "it matches [",scalar(@$suffix_ids),"] IDs.");
-	return(undef);
-      }
-    return($suffix_ids->[0]);
   }
 
 #Returns whether any of the submitted subroutine names are in the stack trace
@@ -3165,8 +3889,9 @@ sub isCaller
 sub addOutdirOption
   {
     my @in = getSubParams([qw(FLAG|GETOPTKEY REQUIRED DEFAULT HIDDEN
-			      SMRY|SMRY_DESC|SHORT_DESC
-			      DETAIL|DETAIL_DESC|LONG_DESC FLAGLESS ADVANCED)],
+			      SHORT_DESC|SMRY|SMRY_DESC
+			      LONG_DESC|DETAIL|DETAIL_DESC FLAGLESS ADVANCED
+			      HEADING DISPDEF)],
 			  [scalar(@_) ? qw(FLAG|GETOPTKEY) : ()],
 			  [@_]);
     my $get_opt_str = $in[0]; #e.g. 'outdir=s'
@@ -3179,6 +3904,8 @@ sub addOutdirOption
     my $detail_desc = $in[5]; #e.g. 'Input file(s).  Space separated,...'
     my $flagless    = $in[6]; #Whether the option can be supplied sans flag
     my $advanced    = $in[7]; #Advanced options print when extended >= 2
+    my $heading     = $in[8]; #Section heading to print in extended usage
+    my $display_def = $in[9]; #The default to display in the usage
 
     #Trim leading & trailing hard returns and white space characters (from
     #using '<<')
@@ -3187,7 +3914,7 @@ sub addOutdirOption
     $detail_desc =~ s/^\s+//s if(defined($detail_desc));
     $detail_desc =~ s/\s+$//s if(defined($detail_desc));
 
-    if($command_line_processed)
+    if($command_line_stage >= ARGSREAD)
       {
 	error("You cannot add command line options (i.e. call ",
 	      "addOutdirOption()) after the command line has already ",
@@ -3211,7 +3938,8 @@ sub addOutdirOption
 	  {
 	    error('Unable to add default output directory type ',
 		  "[$default_outdir_opt] due to redundant flags: [",
-		  join(',',getDupeFlags($get_opt_str)),'].');
+		  join(',',getDupeFlags($default_outdir_opt,
+                                        $default_outdir_opt)),'].');
 	    $default_outdir_opt = $get_opt_str;
 	    return(undef);
 	  }
@@ -3229,39 +3957,43 @@ sub addOutdirOption
       {error("Invalid REQUIRED parameter: [$required].")}
 
     #Allow the flag to be an array of scalars and turn it into a get opt str
-    $get_opt_str = makeGetOptKey($get_opt_str,'outdir',1,'addOutdirOption');
+    my $save_getoptstr = $get_opt_str;
+    $get_opt_str = makeGetOptKey($get_opt_str,'outdir',0,'addOutdirOption');
+
+    if(!defined($get_opt_str))
+      {
+	$num_setup_errors++;
+	return(undef);
+      }
 
     $get_opt_str = fixStringOpt($get_opt_str);
 
-    if(!isGetOptStrValid($get_opt_str,'outdir'))
+    if(!isGetOptStrValid($get_opt_str,'outdir',$default_outdir_opt))
       {
 	if($adding_default)
 	  {warning("Unable to add default output directory option.")}
 	else
-	  {
-	    error("Invalid GetOpt parameter flag definition: [$get_opt_str] ",
-		  "for outdir type.");
-	    quit(-75);
-	  }
+	  {$num_setup_errors++}
 	return(undef);
       }
 
     my $flags = [getOptStrFlags($get_opt_str)];
     my $flag  = getDefaultFlag($flags);
+    my $name  = createOptionNameFromFlags($flags);
 
     if($outdirs_added)
-      {outdirLimitation(1)}
+      {
+        outdirLimitation(1);
+        $num_setup_errors++;
+	return(undef);
+      }
 
     $outdirs_added = 1;
 
-    if($hidden && !defined($default) && (defined($required) && $required))
+    if($hidden && !defined($default) && defined($required) && $required)
       {
-	warning("Cannot hide option [$flag] if",
-		(!defined($default) ? ' no default provided' : ''),
-		((!defined($default) && defined($required) && $required) ?
-		 ' and if' : ''),
-		(defined($required) && $required ? ' it is required' : ''),
-		".  Setting as not hidden.");
+	warning("Cannot hide option [$flag] if no default provided and if it ",
+		"is required.  Setting as not hidden.");
 	$hidden = 0;
       }
 
@@ -3274,34 +4006,39 @@ sub addOutdirOption
 	undef($default);
       }
 
+    if(defined($default) && $default eq '')
+      {
+	warning("Default outdir is an empty string.",
+		{DETAIL => 'Setting to undefined.'});
+	undef($default);
+      }
+
     if(defined($default))
-      {push(@$default_outdirs_array,[$default])}
+      {
+	my($twodarray,$default_str) = makeCheck2DFileArray($default);
+	$default = $twodarray;
+      }
+
+    if(defined($display_def) && (ref($display_def) ne '' || $display_def eq ''))
+      {
+	error("Invalid display default.  Must be a non-empty string.  ",
+	      "Ignoring.");
+	undef($display_def);
+      }
 
     debug({LEVEL=>-1},"Creating an outdir option.");
 
-    #The anonymous sub below references a package variable ($outdirs_array) in
-    #the scope of this subroutine.  The interpreter captures only the lexical
-    #variables in the scope of this subrotine when it rubs the anonymous sub,
-    #thus we must bring the package variable into this scope using our()
-    #explicitly because the sub does not otherwise use this variale.  I'm
-    #geeking out so hard on this.
     ##TODO: Note, this won't be necessary in the future when I allow more than
     ##      1 outdir type.  See req 212.
-    my $tmp = scalar(@$outdirs_array);
-    #our($outdirs_array);
 
-    my $getoptsub = 'sub {push(@$outdirs_array,[sglob($_[1])])}';
-    $GetOptHash->{$get_opt_str} = eval($getoptsub);
-
-    ##TODO: The outdir flags are messed up and need to be fixed. See req 178
-    $outdir_flag_array->[0] = $flag;
+    $GetOptHash->{$get_opt_str} = getGetoptSub($name,0);
 
     #If no summary usage was provided for this option
     if(!defined($smry_desc) || $smry_desc eq '')
       {
-	#If it's a required option, add a default summary
 	if($required)
-	  {$smry_desc = 'Output directory.'}
+	  {$smry_desc =
+             defined($detail_desc) ? $detail_desc : 'Output directory.'}
 	else
 	  {$smry_desc = ''}
       }
@@ -3318,44 +4055,49 @@ sub addOutdirOption
 		   '--extended --help for advanced usage examples.'))}
       }
 
-    if(!defined($default))
-      {$default = ''}
-
-    $required_outdirs = $required;
-
     if(defined($flagless) && $flagless)
       {
-	if(defined($flagless_multival_type) && $flagless_multival_type > -1)
+	if(defined($flagless_multival_optid) && $flagless_multival_optid > -1)
 	  {
 	    error("An additional multi-value option has been designated as ",
 		  "'flagless': [$get_opt_str]: [$flagless].  Only 1 is ",
 		  "allowed.",
 		  {DETAIL => "First flagless option was: [" .
-		   getDefaultFlag($usage_array->[$flagless_multival_type]
-				  ->{OPTFLAG}) . "]."});
+		   getDefaultFlag($usage_array->[$flagless_multival_optid]
+				  ->{OPTFLAGS}) . "]."});
 	    return(undef);
 	  }
 
-	$getoptsub = 'sub {checkFileOpt($_[0],1);push(@$outdirs_array,' .
-	  '[sglob($_[0])])}';
-	$GetOptHash->{'<>'} = eval($getoptsub);
+	$GetOptHash->{'<>'} = getGetoptSub($name,1);
 
 	#This assumes that the call to addToUsage a few lines below is the
 	#immediate next call to addToUsage
-	$flagless_multival_type = getNextUsageIndex();
+	$flagless_multival_optid = getNextUsageIndex();
       }
 
-    addToUsage($get_opt_str,
-	       $flags,
-	       $smry_desc,
-	       $detail_desc,
-	       $required,
-	       $default,
-	       undef,
-	       $hidden,
-	       'outdir',
-	       0,
-	       $advanced);
+    my $oid = addToUsage($get_opt_str,
+                         $flags,
+                         $smry_desc,
+                         $detail_desc,
+                         $required,
+                         $display_def,
+                         $default,
+                         undef,         #accepts
+                         $hidden,
+                         'outdir',
+                         0,
+                         $advanced,
+                         $heading,
+                         undef,         #usage name
+                         undef,         #usage order
+                         $outdirs_array,
+                         undef,         #pair with option ID
+                         getRelationStr('1'));
+
+    if(!defined($oid))
+      {$num_setup_errors++}
+
+    return($oid);
   }
 
 sub outdirLimitation
@@ -3370,10 +4112,7 @@ sub outdirLimitation
 	       'different dirctories.  See `--help --extended` for examples ',
 	       "using the sample $flag option."));
     if($fatal)
-      {
-	error($msg);
-	quit(-7);
-      }
+      {error($msg)}
     else
       {warning($msg)}
   }
@@ -3406,16 +4145,18 @@ sub visibleOutdirExists
 sub addOption
   {
     my @in = getSubParams([qw(FLAG|GETOPTKEY VARREF|GETOPTVAL TYPE REQUIRED
-			      DEFAULT HIDDEN SMRY|SMRY_DESC|SHORT_DESC
-			      DETAIL|DETAIL_DESC|LONG_DESC ACCEPTS ADVANCED
-			      INTERNAL_ARRAY_REF)],
+			      DISPDEF HIDDEN SHORT_DESC|SMRY|SMRY_DESC
+			      LONG_DESC|DETAIL|DETAIL_DESC ACCEPTS ADVANCED
+			      HEADING DEFAULT USAGE_NAME USAGE_ORDER
+			      INTERNAL_ARRAY_REF INTERNAL_DELIM
+			      INTERNAL_FLAGLESS)],
 			  [qw(FLAG|GETOPTKEY VARREF|GETOPTVAL)],
 			  [@_]);
     my $get_opt_str     = $in[0]; #e.g. 'o|suffix=s'
     my $get_opt_ref     = $in[1]; #e.g. \$my_option - A reference to a var/sub
     my $type            = $in[2]; #bool,negbool,string,integer,float,enum,count
     my $required        = $in[3]; #Is option required?: 0=false, non-0=true
-    my $default         = $in[4]; #e.g. '1'
+    my $display_def     = $in[4]; #The default to display in the usage
     my $hidden          = $in[5]; #0 or non-0. non-0 requires a default.
                                   #Excludes from usage output.
     my $smry_desc       = $in[6]; #e.g. Input file(s).  See --help for format.
@@ -3423,8 +4164,13 @@ sub addOption
     my $detail_desc     = $in[7]; #e.g. 'Input file(s).  Space separated,...'
     my $accepts         = $in[8]; #e.g. ['yes','no','maybe']
     my $advanced        = $in[9]; #Advanced options print when extended >= 2
-    my $internal_array  = $in[10];#For internal use only
-    my $internal_delim  = $in[11];#For internal use only
+    my $heading         = $in[10];#Section heading to print in extended usage
+    my $default         = $in[11];#E.g. '1'
+    my $name            = $in[12];
+    my $order           = $in[13];
+    my $internal_array  = $in[14];#For internal use only
+    my $internal_delim  = $in[15];#For internal use only
+    my $internal_flglss = $in[16];#For internal use only
 
     #Trim leading & trailing hard returns and white space characters (from
     #possibly having used '<<' to define these values)
@@ -3433,12 +4179,20 @@ sub addOption
     $detail_desc =~ s/^\s+//s if(defined($detail_desc));
     $detail_desc =~ s/\s+$//s if(defined($detail_desc));
 
-    if($command_line_processed)
+    if($command_line_stage >= ARGSREAD)
       {
 	error("You cannot add command line options (i.e. call ",
 	      "addOption()) after the command line has already ",
 	      "been processed (i.e. processCommandLine()) without at ",
 	      "least re-initializing (i.e. calling _init()).");
+        $num_setup_errors++;
+	return(undef);
+      }
+
+    if(ref($get_opt_ref) eq '')
+      {
+	error("Invalid VARREF.  Must be a reference.");
+        $num_setup_errors++;
 	return(undef);
       }
 
@@ -3447,27 +4201,23 @@ sub addOption
 
     #This validates the type passed in or sets a default if no type info
     #present
-    $type = getOptType($type,$get_opt_str,$accepts,$get_opt_ref);
+    $type = getOptType($type,$get_opt_str,$accepts,$get_opt_ref,$default,$name);
     my $save_getoptstr = $get_opt_str;
-    $get_opt_str = makeGetOptKey($get_opt_str,$type,1,'addOption');
+    my $get_opt_key    = makeGetOptKey($get_opt_str,$type,0,'addOption');
 
-    if(!defined($get_opt_str))
+    if(!defined($get_opt_key))
       {
-	error("Invalid flag definition: [$save_getoptstr].");
-	quit(-99);
+	$num_setup_errors++;
+	return(undef);
       }
 
-    my $flags = [getOptStrFlags($get_opt_str)];
+    my $flags = [getOptStrFlags($get_opt_key)];
     my $flag  = getDefaultFlag($flags);
 
-    if($hidden && !defined($default) && (defined($required) && $required))
+    if($hidden && !defined($default) && defined($required) && $required)
       {
-	warning("Cannot hide option [$flag] if",
-		(!defined($default) ? ' no default provided' : ''),
-		((!defined($default) && defined($required) && $required) ?
-		 ' and if' : ''),
-		(defined($required) && $required ? ' it is required' : ''),
-		".  Setting as not hidden.");
+	warning("Cannot hide option [$flag] if no default provided and if it ",
+		"is required.  Setting as not hidden.");
 	$hidden = 0;
       }
 
@@ -3482,39 +4232,38 @@ sub addOption
     #Variable options should be checked for validity, but not for duplicates.
     #They are always present though as of the initial _init call, though not
     #always presented in the interface, thus the check should allow duplicates.
-    my $is_builtin_opt =
-      ($calling_sub =~ /^CommandLineInterface::add(RunMode|Builtin)Options$/g);
+    my $is_builtin_opt = isCaller('addBuiltinOption');
 
     debug({LEVEL => -2},"Allowing duplicates?: $is_builtin_opt");
 
-    if(!$is_array_opt &&
-       !isGetOptStrValid($get_opt_str,'general',$is_builtin_opt))
+    if(!$is_array_opt && !isGetOptStrValid($get_opt_key,'general',$name))
       {
 	if($is_builtin_opt)
 	  {warning("Unable to add builtin option.",
 		   {DETAIL => "GetOptStr: [$get_opt_str]."})}
 	else
-	  {
-	    error("Invalid GetOpt parameter flag definition: [$get_opt_str] ",
-		  "for general type.");
-	    quit(-76);
-	  }
+	  {$num_setup_errors++}
 	return(undef);
+      }
+
+    #If no detailed usage was provided for this option
+    if(!defined($detail_desc) || $detail_desc eq '')
+      {
+	if(defined($smry_desc) && $smry_desc ne '')
+	  {$detail_desc = $smry_desc}
+	else
+	  {$detail_desc = 'No usage provided for this option.'}
       }
 
     #If no summary usage was provided for this option
     if(!defined($smry_desc) || $smry_desc eq '')
       {
-	#If it's a required option, add a default summary
 	if($required)
-	  {$smry_desc = 'No usage summary provided for this option.'}
+	  {$smry_desc = defined($detail_desc) ? $detail_desc :
+             'No usage summary provided for this option.'}
 	else
 	  {$smry_desc = ''}
       }
-
-    #If no detailed usage was provided for this option
-    if(!defined($detail_desc) || $detail_desc eq '')
-      {$detail_desc = 'No usage provided for this option.'}
 
     if(defined($accepts) &&
        (ref($accepts) ne 'ARRAY' ||
@@ -3525,72 +4274,711 @@ sub addOption
 	      (ref($accepts) eq 'ARRAY' ? 'n ARRAY of (' .
 	       join(',',map {ref(\$_)} @$accepts) . ')' : ' ' . ref($accepts)),
 	      "] instead.");
+        $num_setup_errors++;
 	return(undef);
       }
 
-    if(defined($accepts))
-      {$accepts_hash->{$get_opt_ref} = $accepts}
+    my($getoptref);
 
-    $GetOptHash->{$get_opt_str} = $get_opt_ref;
+    if(!defined($type))
+      {$type = getGeneralOptType($get_opt_key)}
+
+    if(!defined($name))
+      {$name = createOptionNameFromFlags($flags)}
 
     if(!$is_array_opt)
       {
-	if($required)
-	  {requireGeneralOption($get_opt_ref,$get_opt_str,$default)}
+	$getoptref = getGetoptSub($name);
 
-	$general_flag_hash->{$get_opt_ref} = $flag;
+	if(ref($get_opt_ref) eq 'SCALAR' && defined($$get_opt_ref) &&
+	   defined($default) && $$get_opt_ref ne $default)
+	  {
+	    if(isCaller('addBuiltinOption'))
+	      {$$get_opt_ref = $default}
+	    else
+	      {
+		error("Multiple conflicting default values supplied.  The ",
+		      "variable reference (VARREF) is: [$$get_opt_ref] versus ",
+		      "the DEFAULT: [$default].",
+		      {DETAIL =>
+		       join('',('Only one must have a value or they must both ',
+				'be the same.  If you are trying to supply a ',
+				'value to display in the usage, use the ',
+				'DISPDEF parameter instead of the DEFAULT ',
+				'parameter.'))});
+                $num_setup_errors++;
+                return(undef);
+	      }
+	  }
+
+	if(ref($get_opt_ref) ne 'CODE' && defined($$get_opt_ref) &&
+	   !defined($default))
+	  {$default = $$get_opt_ref}
+
+	unless(isOptRefUnique($get_opt_ref,$flag))
+	  {
+            $num_setup_errors++;
+            return(undef);
+          }
+
+	$GetOptHash->{$get_opt_key} = $getoptref;
+      }
+    else
+      {
+	#get_opt_ref should already be a code ref from the array option subs
+	$GetOptHash->{$get_opt_key} = $get_opt_ref;
       }
 
-    if(!defined($type))
-      {$type = getGeneralOptType($get_opt_str)}
+    if(defined($display_def) && ref($display_def) ne '')
+      {
+	error("Invalid display default.  Must be a non-empty string.  ",
+	      "Ignoring.");
+	undef($display_def);
+      }
 
-    if(defined($default) && $default ne '' && $detail_desc !~ /^\[/ &&
-       showDefault($type,$get_opt_ref,$default))
-      {$detail_desc = "[$default] $detail_desc"}
+    my $oid = addToUsage($get_opt_key,
+                         $flags,
+                         $smry_desc,
+                         $detail_desc,
+                         $required,
+                         $display_def,
+                         $default,
+                         $accepts,
+                         $hidden,
+                         $type,
+                         $internal_flglss,
+                         $advanced,
+                         $heading,
+                         $name,              #usage name
+                         $order,             #usage order
+                         $get_opt_ref,
+                         undef,              #pair with option ID
+                         undef,              #pair relationship
+                         $internal_delim);
 
-    addToUsage($get_opt_str,
-	       $flags,
-	       $smry_desc,
-	       $detail_desc,
-	       $required,
-	       $default,
-	       $accepts,
-	       $hidden,
-	       $type,
-	       0,
-	       $advanced,
-	       $internal_array,
-	       $internal_delim);
+    if(!defined($oid))
+      {$num_setup_errors++}
+
+    return($oid);
   }
 
-#Checks the validity of values (ignores undefs because they're handled by the
-#requirement checking code)
-#Globals used: $usage_array, $GetOptHash
-sub validateNonFileOptions
+#Globals used: $def_option_hash, $command_line_stage
+sub editBuiltinOption
   {
-    my $checktypehash = {%$genopt_types};
+    my $opt           = shift(@_);
+    my $affects_order = shift(@_);
+    my %params        = scalar(@_) % 2 == 0 ? @_ : ();
+
+    #If the option has already been added or we've passed the auto-add of
+    #builtin options in processCommandLine()
+    if($def_option_hash->{$opt}->{ADDED} || $command_line_stage > CALLED)
+      {
+	$builtin_edit_failures++;
+	error("The $opt option has either already been added to the ",
+	      "interface or the command line has already been processed and ",
+	      "thus $opt is no longer editable.");
+	return(0);
+      }
+
+    #Make sure the keys supplied are valid.  Record supplied keys.
+    my $supplied = {};
+    if(scalar(@_) % 2 == 0)
+      {
+	foreach my $key (grep {my $p = $_;
+			       scalar(grep {$_ eq $p}
+				      @{$def_option_hash->{$opt}->{EDITABLE}})}
+			 keys(%params))
+	  {
+	    $supplied->{$key} = 1;
+	    $def_option_hash->{$opt}->{CHANGED} = 1;
+	  }
+      }
+    else
+      {
+	$builtin_edit_failures++;
+	error("Odd number of values in the parameter array.",
+	      {DETAIL => "The hash must be used to supply parameters with " .
+	       "the following (optional) keys: [" .
+	       join(',',keys(%{$def_option_hash->{$opt}->{EDITABLE}})) . "]."});
+	return(0);
+      }
+
+    #Make sure all the values supplied are editable
+    if(scalar(keys(%params)) &&
+       scalar(grep {my $p = $_;scalar(grep {$_ eq $p}
+				      @{$def_option_hash->{$opt}->{EDITABLE}})}
+	      keys(%params)) != scalar(keys(%params)))
+      {
+	$builtin_edit_failures++;
+	error("The following invalid or unallowed parameters were submitted ",
+	      "to edit the $opt option: [",
+	      join(',',sort {$a cmp $b}
+		   grep {my $p = $_;
+			 scalar(grep {$_ eq $p}
+				@{$def_option_hash->{$opt}->{EDITABLE}}) == 0}
+		   keys(%params)),"].",
+	      {DETAIL => "Valid/allowed parameters are: [" .
+	       join(',',@{$def_option_hash->{$opt}->{EDITABLE}}) . "].  You " .
+	       "supplied: [" . join(',',sort(keys(%params))) . "]."});
+	return(0);
+      }
+
+    #If there's nothing submitted, return success, otherwise, initialize to 0
+    my $edited = (scalar(@_) ? 0 : 1);
+    my @in = getSubParams($def_option_hash->{$opt}->{EDITABLE},[],[@_]);
+    foreach my $index (0..$#{$def_option_hash->{$opt}->{EDITABLE}})
+      {
+	my $key   = $def_option_hash->{$opt}->{EDITABLE}->[$index];
+	my $value = $in[$index];
+	if(exists($supplied->{$key}))
+	  {
+	    my($goodval,$valid) = isValidBuiltinParam($opt,$key,$value);
+	    if($valid)
+	      {
+		$def_option_hash->{$opt}->{PARAMS}->{$key} = $goodval;
+		$edited = 1;
+	      }
+	  }
+      }
+
+    #If a successful change was made, there was a change, this change affects,
+    #the option order, and no heading was supplied, clear out any default
+    #heading
+    if($edited && scalar(@_) && $affects_order && !exists($supplied->{HEADING}))
+      {$def_option_hash->{$opt}->{PARAMS}->{HEADING} = ''}
+
+    return($edited);
+  }
+
+#Globals used: $def_option_hash
+sub isValidBuiltinParam
+  {
+    my $opt   = $_[0];
+    my $param = $_[1];
+    my $value = $_[2];
+    my $retval = $value;
+    my $valid  = 1;
+
+    if(!defined($param) || !defined($opt))
+      {
+	error("Option and parameter must be defined.");
+	$valid = 0;
+      }
+    elsif($param eq 'FLAG')
+      {
+	#Cursory check.  The real details will be checked in addOption()
+	if(!defined($value) || (ref($value) ne '' && ref($value) ne 'ARRAY') ||
+	   ((ref($value) eq '' && ($value !~ /\S/ || $value =~ /\s/s)) &&
+	    (ref($value) eq 'ARRAY' &&
+	     (scalar(@$value) !=
+	      scalar(grep {ref($_) ne '' || /\s/ || $_ !~ /\S/} @$value)))))
+	  {
+	    error("Flags must be a string with no whitespace.");
+	    $valid = 0;
+	  }
+        else
+          {
+            my $me    = 'isValidBuiltinParam';
+            my $type  = $def_option_hash->{$opt}->{PARAMS}->{TYPE};
+            my $gokey = makeGetOptKey($value,$type,1,$me);
+
+            if(!isGetOptStrValid($gokey,'general',$opt))
+              {$valid = 0}
+          }
+      }
+    elsif($param eq 'VARREF' || $param eq 'TYPE')
+      {
+	error("Editing of VARREF, ACCEPTS, and TYPE are not supported.");
+	$valid = 0;
+      }
+    elsif($param eq 'REQUIRED' || $param eq 'HIDDEN' || $param eq 'ADVANCED')
+      {$retval = ($value ? $value : 0)}
+    elsif($param eq 'DISPDEF' || $param eq 'HEADING')
+      {
+	if(defined($value) && ref($value) ne '')
+	  {
+	    error("Invalid parameter: [$param] for option [$opt].  Must be a ",
+		  "string.");
+	    $valid = 0;
+	  }
+	$retval = $value;
+      }
+    elsif($param eq 'SHORT_DESC' || $param eq 'LONG_DESC')
+      {
+	$retval = (defined($value) ? $value : '');
+	if(ref($value) ne '')
+	  {
+	    error("Descriptions must be a string value.");
+	    $valid = 0;
+	  }
+      }
+    elsif($param eq 'DEFAULT')
+      {
+	#These must be defined but can be set to 0
+	if($def_option_hash->{$opt}->{PARAMS}->{TYPE} eq 'negbool')
+	  {
+	    $valid = isBool($value);
+	    $retval = (defined($value) ? ($value ? 1 : 0) : undef);
+	  }
+	elsif($def_option_hash->{$opt}->{PARAMS}->{TYPE} eq 'bool')
+	  {
+	    $valid = isBool($value);
+	    $retval = ($value ? 1 : 0);
+	  }
+	elsif($def_option_hash->{$opt}->{PARAMS}->{TYPE} eq 'count')
+	  {
+	    if(defined($value))
+	      {
+		$valid = isCount($value);
+		$retval = $value;
+	      }
+	  }
+	elsif($def_option_hash->{$opt}->{PARAMS}->{TYPE} eq 'integer')
+	  {$valid = isInt($value)}
+	elsif($def_option_hash->{$opt}->{PARAMS}->{TYPE} eq 'float')
+	  {$valid = isFloat($value)}
+	elsif($def_option_hash->{$opt}->{PARAMS}->{TYPE} eq 'enum')
+	  {
+	    if(defined($value))
+	      {
+		#This assumes that ACCEPTS is not editable (because if it was,
+		#there's no guarantee of the hash key order and we might be
+		#checking the default against a stale accepts array
+		$valid =
+		  exists($def_option_hash->{$opt}->{PARAMS}->{ACCEPTS}) &&
+		    defined($def_option_hash->{$opt}->{PARAMS}->{ACCEPTS}) &&
+		      scalar(grep {$value eq $_} @{$def_option_hash->{$opt}
+						     ->{PARAMS}->{ACCEPTS}});
+		if(!$valid &&
+		   (!exists($def_option_hash->{$opt}->{PARAMS}->{ACCEPTS}) ||
+		    !defined($def_option_hash->{$opt}->{PARAMS}->{ACCEPTS}) ||
+		    scalar(@{$def_option_hash->{$opt}->{PARAMS}->{ACCEPTS}}) ==
+		    0))
+		  {error("Invalid ACCEPTS value.  Cannot validate DEFAULT.",
+			 {DETAIL => 'ACCEPTS must be an array of strings.'})}
+		elsif(!$valid)
+		  {error("Invalid value: [",
+			 (defined($value) ? $value : 'undef'),
+			 "] for parameter: [$param] of builtin option: [$opt].",
+			 {DETAIL =>
+			  ('Must be one of [' .
+			   join(',', @{$def_option_hash->{$opt}->{PARAMS}
+					 ->{ACCEPTS}}) . '].')})}
+	      }
+	  }
+	else
+	  {
+	    error("Parameter type [$def_option_hash->{$opt}->{PARAMS}->{TYPE}]",
+		  " is not supported yet for builtin options.");
+	    $valid = 0;
+	  }
+
+	#Header and pipeline can be undefined
+	if($opt eq 'header' || $opt eq 'pipeline')
+	  {$valid = isBool($value)}
+      }
+    else
+      {
+	error("Invalid parameter for option [$opt]: [$param].");
+	$valid = 0;
+      }
+
+    return($retval,$valid);
+  }
+
+sub editVerboseOption
+  {return(editBuiltinOption('verbose',0,@_))}
+
+sub editQuietOption
+  {return(editBuiltinOption('quiet',0,@_))}
+
+#Do not call this method internally.  Instead, check $quiet
+#Globals used: $command_line_stage
+sub isQuiet
+  {
+    unless($command_line_stage)
+      {
+	warning("isQuiet called before command line has been processed.");
+	processCommandLine();
+      }
+    return(getVarref('quiet',1));
+  }
+
+sub editOverwriteOption
+  {return(editBuiltinOption('overwrite',0,@_))}
+
+#Do not call this method internally.  Instead, check $overwrite
+#Globals used: $overwrite, $command_line_stage
+sub isOverwrite
+  {
+    unless($command_line_stage)
+      {
+	warning("isOverwrite called before command line has been processed.");
+	processCommandLine();
+      }
+    return(getVarref('overwrite',1));
+  }
+
+sub editSkipOption
+  {return(editBuiltinOption('skip',0,@_))}
+
+#Do not call this method internally.  Instead, check $skip_existing
+#Globals used: $command_line_stage
+sub isSkip
+  {
+    unless($command_line_stage)
+      {
+	warning("isSkip called before command line has been processed.");
+	processCommandLine();
+      }
+    return(getVarref('skip',1));
+  }
+
+sub editHeaderOption
+  {return(editBuiltinOption('header',0,@_))}
+
+sub editVersionOption
+  {return(editBuiltinOption('version',0,@_))}
+
+#Do not call this method internally.  Instead, check $version.  Can only be
+#effectively called in an END block of main.
+#Globals used: $command_line_stage
+sub wasVersionRequested
+  {
+    unless($command_line_stage)
+      {warning("wasVersionRequested called before command line has been ",
+	       "processed.")}
+    return(getVarref('version',1));
+  }
+
+sub editExtendedOption
+  {return(editBuiltinOption('extended',0,@_))}
+
+#Do not call this method internally.  Instead, check $extended
+#Globals used: $command_line_stage
+sub isExtended
+  {
+    unless($command_line_stage)
+      {
+	warning("isExtended called before command line has been processed.");
+	processCommandLine();
+      }
+    return(getVarref('extended',1,1));
+  }
+
+sub editForceOption
+  {return(editBuiltinOption('force',0,@_))}
+
+sub editDebugOption
+  {return(editBuiltinOption('debug',0,@_))}
+
+sub editSaveArgsOption
+  {return(editBuiltinOption('save_args',0,@_))}
+
+#Do not call this method internally.  Instead, check $use_as_default.  Can only
+#be effectively called in an END block of main.
+#Globals used: $command_line_stage
+sub isSaveArgsMode
+  {
+    unless($command_line_stage)
+      {
+	warning("isSaveArgsMode called before command line has been ",
+		"processed.");
+	processCommandLine();
+      }
+    return(getVarref('save_args',1));
+  }
+
+sub editPipelineOption
+  {return(editBuiltinOption('pipeline',0,@_))}
+
+#This is different from inPipeline, which dynamically determines pipeline mode.
+#This sub is just a getter
+#Do not call this method internally.  Instead, check $pipeline
+#Globals used: $pipeline, $command_line_stage
+sub getPipelineMode
+  {
+    unless($command_line_stage)
+      {
+	warning("getPipelineMode called before command line has been ",
+		"processed.");
+	processCommandLine();
+      }
+    return(getVarref('pipeline',1,1));
+  }
+
+sub editErrorLimitOption
+  {return(editBuiltinOption('error_lim',0,@_))}
+
+#Do not call this method internally.  Instead, check $error_limit
+#Globals used: $command_line_stage
+sub getErrorLimit
+  {
+    unless($command_line_stage)
+      {warning("getErrorLimit called before command line has been processed.")}
+    return(getVarref('error_lim',1,1));
+  }
+
+sub editAppendOption
+  {return(editBuiltinOption('append',0,@_))}
+
+#Do not call this method internally.  Instead, check $append
+#Globals used: $command_line_stage
+sub isUserAppendMode
+  {
+    unless($command_line_stage)
+      {
+	warning("isUserAppendMode called before command line has been ",
+		"processed.");
+	processCommandLine();
+      }
+    return(getVarref('append',1));
+  }
+
+sub editRunOption
+  {return(editBuiltinOption('run',0,@_))}
+
+#Do not call this method internally.  Instead, check $run
+#Globals used: $command_line_stage
+sub isRunMode
+  {
+    unless($command_line_stage)
+      {
+	warning("isRunMode called before command line has been processed.");
+	processCommandLine();
+      }
+    return(getVarref('run',1));
+  }
+
+sub editDryRunOption
+  {return(editBuiltinOption('dry_run',0,@_))}
+
+sub editUsageOption
+  {return(editBuiltinOption('usage',0,@_))}
+
+sub editCollisionOption
+  {return(editBuiltinOption('collision',0,@_))}
+
+#Do not call this method internally.  Instead, check $usage
+#Globals used: $command_line_stage
+sub isUsageMode
+  {
+    unless($command_line_stage)
+      {
+	warning("isUsageMode called before command line has been processed.");
+	processCommandLine();
+      }
+    return(getVarref('usage',1));
+  }
+
+#This only dereferences scalars
+sub deRefVarref
+  {
+    if(ref($_[0]) eq 'SCALAR')
+      {return(${$_[0]})}
+    return($_[0]);
+  }
+
+sub editHelpOption
+  {return(editBuiltinOption('help',0,@_))}
+
+#Do not call this method internally.  Instead, check $help
+#Globals used: $command_line_stage
+sub isHelpMode
+  {
+    unless($command_line_stage)
+      {
+	warning("isHelpMode called before command line has been processed.");
+	processCommandLine();
+      }
+    return(getVarref('help',1));
+  }
+
+#Globals used: $def_option_hash, $command_line_stage
+sub addBuiltinOption
+  {
+    my $opt = shift(@_);
+    my($retval,$origretval);
+
+    ##TODO: Do this in a better way
+    my $heading_backup = $def_option_hash->{$opt}->{PARAMS}->{HEADING};
+
+    if(!defined($opt))
+      {error("First parameter is required.")}
+    elsif(!exists($def_option_hash->{$opt}))
+      {error("Invalid basic option key: [$opt].")}
+    elsif($def_option_hash->{$opt}->{ADDED})
+      {error("The $opt option has already been added to the interface.")}
+    elsif($command_line_stage >= ARGSREAD)
+      {error("The command line has already been processed.")}
+    #Else if editing the option is successful
+    elsif(editBuiltinOption($opt,1,@_))
+      {
+	$retval = addOption(%{$def_option_hash->{$opt}->{PARAMS}});
+        $origretval = $retval;
+        if(!defined($retval))
+	  {
+	    $def_option_hash->{$opt}->{ADDED} = 0;
+	    error("Unable to add $opt option.");
+
+            my $params = $def_option_hash->{$opt}->{PARAMS};
+
+            #Attempt a fallback so we can handle dying gracefully
+            $retval =
+              addOption(FLAG       => "$params->{USAGE_NAME}__ERROR",
+                        TYPE       => $params->{TYPE},
+                        VARREF     => $params->{VARREF},
+                        USAGE_NAME => $opt);
+	  }
+
+	if(defined($retval))
+	  {
+            $def_option_hash->{$opt}->{ADDED} = 1;
+            $def_option_hash->{$opt}->{PARAMS}->{HEADINGBACKUP} =
+              $heading_backup;
+          }
+      }
+
+    if(!defined($origretval))
+      {$builtin_add_failures++}
+
+    return($retval);
+  }
+
+sub addVerboseOption
+  {return(addBuiltinOption('verbose',@_))}
+
+sub addQuietOption
+  {return(addBuiltinOption('quiet',@_))}
+
+sub addOverwriteOption
+  {return(addBuiltinOption('overwrite',@_))}
+
+sub addSkipOption
+  {return(addBuiltinOption('skip',@_))}
+
+sub addHeaderOption
+  {return(addBuiltinOption('header',@_))}
+
+sub addVersionOption
+  {return(addBuiltinOption('version',@_))}
+
+sub addExtendedOption
+  {return(addBuiltinOption('extended',@_))}
+
+sub addForceOption
+  {return(addBuiltinOption('force',@_))}
+
+sub addDebugOption
+  {return(addBuiltinOption('debug',@_))}
+
+sub addSaveArgsOption
+  {return(addBuiltinOption('save_args',@_))}
+
+sub addPipelineOption
+  {return(addBuiltinOption('pipeline',@_))}
+
+sub addErrorLimitOption
+  {return(addBuiltinOption('error_lim',@_))}
+
+sub addAppendOption
+  {return(addBuiltinOption('append',@_))}
+
+sub addCollisionOption
+  {return(addBuiltinOption('collision',@_))}
+
+#Do not call this method internally.  Instead, check $user_collide_mode
+#Globals used: $user_collide_mode, $command_line_stage
+sub getUserCollisionMode
+  {
+    unless($command_line_stage)
+      {warning("getUserCollisionMode called before command line has been ",
+	       "processed.")}
+    return($user_collide_mode);
+  }
+
+sub addRunOption
+  {return(addBuiltinOption('run',@_))}
+
+sub addDryRunOption
+  {return(addBuiltinOption('dry_run',@_))}
+
+sub addUsageOption
+  {return(addBuiltinOption('usage',@_))}
+
+sub addHelpOption
+  {return(addBuiltinOption('help',@_))}
+
+#Checks the validity of values (ignores undefs because they're handled by the
+#requirement checking code).  Assumes default values have been copied to
+#VARREF_CLI
+#Globals used: $usage_array, $genopt_types
+sub validateGeneralOptions
+  {
     my $status = 1;
 
     #For every option that's been supplied a defined reference of a known type
-    foreach my $usghash (grep {exists($GetOptHash->{$_->{GETOPTKEY}}) &&
-				 defined($GetOptHash->{$_->{GETOPTKEY}}) &&
-				   defined($_->{OPTTYPE}) &&
-				     exists($checktypehash->{$_->{OPTTYPE}})}
+    foreach my $usghash (grep {defined($_->{OPTTYPE}) &&
+				 defined(getVarref($_)) &&
+				   exists($genopt_types->{$_->{OPTTYPE}})}
 			 @$usage_array)
       {
-	my $varref  = $GetOptHash->{$usghash->{GETOPTKEY}};
-	my $aryref  = $usghash->{GETOPTREF};
+	my $varref  = getVarref($usghash);
 	my $opttype = $usghash->{OPTTYPE};
-	my $flag    = getDefaultFlag($usghash->{OPTFLAG});
+	my $flag    = getBestFlag($usghash);
 	my $accepts = $usghash->{ACCEPTS};
 
-	#The following types do not need to be checked because either Getopt::
-	#Long checks them or we don't have a reference to the variable (e.g. we
-	#have a reference to a subroutine) so we don't have a value to
-	#interrogate:
-	#bool,negbool, integer,float,string
+	#The following types do not need to be checked or they cannot be checked
+	#because either Getopt::Long handles them: bool,negbool,string.
 
-	if($opttype eq 'enum' && ref($varref) ne 'CODE')
+	#We cannot check defaults that are set when we're supplied a CODE
+	#reference because we don't have access to the variable in main that
+	#keeps the value, but we can check the value supplied on the command
+	#line if we were given a TYPE for: integer, float, count.
+
+	#We should always check enum types.
+
+	#Validate integers and floats which gave an anonymous subroutine to
+	#getopt, but they supplied a type.  In these cases, the VARREF should be
+	#a reference to a tracking variable that was set in a wrapping sub by
+	#createOptRefs
+	if($opttype eq 'integer')
+	  {
+	    if(ref($varref) ne 'SCALAR')
+	      {
+		error("Invalid integer reference [",ref($varref),
+		      "] supplied to [$flag].",
+		      {DETAIL => 'Should be a scalar reference.'});
+		$status = 0;
+	      }
+	    elsif(defined($$varref) && !isInt($$varref))
+	      {$status = 0}
+	  }
+	elsif($opttype eq 'count')
+	  {
+	    if(ref($varref) ne 'SCALAR')
+	      {
+		error("Invalid count reference [",ref($varref),
+		      "] supplied to [$flag].",
+		      {DETAIL => 'Should be a scalar reference.'});
+		$status = 0;
+	      }
+	    elsif(defined($$varref) && !isInt($$varref))
+	      {$status = 0}
+	  }
+	elsif($opttype eq 'float')
+	  {
+	    if(ref($varref) ne 'SCALAR')
+	      {
+		error("Invalid float reference [",ref($varref),
+		      "] supplied to [$flag].",
+		      {DETAIL => 'Should be a scalar reference.'});
+		$status = 0;
+	      }
+	    elsif(defined($$varref) && !isFloat($$varref))
+	      {$status = 0}
+	  }
+	elsif($opttype eq 'enum')
 	  {
 	    if(ref($varref) ne 'SCALAR')
 	      {
@@ -3602,16 +4990,16 @@ sub validateNonFileOptions
 	    elsif(defined($$varref) && !validateEnum($$varref,$accepts,$flag))
 	      {$status = 0}
 	  }
-	elsif($opttype =~ /_array$/)
+	elsif(exists($array_genopt_types->{$opttype}))
 	  {
-	    if(ref($aryref) ne 'ARRAY' ||
-	       scalar(grep {ref($_) ne ''} @$aryref))
+	    if(ref($varref) ne 'ARRAY' ||
+	       scalar(grep {ref($_) ne ''} @$varref))
 	      {
 		error("Invalid array [",
-		      (ref($aryref) eq 'ARRAY' ? 'ARRAY REF of ' .
+		      (ref($varref) eq 'ARRAY' ? 'ARRAY REF of ' .
 		       join(',',map {ref($_) eq '' ?
-				       'SCALAR' : ref($_) . ' REF'} @$aryref) :
-		       ref($aryref)),"] supplied to [$flag].",
+				       'SCALAR' : ref($_) . ' REF'} @$varref) :
+		       ref($varref)),"] supplied to [$flag].",
 		      {DETAIL => ('Should be a reference to an ARRAY of ' .
 				  'SCALARs.')});
 		$status = 0;
@@ -3620,47 +5008,60 @@ sub validateNonFileOptions
 	      {
 		if($opttype eq 'float_array')
 		  {
-		    my $bads = [grep {!isFloat($_)} @$aryref];
+		    my $bads = [grep {!isFloat($_)} @$varref];
 		    if(scalar(@$bads))
 		      {
 			error("Invalid float value(s) [",join(',',@$bads),
-			      "] supplied to [$flag].");
+			      "] supplied to [$flag]",
+			      ($usghash->{SUPPLIED} ? " (as parsed from this " .
+			       "value supplied on the command line: [" .
+			       join(' ',@{$usghash->{SUPPLIED_AS}}) . "])" :
+			       ' (as set in the defaults)'),".");
 			$status = 0;
 		      }
 		  }
 		elsif($opttype eq 'integer_array')
 		  {
-		    my $bads = [grep {!isInt($_)} @$aryref];
+		    my $bads = [grep {!isInt($_)} @$varref];
 		    if(scalar(@$bads))
 		      {
 			error("Invalid integer value(s) [",join(',',@$bads),
-			      "] supplied to [$flag].");
+			      "] supplied to [$flag]",
+			      ($usghash->{SUPPLIED} ? " (as parsed from this " .
+			       "value supplied on the command line: [" .
+			       join(' ',@{$usghash->{SUPPLIED_AS}}) . "])" :
+			       ' (as set in the defaults)'),".");
 			$status = 0;
 		      }
 		  }
-		elsif($opttype eq 'string_array')
-		  {
-		    #Nothing to check.  Anything goes.
-		  }
 		elsif($opttype eq 'enum_array')
 		  {
-		    if(scalar(grep {!validateEnum($_,$accepts,$flag)}
-			      @$aryref))
-		      {$status = 0}
+		    my $bads = [grep {!validateEnum($_,$accepts,$flag)}
+				@$varref];
+		    if(scalar(@$bads))
+		      {
+			error("Invalid enum value(s) [",join(',',@$bads),
+			      "] supplied to [$flag]",
+			      ($usghash->{SUPPLIED} ? " (as parsed from this " .
+			       "value supplied on the command line: [" .
+			       join(' ',@{$usghash->{SUPPLIED_AS}}) . "])" :
+			       ' (as set in the defaults)'),".");
+			$status = 0;
+		      }
 		  }
 	      }
 	  }
-	elsif($opttype =~ /_array2d$/)
+	elsif(exists($array2d_genopt_types->{$opttype}))
 	  {
-	    if(ref($aryref) ne 'ARRAY' ||
+	    if(ref($varref) ne 'ARRAY' ||
 	       scalar(grep {my $ar=$_;
 			    (defined($ar) && ref($ar) ne 'ARRAY') ||
 			      (defined($ar) &&
 			       scalar(grep {defined($_) &&
-					      ref($_) ne ''} @$ar))} @$aryref))
+					      ref($_) ne ''} @$ar))} @$varref))
 	      {
 		error("Invalid 2D array [",
-		      (ref($aryref) eq 'ARRAY' ?
+		      (ref($varref) eq 'ARRAY' ?
 		       'ARRAY REF of ' .
 		       join(';',
 			    map {my $ar=$_;
@@ -3672,9 +5073,9 @@ sub validateNonFileOptions
 					  @$ar) :
 					    (ref($ar) eq '' ?
 					     'SCALAR' : ref($ar) . ' REF')}
-			    @$aryref) :
-		       (ref($aryref) eq '' ?
-			'SCALAR' : ref($aryref) . ' REF')),
+			    @$varref) :
+		       (ref($varref) eq '' ?
+			'SCALAR' : ref($varref) . ' REF')),
 		      "] supplied to [$flag].",
 		      {DETAIL => ('Should be an ARRAY REF of ARRAY REFs of ' .
 				  'SCALARs.')});
@@ -3688,15 +5089,19 @@ sub validateNonFileOptions
 			      map {my $ar=$_;grep {defined($_)} @$ar}
 			      grep {my $ar=$_;defined($ar) &&
 				      scalar(grep {defined($_)} @$ar)}
-			      @$aryref))
+			      @$varref))
 		      {
 			my $bads = [grep {!isInt($_)}
 				    map {my $ar=$_;grep {defined($_)} @$ar}
 				    grep {my $ar=$_;defined($ar) &&
 					    scalar(grep {defined($_)} @$ar)}
-				    @$aryref];
+				    @$varref];
 			error("Invalid integer value(s) [",join(',',@$bads),
-			      "] supplied to [$flag].");
+			      "] supplied to [$flag]",
+			      ($usghash->{SUPPLIED} ? " (as parsed from this " .
+			       "value supplied on the command line: [" .
+			       join(' ',@{$usghash->{SUPPLIED_AS}}) . "])" :
+			       ' (as set in the defaults)'),".");
 			$status = 0;
 		      }
 		  }
@@ -3706,21 +5111,21 @@ sub validateNonFileOptions
 			      map {my $ar=$_;grep {defined($_)} @$ar}
 			      grep {my $ar=$_;defined($ar) &&
 				      scalar(grep {defined($_)} @$ar)}
-			      @$aryref))
+			      @$varref))
 		      {
 			my $bads = [grep {!isInt($_)}
 				    map {my $ar=$_;grep {defined($_)} @$ar}
 				    grep {my $ar=$_;defined($ar) &&
 					    scalar(grep {defined($_)} @$ar)}
-				    @$aryref];
+				    @$varref];
 			error("Invalid integer value(s) [",join(',',@$bads),
-			      "] supplied to [$flag].");
+			      "] supplied to [$flag]",
+			      ($usghash->{SUPPLIED} ? " (as parsed from this " .
+			       "value supplied on the command line: [" .
+			       join(' ',@{$usghash->{SUPPLIED_AS}}) . "])" :
+			       ' (as set in the defaults)'),".");
 			$status = 0;
 		      }
-		  }
-		elsif($opttype eq 'string_array2d')
-		  {
-		    #Nothing to check.  Anything goes.
 		  }
 		elsif($opttype eq 'enum_array2d')
 		  {
@@ -3728,15 +5133,19 @@ sub validateNonFileOptions
 			      map {my $ar=$_;grep {defined($_)} @$ar}
 			      grep {my $ar=$_;defined($ar) &&
 				      scalar(grep {defined($_)} @$ar)}
-			      @$aryref))
+			      @$varref))
 		      {
-			my $bads = [grep {!isInt($_)}
+			my $bads = [grep {!validateEnum($_,$accepts,$flag)}
 				    map {my $ar=$_;grep {defined($_)} @$ar}
 				    grep {my $ar=$_;defined($ar) &&
 					    scalar(grep {defined($_)} @$ar)}
-				    @$aryref];
-			error("Invalid integer value(s) [",join(',',@$bads),
-			      "] supplied to [$flag].");
+			      @$varref];
+			error("Invalid enum value(s) [",join(',',@$bads),
+			      "] supplied to [$flag]",
+			      ($usghash->{SUPPLIED} ? " (as parsed from this " .
+			       "value supplied on the command line: [" .
+			       join(' ',@{$usghash->{SUPPLIED_AS}}) . "])" :
+			       ' (as set in the defaults)'),".");
 			$status = 0;
 		      }
 		  }
@@ -3747,6 +5156,182 @@ sub validateNonFileOptions
     verbose({LEVEL => 3},"All supplied values validated.") if($status);
 
     return($status);
+  }
+
+#The value supplied must be as it occurs on the command line for a single flag
+#undefs = ok, i.e. returns true
+sub isValueValid
+  {
+    my $value    = $_[0]; #undef, scalar, or array ref
+    my $usg_hash = $_[1];
+    my $flag     = getBestFlag($usg_hash);
+    my @er       = ();
+    my $is       = 1;
+
+    if($flag !~ /^-/)
+      {$flag = (length($flag) > 1 ? '--' : '-') . $flag}
+
+    if($usg_hash->{OPTTYPE} eq 'string'       ||
+       $usg_hash->{OPTTYPE} eq 'bool'         ||
+       $usg_hash->{OPTTYPE} eq 'negbool'      ||
+       $usg_hash->{OPTTYPE} eq 'string_array' ||
+       $usg_hash->{OPTTYPE} eq 'string_array2d')
+      {
+	$is = !defined($value) || ref($value) eq '';
+	if(!$is)
+	  {@er = ("Invalid reference [",ref($value),"] supplied to [$flag].",
+                  {DETAIL => "Must be a scalar value (not a reference)."});}
+      }
+    elsif($usg_hash->{OPTTYPE} eq 'integer' || $usg_hash->{OPTTYPE} eq 'count')
+      {
+	$is = !defined($value) || isInt($value);
+	if(!$is)
+	  {@er = ("Invalid value [$value] supplied to [$flag].",
+                  {DETAIL => "Must be an integer."});}
+      }
+    elsif($usg_hash->{OPTTYPE} eq 'float')
+      {
+	$is = !defined($value) || isFloat($value);
+	if(!$is)
+	  {@er = ("Invalid value [",ref($value),"] supplied to [$flag].",
+                  {DETAIL => "Must be an real number, e.g. -1.0."})}
+      }
+    elsif($usg_hash->{OPTTYPE} eq 'enum')
+      {
+        $is = !defined($value) || isEnum($value,$usg_hash->{ACCEPTS});
+        if(!$is)
+          {@er = ('Invalid ',
+                  ($command_line_stage >= DEFAULTED ? '' : 'user default '),
+                  "value [$value] supplied to [$flag].  Must be one of: [",
+                  (defined($usg_hash->{ACCEPTS}) ?
+                   join(',',@{$usg_hash->{ACCEPTS}}) : ''),"].")}
+      }
+    elsif($usg_hash->{OPTTYPE} =~ /array/)
+      {
+	my @values = ();
+	if(defined($usg_hash->{DELIMITER}))
+	  {push(@values,split(/$usg_hash->{DELIMITER}/,$value))}
+	else
+	  {push(@values,$value)}
+
+        $is           = 1;
+	my $unhandled = {};
+	my $bad_vals  = [];
+	my $mustbe    = ($usg_hash->{OPTTYPE} =~ /integer/ ? 'an integer' :
+			 ($usg_hash->{OPTTYPE} =~ /float/ ? 'a real number' :
+			  ($usg_hash->{OPTTYPE} =~ /enum/ ? 'one of: [' .
+                           (defined($usg_hash->{ACCEPTS}) ?
+                            join(',',@{$usg_hash->{ACCEPTS}}) : '') . "]" :
+                           '')));
+	foreach my $item_value (@values)
+	  {
+	    if($usg_hash->{OPTTYPE} eq 'integer_array' ||
+	       $usg_hash->{OPTTYPE} eq 'integer_array2d')
+	      {if(defined($item_value) && !isInt($item_value))
+		 {push(@$bad_vals,$item_value)}}
+	    elsif($usg_hash->{OPTTYPE} eq 'float_array' ||
+		  $usg_hash->{OPTTYPE} eq 'float_array2d')
+	      {if(defined($item_value) && !isFloat($item_value))
+		 {push(@$bad_vals,$item_value)}}
+	    elsif($usg_hash->{OPTTYPE} eq 'enum_array' ||
+		  $usg_hash->{OPTTYPE} eq 'enum_array2d')
+	      {if(defined($item_value) && !isEnum($item_value,
+                                                  $usg_hash->{ACCEPTS}))
+		 {push(@$bad_vals,$item_value)}}
+	    else
+	      {$unhandled->{$usg_hash->{OPTTYPE}} = 1}
+	  }
+	if(scalar(keys(%$unhandled)))
+	  {
+	    error("Unhandled option type(s): [",join(',',keys(%$unhandled)),
+		  "].");
+	    $is = 0;
+	  }
+	if(scalar(@$bad_vals) || (scalar(@values) == 0 && $value ne ''))
+	  {
+            #Make the error succinct if there's one value and its bad
+	    if(scalar(@$bad_vals) == scalar(@values) && scalar(@$bad_vals) &&
+               $bad_vals->[0] eq $value)
+	      {@er = ('Invalid ',
+                      ($command_line_stage >= DEFAULTED ? '' : 'user default '),
+                      "value [$value] supplied to [$flag].",
+                      {DETAIL => "Must be $mustbe."})}
+	    else
+	      {@er =
+                 ('Invalid ',
+                  ($command_line_stage >= DEFAULTED ? '' : 'user default '),
+                  'value',(scalar(@$bad_vals) > 1 ? 's' : '')," [",
+                  join(',',map {$_ eq '' ? "''" : $_} @$bad_vals),
+                  "]" . (defined($usg_hash->{DELIMITER}) ?
+                         " parsed from string [$value]" : '') .
+                  " supplied to [$flag].",
+                  {DETAIL => "Must be $mustbe.  " .
+                   (defined($usg_hash->{DELIMITER}) ?
+                    (defined($usg_hash->{DELIMITER}) ?
+                     (length($usg_hash->{DELIMITER}) > 1 ?
+                      "  Delimiter-pattern used: ($usg_hash->{DELIMITER})" :
+                      "  Delimiter used: ($usg_hash->{DELIMITER})r") :
+                     "  Non-number-delimiter pattern used") : '')})}
+
+	    $is = 0;
+	  }
+      }
+    elsif($usg_hash->{OPTTYPE} eq 'infile')
+      {
+	#We will not enforce that the files must exist here
+	$is = 1;
+      }
+    elsif($usg_hash->{OPTTYPE} eq 'outfile' || $usg_hash->{OPTTYPE} eq 'stub' ||
+	  $usg_hash->{OPTTYPE} eq 'logfile')
+      {
+	#Must be a valid file name and path must exist
+	my $path = $value;
+        if(defined($path))
+          {$path =~ s/[^\/]*$//}
+	$is = !defined($value) || $path eq '' || -e $path;
+        if(!$is)
+	  {@er = ("Invalid value [$value] supplied to [$flag].  Directory ",
+                  "must (but does not) pre-exist.")}
+      }
+    elsif($usg_hash->{OPTTYPE} eq 'suffix' || $usg_hash->{OPTTYPE} eq 'logsuff')
+      {
+	#Must be valid for a file name
+	#We will assume any values is an OK file name
+	$is = 1;
+      }
+    elsif($usg_hash->{OPTTYPE} eq 'outdir')
+      {
+	#We will not enforce the outdir value here
+	$is = 1;
+      }
+    else
+      {
+        $is = 0;
+        error("Unhandled option type: [",
+              (defined($usg_hash->{OPTTYPE}) ? $usg_hash->{OPTTYPE} : 'undef'),
+              "].");
+      }
+
+    handleBadValueError(\@er,$usg_hash);
+
+    return($is);
+  }
+
+sub handleBadValueError
+  {
+    my $er       = $_[0];
+    my $usg_hash = $_[1];
+
+    if(scalar(@$er))
+      {
+        if($command_line_stage >= DEFAULTED ||
+           !areBadOptValsReplaced([$usg_hash]))
+          {error(@$er)}
+##TODO: Add a hash parameter to warning() to tell it to only warn when debug is true.  I will also have to change the behavior of sig_warn in loadUserDefaults for type errors handled by Getopt::Long.  Since $DEBUG hasn't been parsed from the command line yet, we can't just check that here to decide whether to issue the warning or not.
+#        else
+#          {warning(@$er,'  Ignoring since the value was replaced on the ',
+#                   'command line.')}
+      }
   }
 
 #Returns true if value is undefined or (defined and is in the accepts array)
@@ -3767,7 +5352,7 @@ sub validateEnum
 	  }
 	elsif(scalar(grep {$_ eq $value} @$accepts) == 0)
 	  {
-	    error("Unrecognized value [$value] supplied to [$flag].  Must be ",
+	    error("Invalid value [$value] supplied to [$flag].  Must be ",
 		  "one of: [",join(',',@$accepts),"].");
 	    $status = 0;
 	  }
@@ -3777,7 +5362,34 @@ sub validateEnum
 	error("ACCEPTS array is required for TYPE enum for the ",
 	      "option defined by [$flag].",
 	      {DETAIL => ('Add a value for ACCEPTS to the call to ' .
-			  'addOption() for [$flag].')});
+			  "addOption() for [$flag].")});
+	$status = 0;
+      }
+
+    return($status);
+  }
+
+sub isEnum
+  {
+    my $value   = $_[0];
+    my $accepts = $_[1];
+    my $status  = 1;
+
+    if(defined($accepts))
+      {
+	if(ref($accepts) ne 'ARRAY' || scalar(@$accepts) == 0)
+	  {
+	    error("ACCEPTS must be an array reference.  [",
+                  (ref($accepts) eq '' ?
+                   'SCALAR' : ref($accepts) . ' reference'),"] supplied.");
+	    $status = 0;
+	  }
+	elsif(scalar(grep {$_ eq $value} @$accepts) == 0)
+	  {$status = 0}
+      }
+    else
+      {
+	error("ACCEPTS array reference is required.",{DETAIL => ('isEnum.')});
 	$status = 0;
       }
 
@@ -3810,9 +5422,9 @@ sub getGeneralOptType
 sub addArrayOption
   {
     my @in = getSubParams([qw(FLAG|GETOPTKEY VARREF|GETOPTVAL TYPE REQUIRED
-			      DEFAULT HIDDEN SMRY|SMRY_DESC|SHORT_DESC
-			      DETAIL|DETAIL_DESC|LONG_DESC DELIMITER ACCEPTS
-			      FLAGLESS INTERPOLATE ADVANCED)],
+			      DEFAULT HIDDEN SHORT_DESC|SMRY|SMRY_DESC
+			      LONG_DESC|DETAIL|DETAIL_DESC DELIMITER ACCEPTS
+			      FLAGLESS INTERPOLATE ADVANCED HEADING DISPDEF)],
 			  [qw(FLAG|GETOPTKEY VARREF|GETOPTVAL)],
 			  [@_]);
     my $get_opt_str = $in[0]; #e.g. 'o|suffix=s'
@@ -3833,6 +5445,8 @@ sub addArrayOption
     my $flagless    = $in[10];#Whether the option can be supplied sans flag
     my $interpolate = $in[11];#For backward compatibility
     my $advanced    = $in[12];#Advanced options print when extended >= 2
+    my $heading     = $in[13];#Section heading to print in extended usage
+    my $display_def = $in[14];#The default to display in the usage
 
     #Trim leading & trailing hard returns and white space characters (from
     #using '<<')
@@ -3851,6 +5465,7 @@ sub addArrayOption
 	      (ref($accepts) eq 'ARRAY' ? 'n ARRAY of (' .
 	       join(',',map {ref(\$_)} @$accepts) . ')' : ' ' . ref($accepts)),
 	      "] instead.");
+        $num_setup_errors++;
 	return(undef);
       }
 
@@ -3860,7 +5475,8 @@ sub addArrayOption
       {
 	error("Invalid TYPE [$type].  Only string, integer, float, or enum ",
 	      "are allowed.");
-	quit(-96);
+        $num_setup_errors++;
+        return(undef);
       }
     elsif(!defined($type))
       {
@@ -3876,18 +5492,27 @@ sub addArrayOption
 
     #Allow the flag to be an array of scalars and turn it into a get opt str
     my $save_getoptstr = $get_opt_str;
-    $get_opt_str = makeGetOptKey($get_opt_str,$type,1,'addArrayOption');
+    $get_opt_str = makeGetOptKey($get_opt_str,$type,0,'addArrayOption');
 
     if(defined($get_opt_str))
       {$get_opt_str = fixStringOpt($get_opt_str,1)}
+    else
+      {
+	$num_setup_errors++;
+	return(undef);
+      }
 
-    if(!isGetOptStrValid($get_opt_str,'1darray'))
-      {quit(-77)}
+    if(!isGetOptStrValid($get_opt_str,'1darray',undef))
+      {
+        $num_setup_errors++;
+        return(undef);
+      }
 
     #Validate the type & accepts combo
     if($type eq 'enum' && (!defined($accepts) || scalar(@$accepts) == 0))
       {
 	error("ACCEPTS is required if TYPE is enum.");
+        $num_setup_errors++;
 	return(undef);
       }
     elsif($type ne 'enum' && defined($accepts))
@@ -3921,12 +5546,13 @@ sub addArrayOption
     #Make type a string so multiple vals can be parsed with a non-num delimiter
     $get_opt_str .= '=s';
 
-    if($command_line_processed)
+    if($command_line_stage >= ARGSREAD)
       {
 	error("You cannot add command line options (i.e. call ",
 	      "addArrayOption()) after the command line has already ",
 	      "been processed (i.e. processCommandLine()) without at ",
 	      "least re-initializing (i.e. calling _init()).");
+        $num_setup_errors++;
 	return(undef);
       }
 
@@ -3936,111 +5562,172 @@ sub addArrayOption
     my $flags = [getOptStrFlags($get_opt_str)];
     my $flag  = getDefaultFlag($flags);
 
-    if($hidden && !defined($default) && (defined($required) && $required))
+    if($hidden && !defined($default) && defined($required) && $required)
       {
-	warning("Cannot hide option [$flag] if",
-		(!defined($default) ? ' no default provided' : ''),
-		((!defined($default) && defined($required) && $required) ?
-		 ' and if' : ''),
-		(defined($required) && $required ? ' it is required' : ''),
-		".  Setting as not hidden.");
+	warning("Cannot hide option [$flag] if no default provided and if it ",
+		"is required.  Setting as not hidden.");
 	$hidden = 0;
+      }
+
+    #If no detailed usage was provided for this option
+    if(!defined($detail_desc) || $detail_desc eq '')
+      {
+	if(defined($smry_desc) && $smry_desc ne '')
+	  {$detail_desc = $smry_desc}
+	else
+	  {$detail_desc = 'No detailed usage provided for this array option.'}
       }
 
     #If no summary usage was provided for this option
     if(!defined($smry_desc) || $smry_desc eq '')
       {
-	#If it's a required option, add a default summary
 	if($required)
-	  {$smry_desc = 'No usage summary provided for this option.'}
+	  {$smry_desc = defined($detail_desc) ? $detail_desc :
+             'No usage summary provided for this option.'}
 	else
 	  {$smry_desc = ''}
       }
 
-    #If no detailed usage was provided for this option
-    if(!defined($detail_desc) || $detail_desc eq '')
-      {$detail_desc =
-	 join('',('No detailed usage provided for this array option.'))}
-
     my $disp_delim = getDisplayDelimiter($delimiter,$type,$accepts);
+    if(defined($disp_delim) && $disp_delim eq 'ERROR')
+      {return(undef)}
     if(defined($disp_delim) && length($disp_delim) > 1)
       {$detail_desc .= "\n\nValues are delimited using this perl regular " .
 	 "expression: [$disp_delim]."}
 
-    my $sub;
-    if(defined($get_opt_ref) && ref($get_opt_ref) eq 'ARRAY')
-      {
-	if(!defined($delimiter))
-	  {$sub = sub {push(@$get_opt_ref,$_[1])}}
-	else
-	  {$sub = sub {push(@$get_opt_ref,split(/$delimiter/,$_[1]))}}
-      }
-    else
+    my $name = createOptionNameFromFlags($flags);
+    my $sub  = getGetoptSub($name,0);
+
+    if(!defined($get_opt_ref) ||
+       (ref($get_opt_ref) ne 'ARRAY' && ref($get_opt_ref) ne 'CODE'))
       {
 	error("Invalid array variable.  The second parameter must be a ",
-	      "reference to an array, but got a reference to [",
-	      ref($get_opt_ref),"].");
-	return(undef);
+	      "reference to an array, but got ",
+	      (defined($get_opt_ref) ? "a reference to [" . ref($get_opt_ref) :
+	      '[undef'),"].");
+        $num_setup_errors++;
+        return(undef);
+      }
+    elsif(defined($get_opt_ref) && ref($get_opt_ref) eq 'ARRAY')
+      {
+	#If there's a default value in both the var ref and in the default param
+	if(scalar(@$get_opt_ref) && defined($default) &&
+	   !areArraysEqual($get_opt_ref,$default))
+	  {
+	    error("Multiple conflicting default values supplied.  Use either ",
+		  "the DEFAULT parameter or initialize the VARREF parameter ",
+		  "with an array, but do not supply both.",
+		  {DETAIL =>
+		   join('',('Only one must have a value or they must both be ',
+			    'the same.  If you are trying to supply a value ',
+			    'to display in the usage, use the DISPDEF ',
+			    'parameter instead of the DEFAULT parameter.'))});
+            $num_setup_errors++;
+            return(undef);
+	  }
+	elsif(scalar(@$get_opt_ref))
+	  {$default = [@$get_opt_ref]}
       }
 
-    #addOption would add the sub I send it, which can't be checked for required
-    #values having been supplied, so we'll do it here and prevent it in
-    #addOption
-    if($required)
-      {requireGeneralOption($get_opt_ref,$get_opt_str,$default)}
+    unless(isOptRefUnique($get_opt_ref,$flag))
+      {
+        $num_setup_errors++;
+        return(undef);
+      }
 
-    $general_flag_hash->{$get_opt_ref} = $flag;
+    my($real_def,$def_str);
+    #If the default has a value, set the real and display defaults
+    if(defined($default) && ref($default) eq 'ARRAY' &&
+       scalar(grep {ref($_) ne ''} @$default) == 0)
+      {
+	$def_str  = join(',',map {defined($_) ? $_ : 'undef'} @$default);
+	$real_def = [@$default];
+      }
+    elsif(defined($default) && ref($default) eq '')
+      {
+	$def_str  = $default;
+	$real_def = [$default];
+      }
+    elsif(defined($default))
+      {
+	error("Default value supplied to addArrayOption must be a scalar or a ",
+	      "reference to an array of scalars.");
+        $num_setup_errors++;
+        return(undef);
+      }
 
-    #Save any default values, but don't clear out the programmer's variable
-    #(yet - see loadUserDefaults)
-    $array_defaults_hash->{$get_opt_ref}->{DEFAULTS} = [@$get_opt_ref];
-    $array_defaults_hash->{$get_opt_ref}->{VALUES}   = $get_opt_ref;
-
-    my $def_str = $default;
-    if(ref($default) eq 'ARRAY' && scalar(grep {ref($_) ne ''} @$default) == 0)
-      {$def_str = join(',',map {defined($_) ? $_ : 'undef'} @$default)}
-    elsif(ref($def_str) ne '')
-      {warning("Default value supplied to addArrayOption should either be a ",
-	       "scalar or a reference to an array of scalars.")}
+    #If a display default was provided, overwrite the default based on the real
+    #default value (or the value referenced in varref)
+    if(defined($display_def))
+      {
+	#If it's a scalar
+	if(ref($display_def) eq '')
+	  {$def_str = $display_def}
+	else
+	  {error("Invalid display default.  Must be a non-empty string.  ",
+		 "Ignoring.")}
+      }
 
     if(defined($flagless) && $flagless)
       {
-	if(defined($flagless_multival_type) && $flagless_multival_type > -1)
+	if(defined($flagless_multival_optid) && $flagless_multival_optid > -1)
 	  {
 	    error("An additional multi-value option has been designated as ",
 		  "'flagless': [$get_opt_str]: [$flagless].  Only 1 is ",
 		  "allowed.",
 		  {DETAIL => "First flagless option was: [" .
-		   getDefaultFlag($usage_array->[$flagless_multival_type]
-				  ->{OPTFLAG}) . "]."});
+		   getDefaultFlag($usage_array->[$flagless_multival_optid]
+				  ->{OPTFLAGS}) . "]."});
+            $num_setup_errors++;
 	    return(undef);
 	  }
 
-	my $getoptsub;
-	if(defined($delimiter))
-	  {$getoptsub = sub {push(@$get_opt_ref,split(/$delimiter/,$_[0]))}}
-	else
-	  {$getoptsub = sub {push(@$get_opt_ref,$_[0])}}
-	#No need to do an else, because it would have caused a return above
-	$GetOptHash->{'<>'} = $getoptsub;
+	$GetOptHash->{'<>'} = getGetoptSub($name,1);
 
 	#This assumes that the call to addToUsage a few lines below is the
 	#immediate next call to addToUsage
-	$flagless_multival_type = getNextUsageIndex();
+	$flagless_multival_optid = getNextUsageIndex();
       }
 
-    addOption($get_opt_str,
-	      $sub,
-	      $type . '_array',
-	      $required,
-	      $def_str,
-	      $hidden,
-	      $smry_desc,
-	      $detail_desc,
-	      $accepts,
-	      $advanced,
-	      $get_opt_ref,
-	      $delimiter);
+    my $option_id = addOption($get_opt_str,
+			      $sub,
+			      $type . '_array',
+			      $required,
+			      $def_str,
+			      $hidden,
+			      $smry_desc,
+			      $detail_desc,
+			      $accepts,
+			      $advanced,
+			      $heading,
+			      $real_def,
+			      undef,         #name
+			      undef,         #order
+			      $get_opt_ref,
+			      $delimiter,
+			      $flagless);
+
+    #The internal sub was given to GOL in addOption, but we need to replace the
+    #programmer's VARREF so it doesn't call itself in a loop
+    $usage_array->[$option_id]->{VARREF_PRG} = $get_opt_ref;
+
+    return($option_id);
+  }
+
+#Checks to make sure the programmer hasn't accidentally supplied the same
+#variable to 2 different options
+#Globals used: $unique_refs_hash
+sub isOptRefUnique
+  {
+    my $get_opt_ref = $_[0];
+    my $new_flag    = $_[1];
+    my $uniq        = !exists($unique_refs_hash->{$get_opt_ref});
+    if($uniq)
+      {$unique_refs_hash->{$get_opt_ref} = $new_flag}
+    else
+      {error("Same reference passed for options: ",
+	     "[$unique_refs_hash->{$get_opt_ref}] and [$new_flag].")}
+    return($uniq);
   }
 
 #Returns a single character that will work as a delimiter because it matches
@@ -4066,7 +5753,8 @@ sub getDisplayDelimiter
 	  {
 	    error("Delimiter [$delim] matches one or more of the characters ",
 		  "in the enumeration values: [",join(' ',@$accepts),"].");
-	    quit(-103);
+            $num_setup_errors++;
+	    return('ERROR');
 	  }
 
 	if($delim =~ /^(.)\+$/)
@@ -4103,9 +5791,9 @@ sub getDisplayDelimiter
 sub add2DArrayOption
   {
     my @in = getSubParams([qw(FLAG|GETOPTKEY VARREF|GETOPTVAL TYPE REQUIRED
-			      DEFAULT HIDDEN SMRY|SMRY_DESC|SHORT_DESC
-			      DETAIL|DETAIL_DESC|LONG_DESC ACCEPTS FLAGLESS
-			      DELIMITER ADVANCED)],
+			      DEFAULT HIDDEN SHORT_DESC|SMRY|SMRY_DESC
+			      LONG_DESC|DETAIL|DETAIL_DESC ACCEPTS FLAGLESS
+			      DELIMITER ADVANCED HEADING DISPDEF)],
 			  [qw(FLAG|GETOPTKEY VARREF|GETOPTVAL)],
 			  [@_]);
     my $get_opt_str = $in[0]; #e.g. 'o|suffix=s'
@@ -4124,7 +5812,9 @@ sub add2DArrayOption
                               #to non-number chars if type is integer or
                               #float, non-accepts chars if enum, and space
                               #if string
-    my $advanced    = $in[12];#Advanced options print when extended >= 2
+    my $advanced    = $in[11];#Advanced options print when extended >= 2
+    my $heading     = $in[12];#Section heading to print in extended usage
+    my $display_def = $in[13];#The default to display in the usage
 
     #Trim leading & trailing hard returns and white space characters (from
     #using '<<')
@@ -4143,6 +5833,7 @@ sub add2DArrayOption
 	      (ref($accepts) eq 'ARRAY' ? 'n ARRAY of (' .
 	       join(',',map {ref(\$_)} @$accepts) . ')' : ' ' . ref($accepts)),
 	      "] instead.");
+        $num_setup_errors++;
 	return(undef);
       }
 
@@ -4152,7 +5843,8 @@ sub add2DArrayOption
       {
 	error("Invalid TYPE [$type].  Only string, integer, float, or enum ",
 	      "are allowed.");
-	quit(-97);
+        $num_setup_errors++;
+	return(undef);
       }
     elsif(!defined($type))
       {
@@ -4167,12 +5859,20 @@ sub add2DArrayOption
       }
 
     #Allow the flag to be an array of scalars and turn it into a get opt str
-    $get_opt_str = makeGetOptKey($get_opt_str,$type,1,'add2DArrayOption');
+    my $save_getoptstr = $get_opt_str;
+    $get_opt_str = makeGetOptKey($get_opt_str,$type,0,'add2DArrayOption');
+
+    if(!defined($get_opt_str))
+      {
+	$num_setup_errors++;
+	return(undef);
+      }
 
     #Validate the type & accepts combo
     if($type eq 'enum' && (!defined($accepts) || scalar(@$accepts) == 0))
       {
 	error("ACCEPTS is required if TYPE is enum.");
+        $num_setup_errors++;
 	return(undef);
       }
     elsif($type ne 'enum' && defined($accepts))
@@ -4209,12 +5909,13 @@ sub add2DArrayOption
 	$get_opt_str .= '=s';
       }
 
-    if($command_line_processed)
+    if($command_line_stage >= ARGSREAD)
       {
 	error("You cannot add command line options (i.e. call ",
 	      "add2DArrayOption()) after the command line has already ",
 	      "been processed (i.e. processCommandLine()) without at ",
 	      "least re-initializing (i.e. calling _init()).");
+        $num_setup_errors++;
 	return(undef);
       }
 
@@ -4223,25 +5924,30 @@ sub add2DArrayOption
 
     $get_opt_str = fixStringOpt($get_opt_str,1);
 
-    if(!isGetOptStrValid($get_opt_str,'2darray'))
+    if(!isGetOptStrValid($get_opt_str,'2darray',undef))
       {
-	error("Invalid GetOpt parameter flag definition: [$get_opt_str] for ",
-	      "2darray type.");
-	quit(-78);
+        $num_setup_errors++;
+	return(undef);
       }
 
     my $flags = [getOptStrFlags($get_opt_str)];
     my $flag  = getDefaultFlag($flags);
 
-    if($hidden && !defined($default) && (defined($required) && $required))
+    if($hidden && !defined($default) && defined($required) && $required)
       {
-	warning("Cannot hide option [$flag] if",
-		(!defined($default) ? ' no default provided' : ''),
-		((!defined($default) && defined($required) && $required) ?
-		 ' and if' : ''),
-		(defined($required) && $required ? ' it is required' : ''),
-		".  Setting as not hidden.");
+	warning("Cannot hide option [$flag] if no default provided and if it ",
+		"is required.  Setting as not hidden.");
 	$hidden = 0;
+      }
+
+    #If no detailed usage was provided for this option
+    if(!defined($detail_desc) || $detail_desc eq '')
+      {
+	if(defined($smry_desc) && $smry_desc ne '')
+	  {$detail_desc = $smry_desc}
+	else
+	  {$detail_desc = 'No detailed usage provided for this 2D array ' .
+	     'option.'}
       }
 
     #If no summary usage was provided for this option
@@ -4249,123 +5955,180 @@ sub add2DArrayOption
       {
 	#If it's a required option, add a default summary
 	if($required)
-	  {$smry_desc = 'No usage summary provided for this option.'}
+	  {$smry_desc = defined($detail_desc) ? $detail_desc :
+             'No usage summary provided for this option.'}
 	else
 	  {$smry_desc = ''}
       }
 
-    #If no detailed usage was provided for this option
-    if(!defined($detail_desc) || $detail_desc eq '')
-      {$detail_desc =
-	 join('',('No detailed usage provided for this 2D array option.'))}
-
     my $disp_delim = getDisplayDelimiter($delimiter,$type,$accepts);
+    if(defined($disp_delim) && $disp_delim eq 'ERROR')
+      {return(undef)}
     if(defined($disp_delim) && length($disp_delim) > 1)
       {$detail_desc .= "\n\nInner array elements are delimited from the " .
 	 "value given to a single flag using this perl regular expression: " .
 	   "[$disp_delim]."}
 
-    my $sub;
-    if(defined($get_opt_ref) &&
-       ref($get_opt_ref) eq 'SCALAR' && ref($$get_opt_ref) eq 'ARRAY')
-      {$sub = sub {push(@{$$get_opt_ref},[split(/$delimiter/,$_[1])])}}
-    elsif(defined($get_opt_ref) && ref($get_opt_ref) eq 'ARRAY')
-      {$sub = sub {push(@{$get_opt_ref},[split(/$delimiter/,$_[1])])}}
-    else
+    my($sub,$varref_copy);
+    my $name = createOptionNameFromFlags($flags);
+    $sub = getGetoptSub($name,0);
+    $varref_copy = [];
+
+    if(!defined($get_opt_ref) ||
+       (ref($get_opt_ref) ne 'ARRAY' && ref($get_opt_ref) ne 'CODE') ||
+       (ref($get_opt_ref) eq 'ARRAY' && scalar(@$get_opt_ref) != 0 &&
+	!isTwoDArray($get_opt_ref)))
       {
 	error("Invalid array variable.  The second option must be a ",
-	      "reference to an array which was instantiated before calling ",
+	      "reference to an array which was initialized before calling ",
 	      "this method.");
+        $num_setup_errors++;
 	return(undef);
       }
 
-    #addOption would add the sub I send it, which can't be checked for required
-    #values having been supplied, so we'll do it here and prevent it in
-    #addOption
-    if($required)
-      {requireGeneralOption($get_opt_ref,$get_opt_str,$default)}
+    unless(isOptRefUnique($get_opt_ref,$flag))
+      {
+        $num_setup_errors++;
+	return(undef);
+      }
 
-    $general_flag_hash->{$get_opt_ref} = $flag;
+    #If there's a default value in both the var ref and in the default param
+    if(ref($get_opt_ref) eq 'ARRAY' && defined($get_opt_ref) &&
+       scalar(@$get_opt_ref) && defined($default) &&
+       !areArraysEqual($get_opt_ref,$default))
+      {
+	error("Multiple conflicting default values supplied.  Use either the ",
+	      "DEFAULT parameter or initialize the VARREF parameter with an ",
+	      "array, but do not supply both.",
+	      {DETAIL =>
+	       join('',('Only one must have a value or they must both be ',
+			'the same.  If you are trying to supply a value ',
+			'to display in the usage, use the DISPDEF ',
+			'parameter instead of the DEFAULT parameter.'))});
+        $num_setup_errors++;
+	return(undef);
+      }
+    elsif(ref($get_opt_ref) eq 'ARRAY' && scalar(@$get_opt_ref) &&
+	  (!defined($default) || scalar(@$default) == 0))
+      {$default = copyArray($get_opt_ref)}
 
-    #Save any default values, but don't clear out the programmer's variable
-    #(yet - see loadUserDefaults)
-    $array_defaults_hash->{$get_opt_ref}->{DEFAULTS} = [@$get_opt_ref];
-    $array_defaults_hash->{$get_opt_ref}->{VALUES}   = $get_opt_ref;
-
-    my $def_str = $default;
-    if(ref($default) eq 'ARRAY' &&
+    my($real_def,$def_str);
+    #If the default has a value, set the real and display defaults
+    if(defined($default) && ref($default) eq 'ARRAY' &&
        scalar(grep {ref($_) ne 'ARRAY'} @$default) == 0 &&
        scalar(grep {my $a=$_;scalar(grep {ref($_) ne ''} @$a)} @$default) == 0)
-      {$def_str =
-	 '(' . join('),(',map {my $a=$_;'(' .
-				 join('),(',map {defined($_) ? $_ : 'undef'}
-				      @$a) . ')'} @$default) . ')'}
-    elsif(ref($def_str) ne '')
-      {warning("Default value supplied to addArrayOption should either be a ",
-	       "scalar or a reference to an array of references to arrays of ",
-	       "scalars.")}
+      {
+	$def_str = '(' .
+	  join('),(',map {my $a = $_;
+			  join(',',map {defined($_) ? $_ : 'undef'} @$a)}
+	       @$default) . ')';
+	$real_def = [map {defined($_) ? [@$_] : undef} @$default];
+      }
+    elsif(defined($default) && ref($default) eq 'ARRAY' &&
+	  scalar(grep {ref($_) ne ''} @$default) == 0)
+      {
+	$def_str  = join(',',map {defined($_) ? $_ : 'undef'} @$default);
+	$real_def = [[@$default]];
+      }
+    elsif(defined($default) && ref($default) eq '')
+      {
+	$def_str  = $default;
+	$real_def = [[$default]];
+      }
+    elsif(defined($default))
+      {
+	error("Default value supplied to addArrayOption must be a scalar, a ",
+	      "reference to an array of scalars, or a reference to an array ",
+	      "of references to arrays of scalars.");
+        $num_setup_errors++;
+	return(undef);
+      }
+
+    #If a display default was provided, overwrite the default based on the real
+    #default value (or the value referenced in varref)
+    if(defined($display_def))
+      {
+	#If it's a scalar
+	if(ref($display_def) eq '')
+	  {$def_str = $display_def}
+	else
+	  {error("Invalid display default.  Must be a non-empty string.  ",
+		 "Ignoring.")}
+      }
 
     if(defined($flagless) && $flagless)
       {
-	if(defined($flagless_multival_type) && $flagless_multival_type > -1)
+	if(defined($flagless_multival_optid) && $flagless_multival_optid > -1)
 	  {
 	    error("An additional multi-value option has been designated as ",
 		  "'flagless': [$get_opt_str]: [$flagless].  Only 1 is ",
 		  "allowed.",
 		  {DETAIL => "First flagless option was: [" .
-		   getDefaultFlag($usage_array->[$flagless_multival_type]
-				  ->{OPTFLAG}) . "]."});
+		   getDefaultFlag($usage_array->[$flagless_multival_optid]
+				  ->{OPTFLAGS}) . "]."});
+            $num_setup_errors++;
 	    return(undef);
 	  }
 
-	my $getoptsub;
-	if(defined($get_opt_ref) &&
-	   ref($get_opt_ref) eq 'SCALAR' && ref($$get_opt_ref) eq 'ARRAY')
-	  {$getoptsub =
-	     sub {push(@{$$get_opt_ref},[split(/$delimiter/,$_[0])])}}
-	elsif(defined($get_opt_ref) && ref($get_opt_ref) eq 'ARRAY')
-	  {$getoptsub = sub {push(@{$get_opt_ref},[split(/$delimiter/,$_[0])])}}
-	#No need to do an else, because it would have caused a return above
-	$GetOptHash->{'<>'} = $getoptsub;
+	$GetOptHash->{'<>'} = getGetoptSub($name,1);
 
 	#This assumes that the call to addToUsage a few lines below is the
 	#immediate next call to addToUsage
-	$flagless_multival_type = getNextUsageIndex();
+	$flagless_multival_optid = getNextUsageIndex();
       }
 
-    addOption($get_opt_str,
-	      $sub,
-	      $type . '_array2d',
-	      $required,
-	      $def_str,
-	      $hidden,
-	      $smry_desc,
-	      $detail_desc,
-	      $accepts,
-	      $advanced,
-	      $get_opt_ref,
-	      $delimiter);
+    my $option_id = addOption($get_opt_str,
+			      $sub,
+			      $type . '_array2d',
+			      $required,
+			      $def_str,
+			      $hidden,
+			      $smry_desc,
+			      $detail_desc,
+			      $accepts,
+			      $advanced,
+			      $heading,
+			      $real_def,
+			      undef,         #name
+			      undef,         #order
+			      $varref_copy,
+			      $delimiter,
+			      $flagless);
+
+    #The above sets the VARREF_PRG in the usage to the sub we created.  It needs
+    #to be fixed to be the reference that was submitted by the programmer.
+    $usage_array->[$option_id]->{VARREF_PRG} = $get_opt_ref;
+
+    return($option_id);
   }
 
-sub requireGeneralOption
+sub isRequiredGeneralOptionSatisfied
   {
-    my $ref = $_[0];
-    my $key = $_[1];
-    my $def = $_[2];
+    my $usg_hash         = $_[0];
+    my $by_defaults_only = (defined($_[1]) ? $_[1] : 0);
 
-    push(@$required_opt_refs,[$ref,$key,$def]);
-  }
+    my $varref  = getVarref($usg_hash,0,1);
+    my $flags   = $usg_hash->{OPTFLAGS};
+    my $def     = (defined($usg_hash->{DEFAULT_USR}) ?
+		   $usg_hash->{DEFAULT_USR} : $usg_hash->{DEFAULT_PRG});
+    my $dispdef = $usg_hash->{DISPDEF};
 
-sub wasGeneralOptionSupplied
-  {
-    my $opt_info = $_[0];
+    #If the display default is set and the default is not set, it means that the
+    #programmer is going to handle the default themselves after options are
+    #parsed, so we will ignore such required options and trust that the
+    #programmer will handle it in main
+    if(defined($dispdef) && !defined($def))
+      {
+	debug("Not requiring option: $flags->[0] because DISPDEF provided and ",
+	      "DEFAULT not provided.");
+	return(1);
+      }
 
-    my $opt_ref = $opt_info->[0];
-
-    if(!defined($opt_ref))
+    #Sanity check - make sure the reference is defined
+    if(!$by_defaults_only && !defined($varref))
       {return(0)}
 
-    #Note, these are best guesses.  For example if the option takes an
+    #Note, these are best guesses.  For example, if the option takes an
     #array, and it's intended to be a 2D array and an empty inner
     #array is added to start, this would think values have been
     #supplied when essentially they haven't.  I should more
@@ -4373,37 +6136,60 @@ sub wasGeneralOptionSupplied
     #default strings for usage display (e.g. 'none' for no default).
     #TODO: See req 214
 
-    if(ref($opt_ref) eq 'SCALAR' && !defined($$opt_ref))
-      {return(0)}
-    #Arrays are cleared out before & after user defaults are loaded
-    #and then re-loaded in loadDefaults, which may not have been
-    #called yet, so we're checking for defaults here...
-    elsif(ref($opt_ref) eq 'ARRAY' && scalar(@$opt_ref) == 0 &&
-	  scalar(@{$array_defaults_hash->{$opt_ref}->{DEFAULTS}}) == 0)
-      {return(0)}
-    elsif(ref($opt_ref) eq 'HASH' && scalar(keys(%$opt_ref)) == 0)
-      {return(0)}
-    elsif(ref($opt_ref) ne 'SCALAR' && ref($opt_ref) ne 'ARRAY' &&
-	  ref($opt_ref) ne 'HASH')
+    if(ref($varref) eq 'SCALAR')
+      {return((!$by_defaults_only && defined($$varref)) || defined($def))}
+    elsif(ref($varref) eq 'ARRAY')
+      {return((!$by_defaults_only && scalar(@$varref)) ||
+	      (defined($def) && scalar(@$def)))}
+    elsif(ref($varref) eq 'HASH')
+      {return((!$by_defaults_only && scalar(%$varref)) ||
+	      (defined($def) && scalar(%$def)))}
+    elsif(ref($varref) ne 'SCALAR' && ref($varref) ne 'ARRAY' &&
+	  ref($varref) ne 'HASH')
       {
-	my $def = $opt_info->[2];
 	#We're going to trust that if the user supplied a default string, they
 	#are handling the default after-the-fact themselves
 	if(defined($def))
 	  {return(1)}
 
-	my @flags = getOptStrFlags($opt_info->[1]);
-	if(scalar(grep {my $arg=$_;scalar(grep {$_ eq $arg} @flags)}
-		  @$preserve_args) == 0)
+	if(!$by_defaults_only && !$usg_hash->{SUPPLIED})
 	  {return(0)}
       }
 
     return(1);
   }
 
+#Determines whether multi-dimensional arrays of scalars are the same
+sub areArraysEqual
+  {
+    my $a1 = $_[0];
+    my $a2 = $_[1];
+
+    if(ref($a1) eq ref($a2))
+      {
+	if(ref($a1) eq 'ARRAY')
+	  {
+	    if(scalar(@$a1) != scalar(@$a2))
+	      {return(0)}
+	    foreach(0..$#{$a1})
+	      {unless(areArraysEqual($a1->[$_],$a2->[$_]))
+		 {return(0)}}
+	    return(1);
+	  }
+	elsif(ref($a1) eq '')
+	  {if($a1 eq $a2)
+	     {return(1)}}
+	else
+	  {warning("Not an array of scalars.")}
+      }
+
+    return(0);
+  }
+
 sub addOptions
   {
-    my @in = getSubParams([qw(GETOPTHASH REQUIRED OVERWRITE RENAME ADVANCED)],
+    my @in = getSubParams([qw(GETOPTHASH REQUIRED OVERWRITE RENAME ADVANCED
+                              HEADING)],
 			  [qw(GETOPTHASH)],
 			  [@_]);
     my $getopthash = $in[0];
@@ -4419,8 +6205,11 @@ sub addOptions
                              #getopts hash, delete and remake the key-value
                              #pair using the existing key.
     my $advanced   = $in[4]; #Advanced options print when extended >= 2
+    my $heading    = $in[5]; #Section heading to print in extended usage
 
-    if($command_line_processed)
+    my $usage_indexes = [];
+
+    if($command_line_stage >= ARGSREAD)
       {
 	error("You cannot add command line options (i.e. call ",
 	      "addOptions()) after the command line has already ",
@@ -4438,7 +6227,8 @@ sub addOptions
 		'a non-reference' :
 		'a reference to a [' . ref($getopthash) . ']') :
 	       'an undefined value'),"] was sent in.");
-	quit(-8);
+        $num_setup_errors++;
+        return(undef);
       }
 
     if(defined($required) && $required !~ /^\d+$/)
@@ -4446,20 +6236,24 @@ sub addOptions
 
     foreach my $get_opt_str (keys(%$getopthash))
       {
-	if(!isGetOptStrValid($get_opt_str,'general'))
+	if(!isGetOptStrValid($get_opt_str,'general',undef))
 	  {
-	    error("Invalid GetOpt parameter flag definition: [$get_opt_str] ",
-		  "for general type.");
-	    quit(-79);
+            $num_setup_errors++;
+            return(undef);
 	  }
 
 	if((!defined($commandeer) || !$commandeer) &&
 	   exists($GetOptHash->{$get_opt_str}))
 	  {
-	    error("Option [$get_opt_str] is a built-in option.  Set ",
-		  "\$commandeer to true to supply your own functionality.  ",
+	    error("Option [$get_opt_str] is a built-in option.  Supply ",
+		  "OVERWRITE as true to supply your own functionality.  ",
 		  "Note to also set the built-in function's default to ",
 		  "deactivate it.");
+	    next;
+	  }
+	if($get_opt_str eq '<>')
+	  {
+	    warning('Conversion of flagless option not supported.');
 	    next;
 	  }
 
@@ -4480,39 +6274,297 @@ sub addOptions
 	      }
 	  }
 
-	if($required)
-	  {requireGeneralOption($getopthash->{$get_opt_str},
-				$get_opt_str,
-				undef)}
-
-	$GetOptHash->{$get_opt_str} = $getopthash->{$get_opt_str};
-
 	my $genopttype = getGeneralOptType($get_opt_str);
+	my $flags      = [getOptStrFlags($get_opt_str)];
+	my $name       = createOptionNameFromFlags($flags);
+
+	$GetOptHash->{$get_opt_str} = getGetoptSub($name);
 
 	#Let's do what we can...
-	my $default = getDefaultStr($getopthash->{$get_opt_str});
-	my $flags = [getOptStrFlags($get_opt_str)];
-	my $desc = (!showDefault($genopttype,$getopthash->{$get_opt_str},
-				 $default) ? '' :
-		    (!defined($default) ? '[] ' :
-		     ($default eq '' ? "[''] " : "[$default] "))) .
-		       'No description supplied.  Programmer note: Use ' .
-			 'addOption() instead of addOptions(), or use ' .
-			   'addToUsage() to supply a usage.';
+	my $dispdef = getDefaultStr($getopthash->{$get_opt_str});
+	my $default = copyVar(${$getopthash->{$get_opt_str}});
+	if(ref($default) eq 'SCALAR')
+	  {$default = $$default}
+	my $desc    = ('No description supplied.  Programmer note: Use ' .
+		       'addOption() instead of addOptions(), or use ' .
+		       'addToUsage() to supply a usage.');
 
-	addToUsage($get_opt_str,
-		   $flags,
-		   undef,
-		   $desc,
-		   0,
-		   (ref($getopthash->{$get_opt_str}) eq 'SCALAR' ?
-		    ${$getopthash->{$get_opt_str}} :
-		    $getopthash->{$get_opt_str}),
-		   undef,
-		   0,
-		   getGeneralOptType($get_opt_str),
-		   0,
-		   $advanced);
+	my $oid = addToUsage($get_opt_str,
+                             $flags,
+                             undef,                           #SMRY_DESC
+                             $desc,
+                             $required,
+                             $dispdef,
+                             $default,
+                             undef,                           #ACCEPTS
+                             0,                               #HIDDEN
+                             $genopttype,
+                             ($get_opt_str eq '<>'),          #FLAGLESS
+                             $advanced,
+                             $heading,
+                             $name,                           #usage name
+                             undef,                           #usage order
+                             $getopthash->{$get_opt_str},     #Programmer's ref
+                             undef,                           #pair w option ID
+                             undef);                          #pair relationship
+
+	$heading = '';
+
+        if(!defined($oid))
+          {$num_setup_errors++}
+        else
+          {push(@$usage_indexes,$oid)}
+      }
+
+    return(wantarray ? @$usage_indexes : $usage_indexes);
+  }
+
+#This creates a subroutine to give as the hash value for an option in the
+#GetOptHash
+sub getGetoptSub
+  {
+    my $option_name = $_[0];
+    my $flagless    = (defined($_[1]) ? $_[1] : 0);
+    #We're only going to set a reference to a sub now because there is no usage
+    #hash yet.  When the returned sub is called, it will have been set
+    return(sub {getoptSubHelper([@_],
+				eval("qq($option_name)"),
+				eval("$flagless"))});
+  }
+
+#Globals used: $command_line_stage
+sub getoptSubHelper
+  {
+    my $arg_array  = $_[0];
+    my $opt_name   = $_[1];
+    my $flagless   = $_[2];
+    my $usg_hash   = getUsageHash($opt_name);
+    my $type       = $usg_hash->{OPTTYPE};
+    my $varref_stg = $usg_hash->{VARREF_STG};
+    my $varref_prg = $usg_hash->{VARREF_PRG};
+    my $delim      = $usg_hash->{DELIMITER};
+    my $arg_value  = ($flagless ? $arg_array->[0] : $arg_array->[1]);
+    my $arg_name   = ($flagless ? $opt_name : $arg_array->[0]);
+
+    my $value      = $arg_value;
+    my(@values); #For array types
+
+    if(!defined($getopt_default_mode))
+      {
+        #Must be set to know whether to initialize defaults or option variables
+	error("getopt_default_mode not defined.");
+	return();
+      }
+
+    if(!$getopt_default_mode)
+      {
+	#Set the fact that this option is user supplied
+	$usg_hash->{SUPPLIED}    = 1;
+	$usg_hash->{OPTFLAG_SUP} = ($flagless ? '' :
+				    (length($arg_name) > 1 ? '--' : '-') .
+				    $arg_name);
+	push(@{$usg_hash->{SUPPLIED_AS}},
+	     ($flagless ?
+	      "'$arg_value'" : "$usg_hash->{OPTFLAG_SUP} '$arg_value'"));
+	push(@{$usg_hash->{SUPPLIED_ARGS}},$arg_array);
+      }
+    else
+      {
+	#Set the fact that this option is user-default supplied
+	$usg_hash->{SUPPLIED_UDF}    = 1;
+	$usg_hash->{OPTFLAG_SUP_UDF} = ($flagless ? '' :
+					(length($arg_array->[0]) > 1 ?
+					 '--' : '-') . $arg_name);
+	push(@{$usg_hash->{SUPPLIED_AS_UDF}},
+	     ($flagless ?
+	      "'$arg_value'" : "$usg_hash->{OPTFLAG_SUP_UDF} '$arg_value'"));
+	push(@{$usg_hash->{SUPPLIED_ARGS_UDF}},$arg_array);
+      }
+
+    #Validate the value
+    if(!isValueValid($arg_value,$usg_hash))
+      {
+	#If we're processing user defaults
+	if($getopt_default_mode)
+	  {push(@$bad_user_opts,$usg_hash)}
+	return();
+      }
+
+    ##
+    ## Determine the value to be set if it's not a single scalar
+    ##
+
+    #We need to pre-process count-type options
+    if($type eq 'count')
+      {
+	#This reaches into Getopt::Long::CallBack's object to tell whether or
+	#not an argument was supplied with the flag.  It is based on this test
+	#code/proof of concept:
+	#perl -e 'use Getopt::Long;%h=("t|test:+" => sub {print(join(",",
+	#@{$_[0]->{ctl}})," [",join("],[",@_),"]\n")});GetOptions(%h);' -- -t 5
+	#-t 1 -t --test 6
+	#I,t,,0,0,1 [t],[5]
+	#I,t,,0,0,1 [t],[1]
+	#+,t,,0,0,1 [t],[1]
+	#I,t,,0,0,1 [t],[6]
+	my $has_arg = ($arg_array->[0]->{ctl}->[0] ne '+');
+
+	if(!$has_arg)
+	  {
+	    #We're either incrementing the value in $usg_hash->{DEFAULT_USR} or
+	    #in $$varref_stg, unless they're not defined, then we're setting it.
+            if($getopt_default_mode)
+	      {
+		if(defined($usg_hash->{DEFAULT_USR}))
+		  {$value = $usg_hash->{DEFAULT_USR} + $arg_value}
+		else
+		  {$value = $arg_value}
+	      }
+	    else
+	      {
+		if(defined($$varref_stg))
+		  {$value = $$varref_stg + $arg_value}
+		else
+		  {$value = $arg_value}
+	      }
+	  }
+	else
+	  {$value = $arg_value}
+      }
+    elsif($type =~ /array$/)
+      {@values = (defined($delim) ? split(/$delim/,$arg_value) : $arg_value)}
+    elsif($type =~ /array2d$/)
+      {$value = [split(/$delim/,$arg_value)]}
+    elsif($type eq 'outdir' || $type eq 'infile' || $type eq 'outfile')
+      {
+	#If this is a flagless option, let's be extra careful about validation
+	if($flagless)
+	  {checkFileOpt($arg_value,1)}
+
+	$value = [sglob($arg_value,$usg_hash->{SUPPLIED_UDF})];
+      }
+
+    #If we are not yet processing the actual command line, we are setting user
+    #defaults
+    if($getopt_default_mode)
+      {
+	if($type =~ /array$/)
+	  {
+	    if(defined($usg_hash->{DEFAULT_USR}))
+	      {push(@{$usg_hash->{DEFAULT_USR}},@values)}
+	    else
+	      {$usg_hash->{DEFAULT_USR} = [@values]}
+
+	    #In case the programmer has a display default, clear it
+	    $usg_hash->{DISPDEF} = undef;
+	  }
+	elsif($type =~ /array2d$/ ||
+	      $type eq 'outdir' || $type eq 'infile' || $type eq 'outfile')
+	  {
+	    if(defined($usg_hash->{DEFAULT_USR}))
+	      {push(@{$usg_hash->{DEFAULT_USR}},$value)}
+	    else
+	      {$usg_hash->{DEFAULT_USR} = [$value]}
+
+	    #In case the programmer has a display default, clear it
+	    $usg_hash->{DISPDEF} = undef;
+	  }
+	else
+	  {
+	    #Ignore invalid user defaults with a warning.  save_args is
+	    #simply never allowed to be defaulted.
+	    if(scalar(grep {$usg_hash->{USAGE_NAME} eq $_} qw(save_args)))
+	      {warning("Unallowed user default option encountered among the ",
+		       "saved user defaults: [",
+		       (length($arg_array->[0]) > 1 ? '--' : '-'),
+		       "$arg_array->[0]].  Ignoring.")}
+	    else
+	      {
+		$usg_hash->{DEFAULT_USR} = $value;
+
+		#In case the programmer has a display default, clear it
+		$usg_hash->{DISPDEF}     = undef;
+	      }
+	  }
+      }
+    #Otherwise, we must update the varref value and the variable in main (if we
+    #were given a code reference)
+    else
+      {
+	#Now set the variables based on type
+	if($type =~ /array$/)
+	  {
+	    #The programmer's variable in main (via a CODE ref) won't be set
+            #(and assume they handle clearing out their initial default value)
+            #until after validation
+	    if(ref($varref_prg) ne 'CODE' && $varref_prg ne $varref_stg)
+	      {
+		#If the copy is empty and the programmer's variable was
+		#initialized with a default, clear it out so the user's values
+		#can replace them
+		if(defined($varref_stg)      && defined($varref_prg) &&
+		   scalar(@$varref_stg) == 0 && scalar(@$varref_prg))
+		  {@$varref_prg = ()}
+
+		if(defined($varref_prg))
+		  {push(@$varref_prg,@values)}
+		else
+		  {$varref_prg = [@values]}
+	      }
+
+	    #Push them onto the copy (if the push above didn't happen or it's
+	    #not the same reference as the programmer's variable)
+	    if(ref($varref_prg) eq 'CODE' || $varref_prg ne $varref_stg)
+	      {
+		if(defined($varref_stg))
+		  {push(@$varref_stg,@values)}
+		else
+		  {$varref_stg = [@values]}
+	      }
+	  }
+	#These are kept in 2D scalar arrays: *_array2d, infile, outfile, outdir
+	elsif($type =~ /array2d$/ ||
+	      $type eq 'outdir' || $type eq 'infile' || $type eq 'outfile')
+	  {
+	    #The programmer's variable in main (via a CODE ref) won't be set
+            #(and assume they handle clearing out their initial default value)
+            #until after validation
+	    if(ref($varref_prg) ne 'CODE' && $varref_prg ne $varref_stg)
+	      {
+		#If the copy is empty and the programmer's variable was
+		#initialized with a default, clear it out so the user's values
+		#can replace them
+		if(defined($varref_stg)      && defined($varref_prg) &&
+		   scalar(@$varref_stg) == 0 && scalar(@$varref_prg))
+		  {@$varref_prg = ()}
+
+		if(defined($varref_prg))
+		  {push(@$varref_prg,$value)}
+		else
+		  {$varref_prg = [$value]}
+	      }
+
+	    #Push them onto the copy (if the push above didn't happen or it's
+	    #not the same reference as the programmer's variable)
+	    if(ref($varref_prg) eq 'CODE' || $varref_prg ne $varref_stg)
+	      {
+		#Push them onto the copy (if it's not the same reference)
+		if(defined($varref_stg))
+		  {push(@$varref_stg,$value)}
+		else
+		  {$varref_stg = [$value]}
+	      }
+	  }
+	else
+	  {
+	    $$varref_stg = $value;
+
+	    #The programmer's variable in main (via a CODE ref) won't be set
+            #(and assume they handle clearing out their initial default value)
+            #until after validation
+	    if(ref($varref_prg) ne 'CODE')
+	      {$$varref_prg = $value}
+	  }
       }
   }
 
@@ -4533,6 +6585,26 @@ sub getDefaultStr
     my $def_str = clipStr($str,30);
 
     return($def_str);
+  }
+
+sub copyVar
+  {
+    my $ref  = $_[0];
+    my $copy = $ref;
+
+    if(ref($ref) eq 'SCALAR')
+      {$copy = \$$ref}
+    elsif(ref($ref) eq 'ARRAY' &&
+	  scalar(@$ref) == scalar(grep {ref(\$_) eq 'SCALAR'} @$ref))
+      {$copy = [@$ref]}
+    elsif(ref($ref) eq 'HASH' && scalar(keys(%$ref)) ==
+	  scalar(grep {ref(\$_) eq 'SCALAR'} values(%$ref)))
+      {$copy = {%$ref}}
+    elsif(ref($ref) ne '')
+      {warning("Unsupported variable type.  Unable to copy option value.  ",
+	       "Default value will contain references to main.")}
+
+    return($copy);
   }
 
 #Truncates a string to a given length and adds an elipsis to indicate it was
@@ -4560,26 +6632,48 @@ sub clipStr
 
 sub addToUsage
   {
-    my $getoptkey   = $_[0];
-    my $flags_array = $_[1];
-    my $smry_desc   = $_[2];
-    my $detail_desc = $_[3];
-    my $required    = $_[4];
-    my $default     = $_[5];
-    my $accepts     = $_[6]; #Array of scalars
-    my $hidden      = $_[7];
-    my $opttype     = defined($_[8]) ? $_[8] : 'string';
-    my $flagless    = $_[9];
-    my $advanced    = $_[10];
+    my $getoptkey     = $_[0];
+    my $flags_array   = $_[1];
+    my $smry_desc     = $_[2];
+    my $detail_desc   = $_[3];
+    my $required      = $_[4];
+    my $display_def   = $_[5];
+    my $default_val   = $_[6];
+    my $accepts       = $_[7]; #Array of scalars
+    my $hidden        = $_[8];
+    my $opttype       = defined($_[9]) ? $_[9] : 'string';
+    my $flagless      = $_[10];
+    my $advanced      = $_[11];
+    my $heading       = defined($_[12]) ? $_[12] : '';
 
-    #For 1D & 2D array options
-    my $varref      = $_[11];
-    my $delim       = $_[12];
+    my $usage_name    = $_[13];
+    my $usage_order   = $_[14];
 
-    #For in/out file types (used in help output)
-    my $primary     = defined($_[13]) ? $_[13] : '';
-    my $format_desc = $_[14];
-    my $file_id     = $_[15];
+    my $varref_prg    = $_[15];
+    my $varref_cli    = (exists($scalaropt_types->{$opttype}) ? \my $v : []);
+    my $varref_stg    = (exists($scalaropt_types->{$opttype}) ? \my $w : []);
+
+    #Relationships to other options
+    my $pair_with_opt = $_[16];
+    my $pair_relat    = (defined($_[17]) ? $_[17] : '');
+
+    #For 1D & 2D array options only
+    my $delim         = $_[18];
+
+    ##
+    ## For in/out file types
+    ##
+    my $primary_prg   = $_[19];
+    my $primary       = $primary_prg;
+    my $format_desc   = $_[20];
+
+    #For outfile types
+    my $collide_mode  = $_[21];
+
+    #For file types that take only 1 file and which the programmer can't't open,
+    #e.g. logfile & logsuff, so an append mode can be set.  Otherwise, append
+    #mode is controlled via calls to open
+    my $append_mode   = $_[22];
 
     if(!defined($flags_array))
       {
@@ -4587,98 +6681,220 @@ sub addToUsage
 	return(0);
       }
 
+    #Update the global flag_check_hash
+    foreach(@$flags_array)
+      {
+        my $flag = $_;
+
+        $flag_check_hash->{$flag} = 0;
+
+        if($opttype eq 'negbool')
+          {
+            $flag =~ s/^-+//;
+            $flag_check_hash->{"--no$flag"}  = 0;
+            $flag_check_hash->{"--no-$flag"} = 0;
+          }
+      }
+
+    #If the programmer did not explicitly set a primary state, set one based on
+    #the option type
+    if(!defined($primary_prg))
+      {
+	if($opttype eq 'infile')
+	  {$primary = 0}
+	elsif($opttype eq 'outfile' || $opttype eq 'suffix')
+	  {$primary = 1}
+	else
+	  {$primary = 0}
+      }
+
+    my $def_flag = getDefaultFlag($flags_array);
+
     #To be backward compatible, convert a string to an array using comma delim
     if(ref($flags_array) ne 'ARRAY')
       {
 	error("Invalid flags array passed in.",
 	      {DETAIL => 'Must be a reference to an array of scalars'});
-	quit(-102);
+        $num_setup_errors++;
+        return(undef);
+      }
+
+    if(defined($pair_with_opt) &&
+       ($pair_with_opt !~ /^\d+$/ || $pair_with_opt > $#{$usage_array}))
+      {
+	error("Invalid paired option ID: [$pair_with_opt].",
+	      {DETAIL => ('Must be an integer as returned by any of the add*' .
+			  'Option methods.')});
+        $num_setup_errors++;
+        return(undef);
+      }
+
+    ##TODO: Remove this check when pairing any option is supported.
+    ##      Until then, temporary check of allowed options to pair. See REQ #341
+    if(defined($pair_with_opt))
+      {
+	if($opttype ne 'infile' && $opttype ne 'outfile' &&
+	   $opttype ne 'suffix' && $opttype ne 'logsuff')
+	  {error("Pairing of $opttype options is not currently supported.")}
+	if(($usage_array->[$pair_with_opt]->{OPTTYPE} ne 'infile' &&
+	    $usage_array->[$pair_with_opt]->{OPTTYPE} ne 'outfile' &&
+	    $usage_array->[$pair_with_opt]->{OPTTYPE} ne 'string') ||
+	   ($opttype ne 'suffix' && $opttype ne 'logsuff' &&
+	    $opttype ne 'infile' && $opttype ne 'outfile') ||
+	   (($opttype eq 'outfile' || $opttype eq 'infile') &&
+	    $usage_array->[$pair_with_opt]->{OPTTYPE} ne 'infile') ||
+	   ($opttype eq 'logsuff' &&
+	    $usage_array->[$pair_with_opt]->{OPTTYPE} ne 'string'))
+	  {error("Pairing to $usage_array->[$pair_with_opt]->{OPTTYPE} ",
+		 "options from a $opttype is not currently supported")}
+      }
+
+    if($heading ne '')
+      {
+	$heading =~ s/^\n+//;
+	$heading =~ s/\n+$//;
+      }
+
+    if(!defined($usage_name))
+      {$usage_name = createOptionNameFromFlags($flags_array)}
+
+    if(defined($append_mode) && $append_mode &&
+       $opttype ne 'logfile' && $opttype ne 'logsuff')
+      {
+	error("Can only set append mode for option types logfile and logsuff.");
+	$append_mode = 0;
       }
 
     my $usage_index = scalar(@$usage_array);
+    push(@$usage_array,
+	 {OPTION_ID     => $usage_index,
+	  GETOPTKEY     => $getoptkey,
 
-    push(@$usage_array,{GETOPTKEY => $getoptkey,
-			GETOPTREF => $varref,   #Currently only used for arrays
-			OPTFLAG   => $flags_array,
-			SUMMARY   => (defined($smry_desc) ? $smry_desc : ''),
-			DETAILS   => (defined($detail_desc) ? $detail_desc:''),
-			REQUIRED  => (defined($required) ? $required : 0),
-			DEFAULT   => $default,
-			ACCEPTS   => $accepts,
-		        HIDDEN    => (defined($hidden) ? $hidden : 0),
-			OPTTYPE   => $opttype,  #bool,negbool,count,integer,
-                                                #float,string,enum,integer_
-                                                #array,float_array,string_
-                                                #array,enum_array,integer_
-                                                #array2d,float_array2d,string_
-                                                #array2d,enum_array2d,
-                                                #infile,outfile,outdir,suffix,
-			FLAGLESS  => $flagless, #1, 0, or undef
-			ADVANCED  => $advanced,
-			DELIMITER => $delim,
+	  VARREF_PRG    => $varref_prg,     #For internal use only
+	  VARREF_CLI    => $varref_cli,     #Validated copy of value SUPPLIED
+	  VARREF_STG    => $varref_stg,     #Staged/unvalidated copy of value
+                                            #SUPPLIED
+	  OPTFLAGS      => $flags_array,
+	  OPTFLAG_DEF   => $def_flag,
+	  SUMMARY       => (defined($smry_desc) ? $smry_desc :''),
+	  DETAILS       => (defined($detail_desc) ?
+			    $detail_desc : ''),
+	  REQUIRED      => (defined($required) ? $required : 0),
+	  DISPDEF       => $display_def,
+	  DEFAULT_PRG   => $default_val,  #CLI's/Programmer's dflt
+	  DEFAULT_USR   => undef,         #User's default
+          DEFAULT_CLI   => undef,         #Like VARREF_CLI - validated default
+	  ACCEPTS       => $accepts,
+	  HIDDEN        => (defined($hidden) ? $hidden : 0),
+	  OPTTYPE       => $opttype,  #bool,negbool,count,integer,float,string,
+	                              #enum,integer_array,float_array,string_
+                                      #array,enum_array,integer_array2d,float_
+                                      #array2d,string_array2d,enum_array2d,
+                                      #infile,outfile,outdir,suffix,logfile,
+                                      #logsuff
+	  FLAGLESS      => $flagless, #1, 0, or undef
+	  ADVANCED      => $advanced,
+	  HEADING       => $heading,
+	  USAGE_NAME    => $usage_name,
+	  USAGE_ORDER   => $usage_order,
+	  PAIRID        => $pair_with_opt,
+	  RELATION      => $pair_relat,
+	  DELIMITER     => $delim,
 
-			#File option info
-			PRIMARY   => $primary, #primary means stdin/out default
-			FORMAT    => $format_desc,
-		        FILEID    => $file_id,
-			TAGTEAM   => 0,   #Involved in a tagteam pair
-			TAGTEAMID => '',
-		        TTREQD    => 0,   #Required as a part of a tagteam pair
-		        TTHIDN    => 0}); #& set in createSuffixOutfileTagteam.
-                                          #TTHIDN indicates whether 1 is hidden
+	  #Track whether or not the user supplied an option,
+	  #versus the option having a default value
+	  SUPPLIED_AS   => [],          #Recreation of cmnd ln string
+	  SUPPLIED_ARGS => [],          #Args supplied to the code ref
+	  SUPPLIED      => 0,           #Whether user supplied opt
+	  OPTFLAG_SUP   => undef,       #The flag/arg pos used
 
-    $usage_lookup->{$getoptkey} = $usage_array->[-1];
+	  #Track whether or not the user supplied a user-default,
+	  #versus the option having a programmer-default value
+	  SUPPLIED_AS_UDF   => [],      #Raw values supplied by user (set below)
+	  SUPPLIED_ARGS_UDF => [],      #Args supplied to the code ref
+	  SUPPLIED_UDF      => 0,       #Whether user supplied opt
+	  OPTFLAG_SUP_UDF   => undef,   #The flag/arg pos used
+
+	  #File option info
+	  PRIMARY       => $primary, #primary means stdin/out dflt
+	  PRIMARY_PRG   => $primary_prg,
+	  COLLIDE_MODE  => $collide_mode,
+	  APPEND_MODE   => $append_mode,
+	  FORMAT        => $format_desc,
+	  FILEID        => undef,
+	  TAGTEAM       => 0,   #Involved in a tagteam pair
+	  TAGTEAMID     => ''});
+
+    #This is mainly here so that builtin usage hashes can be retrieved by name
+    #no matter what order the usage array is in
+    $usage_lookup->{$usage_name} = $usage_array->[$usage_index];
 
     return($usage_index);
+  }
+
+#Returns the first flag longer than 1 character or the first flag, period.
+sub createOptionNameFromFlags
+  {
+    my $flag_array = $_[0];
+    my($name);
+    my $defname    = '__flagless__';
+
+    foreach my $flag (@$flag_array)
+      {
+	my $tmp = $flag;
+	$tmp =~ s/^-+//;
+	if(!defined($name))
+	  {$name = $tmp}
+	if(length($tmp) > 1)
+	  {
+	    $name = $tmp;
+	    last;
+	  }
+      }
+
+    if(!defined($name))
+      {$name = $defname}
+
+    return($name);
   }
 
 #Supply a getoptkey and get back a usage hash
 sub getUsageHash
   {
-    my $getoptkey = $_[0];
-    if(!defined($getoptkey) || ref($getoptkey) ne '')
-      {error('Invalid GETOPTKEY: [',
-	     (defined($getoptkey) ? ref($getoptkey) : 'undef'),'].',
+    my $usage_name = $_[0];
+    if(!defined($usage_name) || ref($usage_name) ne '')
+      {error('Invalid USAGE_NAME: [',
+	     (defined($usage_name) ? ref($usage_name) : 'undef'),'].',
 	     {DETAIL => 'Must be a scalar value.'})}
-    if(exists($usage_lookup->{$getoptkey}) &&
-       defined($usage_lookup->{$getoptkey}))
-      {return($usage_lookup->{$getoptkey})}
-    error("GETOPTKEY [$getoptkey] not found.");
+    if(exists($usage_lookup->{$usage_name}) &&
+       defined($usage_lookup->{$usage_name}))
+      {return($usage_lookup->{$usage_name})}
+    error("USAGE_NAME [$usage_name] not found.");
     return({});
   }
 
 sub getNextUsageIndex
   {return(scalar(@$usage_array))}
 
-#Globals used: $usage_array
-sub getFileUsageHash  {
-    my $file_id = $_[0];
-    my $type    = $_[1]; #infile,outfile
-    if(scalar(@_) != 2)
-      {
-	error("getFileUsageHash requires exactly 2 parameters: a file ID & a ",
-	      "type.");
-	return({});
-      }
-    my @hashes = grep {exists($_->{FILEID}) && defined($_->{FILEID}) &&
-			 $_->{FILEID} == $file_id && $_->{OPTTYPE} eq $type}
-      @$usage_array;
-    if(scalar(@hashes) == 1)
-      {return($hashes[0])}
-    error("Could not determine usage hash for file ID: [$file_id].");
-    return({});
-  }
-
 #Converts a getopt key string into an array of associated flag strings
 sub getOptStrFlags
   {
-    my $get_opt_str = $_[0];
-    my $genopttype  = getGeneralOptType($get_opt_str);
-    $get_opt_str =~ s/[=:\!].*$//;
-    my @flags =
-      map {(length($_) > 1 ? '--' : '-') . $_} split(/\|/,$get_opt_str);
-#    if($genopttype eq 'negbool')
-#      {push(@flags,map {"--no$_"} split(/\|/,$get_opt_str))}
+    my $get_opt_str  = $_[0];
+    my $include_negs = (defined($_[1]) ? $_[1] : 0);
+    my @flags        = ();
+
+    if(defined($get_opt_str))
+      {
+        my $negatable = ($get_opt_str =~ /!/);
+        $get_opt_str  =~ s/[=:\!].*$//;
+
+        push(@flags,
+             map {(length($_) > 1 ? '--' : '-') . $_} split(/\|/,$get_opt_str));
+
+        if($include_negs && $negatable)
+          {@flags = map {my $f = $_;$f =~ s/^-+//;$_,"--no$f","--no-$f"} @flags}
+      }
+
     return(wantarray ? @flags : [@flags]);
   }
 
@@ -4710,12 +6926,22 @@ sub getDefaultFlag
 
 sub getInfile
   {
+    unless($command_line_stage)
+      {processCommandLine()}
+
     my @in           = getSubParams([qw(FILETYPEID ITERATE)],[],[@_]);
-    my $file_type_id = $in[0];
+    my $optid        = $in[0];
+    my $file_type_id = (isInt($optid) && $optid >= 0 &&
+			$optid <= $#{$usage_array} &&
+			$usage_array->[$optid]->{OPTTYPE} eq 'infile' ?
+			$usage_array->[$optid]->{FILEID} : undef);
     my $iterate      = defined($in[1]) ? $in[1] : $auto_file_iterate;
 
-    unless($processCommandLine_called)
-      {processCommandLine()}
+    if(defined($optid) && !defined($file_type_id))
+      {
+	error("Invalid infile option ID: [$optid].");
+	return(undef);
+      }
 
     if(!defined($file_set_num))
       {
@@ -4738,13 +6964,15 @@ sub getInfile
 	#Even if we're returning a list, we'll set a file that will
 	#unnecessarily go through a conditional below to check for validity -
 	#just so this sub will work in both contexts
-	$file_type_id = (getInfileIndexes())[0];
-
-	if(!defined($file_type_id))
+	my @optids =
+	  map {$_->{OPTION_ID}} grep {$_->{OPTTYPE} eq 'infile'} @$usage_array;
+	if(scalar(@optids) == 0)
 	  {
 	    error("No input file options could be found.");
 	    return(undef);
 	  }
+	$optid = $optids[0];
+	$file_type_id = $usage_array->[$optid]->{FILEID};
       }
     elsif(!defined($file_type_id) && !wantarray)
       {
@@ -4753,22 +6981,22 @@ sub getInfile
       }
 
     my @return_files = ();
-    if(wantarray && !defined($file_type_id))
+    if(wantarray && !defined($file_type_id) &&
+       defined($input_file_sets->[$file_set_num]))
       {
 	##TODO: Reconsider this in such a way that the user knows the type of
 	##   each file returned. Cannot use position here since we are grepping
 	##   See requirement 182.
-	@return_files = map {$input_file_sets->[$file_set_num]->[$_]}
-	  grep {defined($input_file_sets->[$file_set_num]) &&
-		  defined($input_file_sets->[$file_set_num]->[$_]) &&
-		    !exists($outfile_types_hash->{$_})}
-	    (0..$#{$input_files_array});
+	@return_files = map {$input_file_sets->[$file_set_num]->[$_->{FILEID}]}
+	  grep {$_->{OPTTYPE} eq 'infile' &&
+		  defined($input_file_sets->[$file_set_num]->[$_->{FILEID}])}
+	    @$usage_array;
       }
 
     my $repeated = 0;
-    if((defined($file_type_id) && fileReturnedBefore($file_type_id)) ||
+    if((defined($file_type_id) && optvalReturnedBefore($optid)) ||
        !defined($file_type_id) && wantarray &&
-       scalar(grep {fileReturnedBefore($_)} @return_files))
+       scalar(grep {optvalReturnedBefore($_)} @return_files))
       {$repeated = 1}
 
     if($repeated)
@@ -4782,52 +7010,14 @@ sub getInfile
 	  {return(undef)}
       }
 
-    if(defined($file_type_id) &&
-       ($file_type_id >= scalar(@$input_files_array) ||
-	exists($outfile_types_hash->{$file_type_id}) ||
-	$file_type_id >= scalar(@{$input_file_sets->[$file_set_num]})))
-      {
-	error("Invalid input file type ID: [$file_type_id].");
-	return(undef);
-      }
+    if(wantarray && !defined($file_type_id))
+      {$optval_returned_before->{IN}->{$file_set_num}->{$_} = 1
+	 foreach(@return_files)}
+    else
+      {$optval_returned_before->{IN}->{$file_set_num}->{$optid} = 1}
 
     return(wantarray && !defined($file_type_id) ? @return_files :
 	   $input_file_sets->[$file_set_num]->[$file_type_id]);
-  }
-
-#Globals used: $suffix_id_lookup
-sub isSuffixPrimary
-  {
-    my $suffix_id = $_[0];
-
-    #If the suffix ID provided does not exist
-    if(!defined($suffix_id) ||
-       (defined($suffix_id) &&
-	($suffix_id >= scalar(@$suffix_id_lookup) ||
-	 !defined($suffix_id_lookup->[$suffix_id]) ||
-	 ref($suffix_id_lookup->[$suffix_id]) ne 'ARRAY' ||
-	 scalar(@{$suffix_id_lookup->[$suffix_id]}) != 2)))
-      {
-	error("Invalid suffix ID: [",
-	      (defined($suffix_id) ? $suffix_id : 'undef'),"].");
-	return(undef);
-      }
-
-    #The third element of each suffix_id_lookup array is the primary value that
-    #was stored here by the addOutfileSuffixOption sub
-    return(isTypeSuffixPrimary($suffix_id_lookup->[$suffix_id]->[0],
-			       $suffix_id_lookup->[$suffix_id]->[1]));
-  }
-
-#Note: This could be way more efficient if everything went through the usage
-#array and usage array indexes were the types passed around for everything
-#Globals used: required_suffix_types
-sub isSuffixRequired
-  {
-    my $suffix_id = $_[0];
-    foreach my $suff_ary (@$required_suffix_types)
-      {return(1) if($suffix_id == $suff_ary->[2])}
-    return(0);
   }
 
 #Determines whether a suffix is defined or not.  By "defined", what is meant
@@ -4843,47 +7033,67 @@ sub isSuffixDefined
     my $suff_index = $_[1];
     my $is_defined = 0;
 
+    my $suffoptid = $file_indexes_to_usage->{$file_index}->{$suff_index};
+    my $suffuhash = $usage_array->[$suffoptid];
+    my $fileuhash = $usage_array->[$suffuhash->{PAIRID}];
+
     #If this is a suffix of an outfile type added by addOutfileOption
-    if(exists($outfile_types_hash->{$file_index}))
-      {
-	#Return true if there's anything in this outfile type's input files
-	#array
-	$is_defined =
-	  scalar(grep {my $a=$_;defined($a) && scalar(grep {defined($_)} @$a)}
-		 @{$input_files_array->[$file_index]});
-      }
-    else
+    if($fileuhash->{OPTTYPE} eq 'outfile')
       {$is_defined =
-	 defined($outfile_suffix_array->[$file_index]->[$suff_index])}
+	 scalar(grep {my $a=$_;defined($a) && scalar(grep {defined($_)} @$a)}
+		@{getVarref($fileuhash)})}
+    else
+      {$is_defined = defined(getVarref($suffuhash,1))}
 
     return($is_defined);
   }
 
-#Given an input file type index and a suffix index, returns whether the output
-#for files with that suffix is primary or not (i.e. whether, when no suffix is
-#supplied, output should go to STDOUT.  The structure of $suffix_primary_vals
-#is built inside addOutFileSuffixOption
-#Globals used: $suffix_primary_vals
-sub isTypeSuffixPrimary
+#Takes either a suffix option ID or an outfile option ID and returns the
+#associated suffix option ID.  This assumes that outfile options have a single
+#hidden associated suffix option.  Returns the suffix option sent in if it
+#already is a suffix option.
+sub toSuffixOpt
   {
-    my $type_index   = $_[0];
-    my $suffix_index = $_[1];
-
-    if(scalar(@$suffix_primary_vals) <= $type_index ||
-       scalar(@{$suffix_primary_vals->[$type_index]}) <= $suffix_index)
-      {return(undef)}
-
-    return($suffix_primary_vals->[$type_index]->[$suffix_index]);
+    my $optid = $_[0];
+    return(undef) unless(defined($optid));
+    if($optid > $#{$usage_array} ||
+       ($usage_array->[$optid]->{OPTTYPE} ne 'suffix' &&
+	$usage_array->[$optid]->{OPTTYPE} ne 'outfile'))
+      {
+	error("Invalid option ID: [$optid].");
+	return(undef);
+      }
+    my($retopt);
+    if($usage_array->[$optid]->{OPTTYPE} eq 'suffix')
+      {$retopt = $optid}
+    else
+      {
+	my $sfoptids = [map {$_->{OPTION_ID}}
+			grep {$_->{OPTTYPE} eq 'suffix' &&
+				$_->{PAIRID} == $optid} @$usage_array];
+	if(scalar(@$sfoptids) != 1)
+	  {error("Could not find hidden suffix option.")}
+	else
+	  {$retopt = $sfoptids->[0]}
+      }
+    return($retopt);
   }
 
+#Globals used: $suffix_id_lookup
 sub getOutfile
   {
-    my @in        = getSubParams([qw(SUFFIXID ITERATE)],[],[@_]);
-    my $suffix_id = $in[0];
-    my $iterate   = defined($in[1]) ? $in[1] : $auto_file_iterate;
+    my @in = getSubParams([qw(SUFFIXID ITERATE)],[],[@_]);
 
-    unless($processCommandLine_called)
+    unless($command_line_stage)
       {processCommandLine()}
+
+    my $suff_opt = toSuffixOpt($in[0]);
+    my $sup_suff_opt =
+      (defined($suff_opt) ? ($usage_array->[$suff_opt]->{TAGTEAM} ?
+			     tagteamToSuffixID($usage_array->[$suff_opt]
+					       ->{TAGTEAMID}) : $suff_opt) :
+       undef);
+    my $iterate = defined($in[1]) ? $in[1] : $auto_file_iterate;
 
     #If this is the first time we've returned any files, set up the file set
     #counter
@@ -4906,58 +7116,59 @@ sub getOutfile
     ## Error-check or provide a default suffix ID
     ##
 
-    #If the suffix ID is actually a tagteam ID, change it to whichever has been
-    #supplied (or a default if none were supplied)
-    if(defined($suffix_id) && exists($outfile_tagteams->{$suffix_id}))
-      {$suffix_id = tagteamToSuffixID($suffix_id)}
-
     #If the suffix ID provided does not exist.  Note, this works for both
     #outfile suffix types and outfile types (because it has a hidden suffix ID)
-    if(defined($suffix_id) &&
-       ($suffix_id >= scalar(@$suffix_id_lookup) ||
-	!defined($suffix_id_lookup->[$suffix_id]) ||
-	ref($suffix_id_lookup->[$suffix_id]) ne 'ARRAY' ||
-	scalar(@{$suffix_id_lookup->[$suffix_id]}) != 2))
+    if(defined($sup_suff_opt) &&
+       ($sup_suff_opt > $#{$usage_array} || $sup_suff_opt < 0))
       {
-	error("Invalid suffix ID: [$suffix_id].");
+	error("Invalid suffix ID: [$suff_opt].");
 	return(undef);
       }
     #Else if no ID was provided and there's only one existing suffix ID
-    elsif(!defined($suffix_id) &&
-	  scalar(grep {scalar(@$_)} @$suffix_id_lookup) == 1)
-      {$suffix_id = 0}
+    elsif(!defined($sup_suff_opt) &&
+	  scalar(grep {$_->{OPTTYPE} eq 'suffix'} @$usage_array) == 1)
+      {$sup_suff_opt = (grep {$_->{OPTTYPE} eq 'suffix'} @$usage_array)[0]}
     #Else if no ID was provided and there's only 1 output file type supplied
     #on the command line
-    elsif(!defined($suffix_id) &&
-	  scalar(grep {scalar(@$_) &&
-			 defined($output_file_sets->[$file_set_num]
-				 ->[$_->[0]]->[$_->[1]])}
-		 @$suffix_id_lookup) == 1)
+    elsif(!defined($sup_suff_opt) &&
+	  #Both the suffix is defined and there are files it's appended to or
+	  #the suffix is primary
+	  scalar(grep {$_->{OPTTYPE} eq 'suffix' &&
+			 ((defined(getVarref($_,1)) &&
+			   scalar(@{getVarref($usage_array->[$_->{PAIRID}])}))
+			  || $_->{PRIMARY})}
+		 @$usage_array) == 1)
       {
-	$suffix_id = (grep {scalar(@{$suffix_id_lookup->[$_]}) &&
-			      defined($output_file_sets->[$file_set_num]
-				      ->[$suffix_id_lookup->[$_]->[0]]
-				      ->[$suffix_id_lookup->[$_]->[1]])}
-		      (0..$#{$suffix_id_lookup}))[0];
+
+	$sup_suff_opt = (grep {$_->{OPTTYPE} eq 'suffix' &&
+				 ((defined(getVarref($_,1)) &&
+				   scalar(@{getVarref($usage_array
+						      ->[$_->{PAIRID}])})) ||
+				  $_->{PRIMARY})}
+			 @$usage_array)[0]->{OPTION_ID};
       }
     #Else if no ID was provided and no output files have been supplied (for
     #this set - which implies none specified for *any* set)
-    elsif(!defined($suffix_id) &&
-	  scalar(grep {scalar(@$_) &&
-			 defined($output_file_sets->[$file_set_num]
-				 ->[$_->[0]]->[$_->[1]])}
-		 @$suffix_id_lookup) == 0)
+    elsif(!defined($sup_suff_opt) &&
+	  #Both the suffix is defined and there are files it's appended to or
+	  #the suffix is primary
+	  scalar(grep {$_->{OPTTYPE} eq 'suffix' &&
+			 ((defined(getVarref($_,1)) &&
+			   scalar(@{getVarref($usage_array->[$_->{PAIRID}])}))
+			  || $_->{PRIMARY})}
+		 @$usage_array) == 0)
       {
 	#If all output file types are primary, return '-'
-	if(scalar(@$suffix_id_lookup) ==
-	   scalar(grep {isSuffixPrimary($_->[2])} @$suffix_id_lookup))
+	if(scalar(grep {$_->{OPTTYPE} eq 'suffix'} @$usage_array) ==
+	   scalar(grep {$_->{OPTTYPE} eq 'suffix' &&
+			  $_->{PRIMARY}} @$usage_array))
 	  {return('-')}
 	#Else return undef
 	return(undef);
       }
     #Else if no ID was provided and no output file types have been defined
-    elsif(!defined($suffix_id) &&
-	  scalar(grep {scalar(@$_)} @$suffix_id_lookup) == 0)
+    elsif(!defined($sup_suff_opt) &&
+	  scalar(grep {$_->{OPTTYPE} eq 'suffix'} @$usage_array) == 0)
       {
 	error("No output file (or suffix) options have been added to the ",
 	      "command line interface.");
@@ -4965,116 +7176,44 @@ sub getOutfile
       }
     #Else if no ID was provided and there are multiple outfile types defined
     #and supplied
-    elsif(!defined($suffix_id) &&
-	  scalar(grep {scalar(@$_)} @$suffix_id_lookup) > 1)
+    elsif(!defined($sup_suff_opt) &&
+	  scalar(grep {$_->{OPTTYPE} eq 'suffix'} @$usage_array) > 1)
       {
-	debug({LEVEL => -2},"There are [",
-	      scalar(grep {scalar(@$_)} @$suffix_id_lookup),
-	      "] possible suffixes, for file types [",
-	      join(',',map {$_->[0]} grep {scalar(@$_)} @$suffix_id_lookup),
-	      "] respectively, and each with these suffix indexes: [",
-	      join(',',map {$_->[1]} grep {scalar(@$_)} @$suffix_id_lookup),
-	      "].  There are [",
-	      scalar(@{$output_file_sets->[$file_set_num]}),
-	      "] output file types existing in the output file sets array.  ",
-	      "Each type has this many suffixes: [",
-	      join(',',
-		   map {scalar(@$_)} @{$output_file_sets->[$file_set_num]}),
-	      "].  This many of them have defined outfile names (i.e. were ",
-	      "provided on the command line): [",
-	      scalar(grep {scalar(@$_) &&
-			     defined($output_file_sets->[$file_set_num]
-				     ->[$_->[0]]->[$_->[1]])}
-		     @$suffix_id_lookup),
-	      "].  The outfile names are: [",
-	      join(',',map {$output_file_sets->[$file_set_num]
-			      ->[$_->[0]]->[$_->[1]]}
-		   grep {scalar(@$_) &&
-			   defined($output_file_sets->[$file_set_num]
-				   ->[$_->[0]]->[$_->[1]])}
-		   @$suffix_id_lookup),
-	      "].");
-
-	#If there are only 2 outfile types, at least 1 is a default, and both
-	#types were supplied on the command line
-	if(scalar(grep {scalar(@$_)} @$suffix_id_lookup) == 2 &&
-	   ($default_outfile_suffix_added || $default_outfile_added) &&
-	   scalar(#The suffix is defined
-		  grep {isSuffixDefined($_->[0],$_->[1])}
-
-		  #Convert to an array of file and suff indexes
-		  map {my $fi=$_;map {[$fi,$_]}
-			 (0..$#{$outfile_suffix_array->[$fi]})}
-
-		  #The associated infile array is populated (i.e. -i or
-		  #--outfile because it's saved as an infile and marked in the
-		  #outfile_types_hash)
-		  grep {defined($input_files_array->[$_]) &&
-			  scalar(@{$input_files_array->[$_]})}
-
-		  #Indexes of the outfile suffixes array
-		  0..$#{$outfile_suffix_array}) == 2)
-	  {
-	    error("Outfile tagteam options are mutually exclusive.  Cannot ",
-		  "supply both an outfile suffix [",
-		  getOutfileSuffixFlag($default_outfile_suffix_added ?
-				       $default_outfile_suffix_id :
-				       ($default_outfile_id == 0 ? 1 : 0)),
-		  "] and outfile(s) [",
-		  getOutfileFlag($default_outfile_added ? $default_outfile_id :
-				 ($default_outfile_suffix_id == 0 ? 1 : 0)),
-		  "] at the same time.  Please use one or the other.",
-		  {DETAIL => 'Note: Double-check to make sure one or the ' .
-		   'other does not have a default value specified.'});
-	    return(undef);
-	  }
-	#Else if there are only 2 outfile types and a tagteam exists
-	elsif(scalar(grep {scalar(@$_)} @$suffix_id_lookup) == 2 &&
-	      scalar(keys(%$outfile_tagteams)) == 1)
+	#If there are only 2 outfile types and a tagteam exists
+	if(scalar(grep {$_->{OPTTYPE} eq 'suffix'} @$usage_array) == 2 &&
+	   scalar(keys(%$outfile_tagteams)) == 1)
 	  {
 	    my $ttid = (keys(%$outfile_tagteams))[0];
-	    $suffix_id = tagteamToSuffixID($ttid);
+	    $sup_suff_opt = tagteamToSuffixID($ttid);
 	  }
 	else
 	  {
 	    error("Suffix ID is required when there is more than one output ",
-		  "file type defined & supplied on the command line.",
-		  {DETAIL =>
-		   join('',("E.g. Outfiles can be defined by supplying a ",
-			    "suffix appended to an input file, by file name, ",
-			    "or (in the absence of output flags) by the fact ",
-			    "that an options is 'primary', in which case ",
-			    "output defaults to STDOUT when not defined on ",
-			    "the command line.  There are [",
-			    scalar(grep {scalar(@$_) &&
-					   defined($output_file_sets
-						   ->[$file_set_num]->[$_->[0]]
-						   ->[$_->[1]])}
-				   @$suffix_id_lookup),"] output ",
-			    "file types that have either been defined and ",
-			    "supplied on the command line or which are ",
-			    "primary (and will go to STDOUT when not ",
-			    "supplied on the command line) with values [",
-			    join(',',map {$output_file_sets->[$file_set_num]
-					    ->[$_->[0]]->[$_->[1]]}
-				 grep {scalar(@$_) &&
-					 defined($output_file_sets
-						 ->[$file_set_num]->[$_->[0]]
-						 ->[$_->[1]])}
-				 @$suffix_id_lookup),"]."))});
+		  "file type defined & supplied on the command line.");
 	    return(undef);
 	  }
       }
 
-    if($suffix_id > $#{$suffix_id_lookup})
-      {error("Suffix ID out of bounds.")}
-    debug({LEVEL => -99},
-	  "Suffix ID is [",(defined($suffix_id) ? $suffix_id : 'undef'),"].");
+    debug({LEVEL => -99},"Suffix option ID is [",
+	  (defined($sup_suff_opt) ? $sup_suff_opt : 'undef'),"].");
 
-    my $file_type_index = $suffix_id_lookup->[$suffix_id]->[0];
-    my $suffix_index    = $suffix_id_lookup->[$suffix_id]->[1];
+    my $file_type_opt   = $usage_array->[$sup_suff_opt]->{PAIRID};
+    my $file_type_index = $usage_array->[$file_type_opt]->{FILEID};
+    my $suffix_index    = -1;
+    #We want to reverse engineer the suffix index and we know that the index is
+    #incremented from 0 for each suffix that is linked to the file type that the
+    #suffix we found is linked to, so...
+    #For each suffix linked to the same file type
+    foreach my $uh (grep {$_->{OPTTYPE} eq 'suffix' &&
+			    $_->{PAIRID} == $file_type_opt} @$usage_array)
+      {
+	$suffix_index++;
+	last if($uh->{OPTION_ID} == $sup_suff_opt);
+      }
+    #TODO: We can probably just store this index in the usage array instead of
+    #the suffix ID we had been saving.
 
-    if(fileReturnedBefore($file_type_index,$suffix_index))
+    if(optvalReturnedBefore($sup_suff_opt))
       {
 	if($iterate)
 	  {nextFileCombo()}
@@ -5101,7 +7240,8 @@ sub getOutfile
 		->[$suffix_index]) &&
        scalar(grep {scalar(@$_) &&
 		      defined($_->[$file_type_index]->[$suffix_index])}
-	      @$output_file_sets) == 0 && isSuffixPrimary($suffix_id))
+	      @$output_file_sets) == 0 &&
+       defined($suff_opt) && $usage_array->[$suff_opt]->{PRIMARY})
       {$convert_undefs = '-'}
 
     debug({LEVEL => -99},"Returning outfile for set [$file_set_num], file ",
@@ -5110,6 +7250,8 @@ sub getOutfile
 
     my $outfile = $output_file_sets->[$file_set_num]->[$file_type_index]
       ->[$suffix_index];
+
+    $optval_returned_before->{OUT}->{$file_set_num}->{$sup_suff_opt} = 1;
 
     return($convert_undefs && !defined($outfile) ? $convert_undefs : $outfile);
   }
@@ -5122,8 +7264,8 @@ sub getOutfile
 #supplied on the command line and one has a default value (assuming both can't
 #have a default value - again because of validation elsewhere), the suffix ID
 #of the one with the default is returned.  Note that the suffix stored for the
-#OUTFID key always has a default (an empty string), so only SUFFID will be
-#checked and if it does not have a default, the OUTFID is returned without
+#OTSFOPTID key always has a default (an empty string), so only SUFFOPTID will be
+#checked and if it does not have a default, the OTSFOPTID is returned without
 #checking whether it has a default.
 sub tagteamToSuffixID
   {
@@ -5143,8 +7285,8 @@ sub tagteamToSuffixID
     if(!validateTagteam($ttid)) #Generates errors if invalid
       {return($ttid)}
 
-    if(exists($tagteam_to_supplied_oid->{$ttid}))
-      {return($tagteam_to_supplied_oid->{$ttid})}
+    if(exists($tagteam_to_supplied_optid->{$ttid}))
+      {return($usage_array->[$tagteam_to_supplied_optid->{$ttid}]->{OPTION_ID})}
     else
       {
 	error("Tagteam ID: [$ttid] not found.");
@@ -5154,59 +7296,43 @@ sub tagteamToSuffixID
 
 #Determines if the suffix of a tagteam partner is defined.  Takes a file index
 #and suffix index of the suffix whose partner we want to look up.
-#Globals used: $outfile_suffix_array, $outfile_tagteams, $suffix_id_lookup
+#Globals used: $outfile_tagteams
 sub isTagteamPartnerDefined
   {
-    my $file_index = $_[0];
-    my $suff_index = $_[1];
-    my $suffix_id  = getSuffixID($file_index,$suff_index);
+    my $usg_hash = $_[0];
 
-    #Find the hash containing the suffix ID.  (NOTE: A suffix can only be
-    #involed in one tagteam.)
-    my $tthashes = [grep {$_->{SUFFID} == $suffix_id ||
-			    $_->{OUTFID} == $suffix_id}
-		    values(%$outfile_tagteams)];
-    if(scalar(@$tthashes) == 0)
+    if(!$usg_hash->{TAGTEAM})
       {
 	#Suffix is not in a tagteam.  It doesn't have a partner, so it can't be
 	#defined
 	return(0);
       }
-    elsif(scalar(@$tthashes) > 1)
-      {
-	error("INTERNAL ERROR: Multiple matching tagteams found for suffix ",
-	      "ID: [$suffix_id].");
-	quit(-71);
-      }
-    my $tthash = $tthashes->[0];
-    my $is_partner_outf = ($tthash->{SUFFID} == $suffix_id ? 1 : 0);
+
+    my $tthash = $outfile_tagteams->{$usg_hash->{TAGTEAMID}};
+
     my($partner_defined);
-    my $partner_suffix_id = ($tthash->{SUFFID} == $suffix_id ?
-			     $tthash->{OUTFID} : $tthash->{SUFFID});
-    my $partner_file_index = $suffix_id_lookup->[$partner_suffix_id]->[0];
-    my $partner_suff_index = $suffix_id_lookup->[$partner_suffix_id]->[1];
-    if($is_partner_outf)
+    #If this suffix ID is for the suffix option (vs the outfile option)
+    if($tthash->{SUFFOPTID} == $usg_hash->{OPTION_ID})
       {
-	#Return true if there's anything in this outfile type's input files
-	#array
-	$partner_defined =
-	  scalar(grep {my $a=$_;defined($a) && scalar(grep {defined($_)} @$a)}
-		 @{$input_files_array->[$partner_file_index]});
+	my $ofoptid = $usage_array->[$tthash->{OTSFOPTID}]->{PAIRID};
+	$partner_defined = scalar(@{getVarref($usage_array->[$ofoptid])});
       }
     else
-      {$partner_defined = defined($outfile_suffix_array->[$partner_file_index]
-				  ->[$partner_suff_index])}
-    debug({LEVEL => -1},"Partner is: [",
-	  ($partner_defined ?
-	   $outfile_suffix_array->[$partner_file_index]->[$partner_suff_index]
-	   : 'undef'),"].  Returning [$partner_defined].");
+      {$partner_defined =
+	 defined(getVarref($usage_array->[$tthash->{SUFFOPTID}],1))}
+
+    debug({LEVEL => -1},"Partner of type [",
+	  $usage_array->[$tthash->{SUFFOPTID}]->{OPTTYPE},"] is: [",
+	  ($partner_defined ? 'defined' : 'undefined'),
+	  "].  Returning [$partner_defined].");
+
     return($partner_defined);
   }
 
 #This not only validates tagteams by checking that the supplied ID is present
 #and by making sure the options that were made into a tagteam are compatible
 #(taking default-added options into account), but also populates the
-#tagteam_to_supplied_oid that is used by tagteamToSuffixID
+#tagteam_to_supplied_optid that is used by tagteamToSuffixID
 sub validateTagteam
   {
     #Note: the tagteam ID could be a suffix ID depending on how it was created
@@ -5224,69 +7350,62 @@ sub validateTagteam
       }
 
     #If already validated, return success
-    if(exists($tagteam_to_supplied_oid->{$ttid}))
+    if(exists($tagteam_to_supplied_optid->{$ttid}))
       {return(1)}
 
     #Validate the suffix IDs for this tagteam
-    if(scalar(@$suffix_id_lookup) <= $outfile_tagteams->{$ttid}->{SUFFID})
+    if($outfile_tagteams->{$ttid}->{SUFFOPTID} > $#{$usage_array} ||
+       $usage_array->[$outfile_tagteams->{$ttid}->{SUFFOPTID}]->{OPTTYPE} ne
+       'suffix')
       {
-	error("The suffix ID: [$outfile_tagteams->{$ttid}->{SUFFID}] for ",
-	      "tagteam ID: [$ttid] does not exist in the suffix ID lookup.");
+	error("The suffix option ID: [",$outfile_tagteams->{$ttid}->{SUFFOPTID},
+	      "] for tagteam ID: [$ttid] is invalid.");
 	return(0);
       }
-    elsif(scalar(@$suffix_id_lookup) <= $outfile_tagteams->{$ttid}->{OUTFID})
+    elsif($outfile_tagteams->{$ttid}->{OTSFOPTID} > $#{$usage_array} ||
+	  $usage_array->[$outfile_tagteams->{$ttid}->{OTSFOPTID}]->{OPTTYPE} ne
+	  'suffix' ||
+	  $usage_array->[$usage_array->[$outfile_tagteams->{$ttid}->{OTSFOPTID}]
+			 ->{PAIRID}]->{OPTTYPE} ne 'outfile')
       {
-	error("The outfile ID: [$outfile_tagteams->{$ttid}->{OUTFID}] for ",
-	      "tagteam ID: [$ttid] does not exist in the outfile ID lookup.");
+	error("The outfile suffix option ID: [",
+	      $outfile_tagteams->{$ttid}->{OTSFOPTID},"] for tagteam ID: ",
+	      "[$ttid] is invalid.");
 	return(0);
       }
 
-    #In order to evaluate whether the SUFFID option was supplied a value or has
-    #a default value, we need the 2 indexes into the outfile_suffix_array to
-    #obtain the value to compare to the SUFFDEF key's value in the
-    #outfile_tagteams hash
-    my $suffid_infile_index =
-      $suffix_id_lookup->[$outfile_tagteams->{$ttid}->{SUFFID}]->[0];
-    my $suffid_suffix_index =
-      $suffix_id_lookup->[$outfile_tagteams->{$ttid}->{SUFFID}]->[1];
-    #Same for the OUTFID
-    my $outfid_infile_index =
-      $suffix_id_lookup->[$outfile_tagteams->{$ttid}->{OUTFID}]->[0];
-    my $outfid_suffix_index =
-      $suffix_id_lookup->[$outfile_tagteams->{$ttid}->{OUTFID}]->[1];
+    #Obtain the default for the suffix (unless superceded by a mutually
+    #exclusive default or command line value)
+    my $suff_uhash      = $usage_array->[$outfile_tagteams->{$ttid}
+					 ->{SUFFOPTID}];
+    my $sfin_uhash      = $usage_array->[$suff_uhash->{PAIRID}];
+    my $suff_default    = (!exclusiveOptSupplied($suff_uhash->{OPTION_ID}) &&
+			   defined($suff_uhash->{DEFAULT_USR}) ?
+			   $suff_uhash->{DEFAULT_USR} :
+			   (!exclusiveOptUserDefaulted($suff_uhash) &&
+			    defined($suff_uhash->{DEFAULT_PRG}) ?
+			    $suff_uhash->{DEFAULT_PRG} : undef));
+    my $suff_value      = getVarref($suff_uhash,1);
+    my $is_suff_default = defined($suff_default);
 
-    #Retrieve the default values
-    my $suff_default = $outfile_tagteams->{$ttid}->{SUFFDEF};
-    my $outf_default = []; #A 2D array reference
-    if($outfid_infile_index < scalar(@$default_infiles_array) &&
-       defined($default_infiles_array->[$outfid_infile_index]) &&
-       scalar(@{$default_infiles_array->[$outfid_infile_index]}) &&
-       scalar(grep {defined($_)} map {@$_}
-	      @{$default_infiles_array->[$outfid_infile_index]}))
-      {$outf_default = $default_infiles_array->[$outfid_infile_index]}
-
-    #Retrieve the post-commandline-processed values potentially supplied by the
-    #user
-    my $suff_value =
-      $outfile_suffix_array->[$suffid_infile_index]->[$suffid_suffix_index];
-    my $outf_value = $input_files_array->[$outfid_infile_index];
-
-    my $is_suff_default = (defined($suff_default) &&
-			   $suff_default eq $suff_value);
-    my $is_outf_default =
-      (defined($outf_value) && defined($outf_default) &&
-       scalar(@$outf_value) > 0 &&
-       scalar(@$outf_value) == scalar(@$outf_default) &&
-       scalar(grep {scalar(@{$outf_value->[$_]}) !=
-		      scalar(@{$outf_default->[$_]})}
-	      (0..$#{$outf_value})) == 0 &&
-       scalar(grep {my $i=$_;scalar(grep {$outf_value->[$i]->[$_] ne
-					    $outf_default->[$i]->[$_]}
-				    (0..$#{$outf_value->[$i]}))}
-	      (0..$#{$outf_value})) == 0);
+    #Obtain the default for the outfile (unless superceded by a mutually
+    #exclusive default or command line value)
+    my $otsf_uhash      = $usage_array->[$outfile_tagteams->{$ttid}
+					 ->{OTSFOPTID}];
+    my $outf_uhash      = $usage_array->[$otsf_uhash->{PAIRID}];
+    my $outf_default    = (!exclusiveOptSupplied($outf_uhash->{OPTION_ID}) &&
+			   defined($outf_uhash->{DEFAULT_USR}) &&
+			   scalar(@{$outf_uhash->{DEFAULT_USR}}) ?
+			   $outf_uhash->{DEFAULT_USR} :
+			   (!exclusiveOptUserDefaulted($outf_uhash) &&
+			    defined($outf_uhash->{DEFAULT_PRG}) &&
+			    scalar(@{$outf_uhash->{DEFAULT_PRG}}) ?
+			    $outf_uhash->{DEFAULT_PRG} : []));
+    my $outf_value      = getVarref($outf_uhash,1);
+    my $is_outf_default = scalar(@$outf_default);
 
     debug({LEVEL => -1},"Suffix [",
-	  getOutfileSuffixFlag($outfile_tagteams->{$ttid}->{SUFFID},-1),
+	  getFlag($usage_array->[$outfile_tagteams->{$ttid}->{SUFFOPTID}],-1),
 	  "] default value in the tagteam pair, is [",
 	  (defined($suff_default) ? $suff_default : 'undef'),"].  Suff val: [",
 	  (defined($suff_value) ? $suff_value : 'undef'),"]  Outf val: [",
@@ -5296,58 +7415,28 @@ sub validateTagteam
 
     #If the suffix has a value and it is not a default value and either outf
     #has no value (i.e. is empty) or is the default value
-    if(defined($suff_value) && !$is_suff_default &&
-       (!defined($outf_value) || scalar(@$outf_value) == 0 ||
-	$is_outf_default))
+    if($suff_uhash->{SUPPLIED} && !$outf_uhash->{SUPPLIED})
       {
-	$tagteam_to_supplied_oid->{$ttid} =
-	  $outfile_tagteams->{$ttid}->{SUFFID};
+	$tagteam_to_supplied_optid->{$ttid} = $suff_uhash->{OPTION_ID};
 	return(1);
       }
     #Else if the outfile has a value and it's not a default value and either
     #suff is not defined or is the default
-    elsif(defined($outf_value) && scalar(@$outf_value) && !$is_outf_default &&
-	  (!defined($suff_value) || $is_suff_default))
+    elsif(!$suff_uhash->{SUPPLIED} && $outf_uhash->{SUPPLIED})
       {
-	$tagteam_to_supplied_oid->{$ttid} =
-	  $outfile_tagteams->{$ttid}->{OUTFID};
+	$tagteam_to_supplied_optid->{$ttid} = $otsf_uhash->{OPTION_ID};
 	return(1);
-      }
-    #Else if both were supplied
-    elsif(defined($suff_value) && !$is_suff_default &&
-	  defined($outf_value) && scalar(@$outf_value) && !$is_outf_default)
-      {
-	error("Outfile tagteam options are mutually exclusive.  Cannot ",
-	      "supply both an outfile suffix [",
-	      getOutfileSuffixFlag($outfile_tagteams->{$ttid}->{SUFFID}),
-	      "] and outfiles [",getOutfileFlag($outfid_infile_index),
-	      "] at the same time.  ",
-	      "Use --force to surpass this fatal error and arbitrarily use [",
-	      ($outfile_tagteams->{$ttid}->{SUFFID} <
-	       $outfile_tagteams->{$ttid}->{OUTFID} ?
-	       getOutfileSuffixFlag($outfile_tagteams->{$ttid}->{SUFFID}) :
-	       getOutfileFlag($suffid_infile_index)),
-	      "], ignoring the other option.");
-	quit(-67);
-	$tagteam_to_supplied_oid->{$ttid} =
-	  ($outfile_tagteams->{$ttid}->{SUFFID} <
-	   $outfile_tagteams->{$ttid}->{OUTFID} ?
-	   $outfile_tagteams->{$ttid}->{SUFFID} :
-	   $outfile_tagteams->{$ttid}->{OUTFID});
-	return(0);
       }
     #Else if only the suffix has a defined default value
     elsif($is_suff_default && !$is_outf_default)
       {
-	$tagteam_to_supplied_oid->{$ttid} =
-	  $outfile_tagteams->{$ttid}->{SUFFID};
+	$tagteam_to_supplied_optid->{$ttid} = $suff_uhash->{OPTION_ID};
 	return(1);
       }
     #Else if only the outfile has a defined default value
     elsif($is_outf_default && !$is_suff_default)
       {
-	$tagteam_to_supplied_oid->{$ttid} =
-	  $outfile_tagteams->{$ttid}->{OUTFID};
+	$tagteam_to_supplied_optid->{$ttid} = $otsf_uhash->{OPTION_ID};
 	return(1);
       }
     #Else if both have default values
@@ -5355,26 +7444,23 @@ sub validateTagteam
       {
 	error("Outfile tagteam options are mutually exclusive.  Cannot have ",
 	      "default values for both an outfile suffix [",
-	      getOutfileSuffixFlag($outfile_tagteams->{$ttid}->{SUFFID}),
+	      getFlag($usage_array->[$outfile_tagteams->{$ttid}->{SUFFOPTID}]),
 	      "] (default: [",
 	      (defined($suff_default) ? $suff_default : 'undef'),
-	      "]) and an outfile [",getOutfileFlag($outfid_infile_index),
+	      "]) and an outfile [",getFlag($outf_uhash),
 	      "] (default: [(",join('),(',map {join(',',@$_)} @$outf_default),
 	      ")]) at the same time.  ",
 	      "Use --force to surpass this fatal error and arbitrarily use [",
-	      ($outfile_tagteams->{$ttid}->{SUFFID} <
-	       $outfile_tagteams->{$ttid}->{OUTFID} ?
-	       getOutfileSuffixFlag($outfile_tagteams->{$ttid}->{SUFFID}) :
-	       getOutfileFlag($suffid_infile_index)),
+	      ($suff_uhash->{OPTION_ID} < $otsf_uhash->{OPTION_ID} ?
+	       getFlag($suff_uhash) : getFlag($otsf_uhash)),
 	      "], ignoring the other option.");
-	quit(-90);
-	$tagteam_to_supplied_oid->{$ttid} =
-	  ($outfile_tagteams->{$ttid}->{SUFFID} <
-	   $outfile_tagteams->{$ttid}->{OUTFID} ?
-	   $outfile_tagteams->{$ttid}->{SUFFID} :
-	   $outfile_tagteams->{$ttid}->{OUTFID});
+	quit(-40);
+	$tagteam_to_supplied_optid->{$ttid} =
+	  ($suff_uhash->{OPTION_ID} < $otsf_uhash->{OPTION_ID} ?
+	   $suff_uhash->{OPTION_ID} : $otsf_uhash->{OPTION_ID});
 	return(0);
       }
+    #Note: a check of *supplying* mutually exclusive opts is done elsewhere
 
     ##
     ## At this point, neither was supplied and neither have default values...
@@ -5382,131 +7468,25 @@ sub validateTagteam
 
     #Else if only the suffix was default added
     elsif($default_outfile_suffix_added && !$default_outfile_added)
-      {$tagteam_to_supplied_oid->{$ttid} =
-	 $outfile_tagteams->{$ttid}->{OUTFID}}
+      {$tagteam_to_supplied_optid->{$ttid} = $otsf_uhash->{OPTION_ID}}
     #Else if the outfile only was default added
     elsif($default_outfile_added && !$default_outfile_suffix_added)
-      {$tagteam_to_supplied_oid->{$ttid} =
-	 $outfile_tagteams->{$ttid}->{SUFFID}}
+      {$tagteam_to_supplied_optid->{$ttid} = $suff_uhash->{OPTION_ID}}
     #Else both or neither were default added - return the lesser ID
     else
-      {$tagteam_to_supplied_oid->{$ttid} =
-	 ($outfile_tagteams->{$ttid}->{SUFFID} <
-	  $outfile_tagteams->{$ttid}->{OUTFID} ?
-	  $outfile_tagteams->{$ttid}->{SUFFID} :
-	  $outfile_tagteams->{$ttid}->{OUTFID})}
+      {$tagteam_to_supplied_optid->{$ttid} =
+	 ($suff_uhash->{OPTION_ID} < $otsf_uhash->{OPTION_ID} ?
+	  $suff_uhash->{OPTION_ID} : $otsf_uhash->{OPTION_ID})}
 
     return(1);
   }
 
-#Returns any required tagteam deficiencies, but also quits if 2 mutually
-#exclusive tagteam options are supplied.
-sub getMissingConflictingTagteamFlags
-  {
-    my $missing_flag_combos = [];
-    my $conflicting_flags = [];
-
-    #For every required tagteam
-    foreach my $ttid (keys(%$outfile_tagteams))
-      {
-	my $outfile_id = $outfile_tagteams->{$ttid}->{OUTFID};
-	my $outfile_index =
-	  $suffix_id_lookup->[$outfile_tagteams->{$ttid}->{OUTFID}]->[0];
-	my $suffix_id  = $outfile_tagteams->{$ttid}->{SUFFID};
-	my $infile_index =
-	  $suffix_id_lookup->[$outfile_tagteams->{$ttid}->{SUFFID}]->[0];
-	my $suffix_index =
-	  $suffix_id_lookup->[$outfile_tagteams->{$ttid}->{SUFFID}]->[1];
-	my $oflag = getOutfileFlag($outfile_index);
-	my $sflag = getOutfileSuffixFlag($suffix_id);
-
-	#Determine whether the the value of the outfiles is the default or was
-	#supplied by the user
-	##TODO: This is similar to #281, but here, the values from the
-	#command line have already been read in and the default values assigned
-	#to the array.  So here, the fact that an outfile has been supplied or
-	#not has been lost.  What should really happen is that whether a value
-	#has been supplied on the command line or not should be saved.  I
-	#should really be creating option IDs and storing stuff like this in an
-	#option structure (an expansion of the usage_array, really).  See
-	#requirement #288.
-	my $outf_default = []; #A 2D array reference
-	if($outfile_index < scalar(@$default_infiles_array) &&
-	   defined($default_infiles_array->[$outfile_index]) &&
-	   scalar(@{$default_infiles_array->[$outfile_index]}) &&
-	   scalar(grep {defined($_)} map {@$_}
-		  @{$default_infiles_array->[$outfile_index]}))
-	  {$outf_default = $default_infiles_array->[$outfile_index]}
-	my $outf_value = $input_files_array->[$outfile_index];
-	my $is_outf_default =
-	  (defined($outf_value) && defined($outf_default) &&
-	   scalar(@$outf_value) > 0 &&
-	   scalar(@$outf_value) == scalar(@$outf_default) &&
-	   scalar(grep {scalar(@{$outf_value->[$_]}) !=
-			  scalar(@{$outf_default->[$_]})}
-		  (0..$#{$outf_value})) == 0 &&
-	   scalar(grep {my $i=$_;scalar(grep {$outf_value->[$i]->[$_] ne
-						$outf_default->[$i]->[$_]}
-					(0..$#{$outf_value->[$i]}))}
-		  (0..$#{$outf_value})) == 0);
-	my $outfile_supplied = (defined($outf_value) &&
-				scalar(@$outf_value) > 0 &&
-				!$is_outf_default ? 1 : 0);
-	my $outfile_hasdef = defined($outf_default) && scalar(@$outf_default);
-
-	#The outer and inner arrays are guaranteed/assumed to be there
-	my $suffix_supplied = (defined($outfile_suffix_array->[$infile_index]
-				       ->[$suffix_index]) &&
-			       (!defined($outfile_tagteams->{$ttid}
-					 ->{SUFFDEF}) ||
-				(defined($outfile_tagteams->{$ttid}
-					 ->{SUFFDEF}) &&
-				 $outfile_suffix_array->[$infile_index]
-				 ->[$suffix_index] ne
-				 $outfile_tagteams->{$ttid}->{SUFFDEF}))) ?
-				   1 : 0;
-	my $suffix_hasdef =
-	  defined($outfile_tagteams->{$ttid}->{SUFFDEF}) ? 1 : 0;
-
-	debug({LEVEL => -2},"TTID: [$ttid] Required?: ",
-	      "[$outfile_tagteams->{$ttid}->{REQUIRED}] Outfile has ",
-	      "default?: [$outfile_hasdef] Supplied?: [$outfile_supplied] ",
-	      "Suffix has default?: [$suffix_hasdef] Supplied?: ",
-	      "[$suffix_supplied]");
-
-	if($outfile_tagteams->{$ttid}->{REQUIRED} &&
-	   !$outfile_tagteams->{$ttid}->{PRIMARY} &&
-	   !$outfile_supplied && !$suffix_supplied && !$suffix_hasdef &&
-	   !$outfile_hasdef
-	   #TODO: Do a version of this if/when requirement 11b is implemented
-	   #&& ($req_type != $primary_outfile_type ||
-	   #    isStandardOutputToTerminal())
-	  )
-	  {push(@$missing_flag_combos,
-		(defined($oflag) && $oflag ne '' &&
-		 defined($sflag) && $sflag ne '' ?
-		 "[$oflag] or [$sflag]" : 'internal error'))}
-	elsif($outfile_supplied && $suffix_supplied)
-	  {push(@$conflicting_flags,
-		(defined($oflag) && $oflag ne '' &&
-		 defined($sflag) && $sflag ne '' ?
-		 "[$sflag] (" .
-		 "$outfile_suffix_array->[$infile_index]->[$suffix_index]) " .
-		 "and [$oflag] ('" .
-		 substr(join("' $oflag '",
-			     map {join(' ',@$_)}
-			     @{$input_files_array->[$outfile_index]}),0,20) .
-		 "...')" :
-		 'internal error'))}
-      }
-
-    return($missing_flag_combos,$conflicting_flags);
-  }
-
 sub nextFileCombo
   {
-    unless($processCommandLine_called)
+    unless($command_line_stage)
       {processCommandLine()}
+
+    my $extended = getVarref('extended',1,1);
 
     if($auto_file_iterate)
       {
@@ -5524,7 +7504,7 @@ sub nextFileCombo
 			("Input and/or output files may have been skipped.  " .
 			 "Please use nextFileCombo to iterate over all sets " .
 			 "of files provided on the command that are " .
-			 "processed together.  Do not call openOut,  openIn " .
+			 "processed together.  Do not call openOut, openIn, " .
 			 "getInfile, or getOutfile before the first call to " .
 			 "nextFileCombo.") :
 			"Run with --extended for more detail."))}
@@ -5542,7 +7522,7 @@ sub nextFileCombo
 	if(!defined($max_set_num))
 	  {$max_set_num = 0}
       }
-    elsif($file_set_num < scalar(@$input_file_sets) - 1)
+    elsif($file_set_num < $#{$input_file_sets})
       {
 	$file_set_num++;
 	if($max_set_num < $file_set_num)
@@ -5550,9 +7530,9 @@ sub nextFileCombo
       }
     else
       {
-	$file_set_num         = undef;
-	$file_returned_before = {};
-	$auto_file_iterate    = 1;
+	$file_set_num           = undef;
+	$optval_returned_before = {};
+	$auto_file_iterate      = 1;
       }
 
     debug({LEVEL=>-1},"Returning file set num: [",
@@ -5562,10 +7542,9 @@ sub nextFileCombo
     return(defined($file_set_num) ? $file_set_num + 1 : $file_set_num);
   }
 
-sub fileReturnedBefore
+sub optvalReturnedBefore
   {
-    my $file_type_index = $_[0];
-    my $suffix_index    = $_[1]; #Supply this for outfiles but not for infiles
+    my $optid = $_[0];
 
     if(!defined($file_set_num))
       {
@@ -5574,37 +7553,17 @@ sub fileReturnedBefore
 	  {$max_set_num = 0}
       }
 
-    #If this is an output file
-    if(defined($suffix_index))
-      {
-	if(exists($file_returned_before->{OUT}->{$file_set_num}) &&
-	   exists($file_returned_before->{OUT}->{$file_set_num}
-		  ->{$file_type_index}) &&
-	   exists($file_returned_before->{OUT}->{$file_set_num}
-		  ->{$file_type_index}->{$suffix_index}) &&
-	   $file_returned_before->{OUT}->{$file_set_num}->{$file_type_index}
-	   ->{$suffix_index})
-	  {return(1)}
-	else
-	  {
-	    $file_returned_before->{OUT}->{$file_set_num}->{$file_type_index}
-	      ->{$suffix_index} = 1;
-	    return(0);
-	  }
-      }
-    elsif(!defined($file_type_index))
+    if(!defined($optid))
       {return(0)}
     else
       {
-	if(exists($file_returned_before->{IN}->{$file_set_num}) &&
-	   exists($file_returned_before->{IN}->{$file_set_num}
-		  ->{$file_type_index}) &&
-	   $file_returned_before->{IN}->{$file_set_num}->{$file_type_index})
+	if(exists($optval_returned_before->{IN}->{$file_set_num}) &&
+	   exists($optval_returned_before->{IN}->{$file_set_num}->{$optid}) &&
+	   $optval_returned_before->{IN}->{$file_set_num}->{$optid})
 	  {return(1)}
 	else
 	  {
-	    $file_returned_before->{IN}->{$file_set_num}->{$file_type_index} =
-	      1;
+	    $optval_returned_before->{IN}->{$file_set_num}->{$optid} = 1;
 	    return(0);
 	  }
       }
@@ -5612,71 +7571,67 @@ sub fileReturnedBefore
 
 sub addDefaultFileOptions
   {
-    #If the programmer did not add any input file types, add a default
-    if(scalar(grep {!exists($outfile_types_hash->{$_})}
-	      (0..$#{$input_files_array})) == 0)
-      {addInfileOption()}
+    my $success = 1;
 
-    my $def_prim_inf_type = getDefaultPrimaryInfileID();
+    #If the programmer did not add any input file types, add a default
+    if(getNumInfileTypes() == 0)
+      {
+        my $iid = addInfileOption();
+        if(!defined($iid))
+          {$success = 0}
+      }
+
+    my $def_prim_inf_optid = getDefaultPrimaryInfileID();
 
     #If the programmer did not assign a primary input file type and the number
     #of explicitly non-primary infile types is not all of the infile types,
     #pick a default
-    if(!defined($primary_infile_type) && defined($def_prim_inf_type))
+    if(!defined($primary_infile_optid) && defined($def_prim_inf_optid))
       {
 	#We will mark this as the primary infile ID even if the programmer may
-	#have explicitly said that it's not to be primary, just to we can do
+	#have explicitly said that it's not to be primary, just so we can do
 	#default linking of outfile types.
-	$primary_infile_type = $def_prim_inf_type;
+	$primary_infile_optid = $def_prim_inf_optid;
+
+	if(!defined($usage_array->[$def_prim_inf_optid]))
+	  {error("The default primary infile type: [$def_prim_inf_optid] is ",
+		 "not defined in the usage array.")}
 
 	#If the non-primary status was not set explicitly to 0
-	if($usage_array->[$usage_file_indexes->[$def_prim_inf_type]]->{PRIMARY}
-	   ne '0')
+	if($usage_array->[$def_prim_inf_optid]->{PRIMARY} ne '0')
 	  {
-	    $usage_array->[$usage_file_indexes->[$def_prim_inf_type]]
-	      ->{PRIMARY} = 1;
-	    if(!defined($usage_array
-			->[$usage_file_indexes->[$def_prim_inf_type]]
-			->{DEFAULT}))
-	      {$usage_array->[$usage_file_indexes->[$def_prim_inf_type]]
-		 ->{DEFAULT} = ''}
-	    elsif($usage_array->[$usage_file_indexes->[$def_prim_inf_type]]
-		  ->{DEFAULT} eq '')
-	      {$usage_array->[$usage_file_indexes->[$def_prim_inf_type]]
-		 ->{DEFAULT} = "''"}
+	    $usage_array->[$def_prim_inf_optid]->{PRIMARY} = 1;
+	    if(defined($usage_array->[$def_prim_inf_optid]->{DISPDEF}) &&
+	       $usage_array->[$def_prim_inf_optid]->{DISPDEF} eq '')
+	      {$usage_array->[$def_prim_inf_optid]->{DISPDEF} = "''"}
 	  }
       }
 
     #If there was an error during setup (implied by cleanup_mode > 1) and there
     #is no usage entry for the primary infile type, skip all this and return
-    if($cleanup_mode > 1 && $primary_infile_type > $#{$usage_file_indexes})
+    if($cleanup_mode > 1 && $primary_infile_optid > $#{$usage_array})
       {return(0)}
 
     #If the programmer did not assign any multi-value option as 'flagless', set
     #the primary input file as flagless (if it is defined and not explicitly
     #set to not be flagless)
-    if((!defined($flagless_multival_type) || $flagless_multival_type < 0) &&
-       defined($primary_infile_type) &&
-       ((defined($usage_array->[$usage_file_indexes->[$primary_infile_type]]
-		 ->{FLAGLESS}) &&
-	 $usage_array->[$usage_file_indexes->[$primary_infile_type]]
-	 ->{FLAGLESS}) ||
-	!defined($usage_array->[$usage_file_indexes->[$primary_infile_type]]
-		 ->{FLAGLESS})))
+    if((!defined($flagless_multival_optid) || $flagless_multival_optid < 0) &&
+       defined($primary_infile_optid) &&
+       ((defined($usage_array->[$primary_infile_optid]->{FLAGLESS}) &&
+	 $usage_array->[$primary_infile_optid]->{FLAGLESS}) ||
+	!defined($usage_array->[$primary_infile_optid]->{FLAGLESS})))
       {
 	#Keep track globally of which option is the multi-value flagless one
-	$flagless_multival_type = $usage_file_indexes->[$primary_infile_type];
+	$flagless_multival_optid = $primary_infile_optid;
 
-	my $getoptsub =
-	  'sub {checkFileOpt($_[0],1);push(@{$input_files_array->[' .
-	    $primary_infile_type . ']},[sglob($_[0])])}';
-	$GetOptHash->{'<>'} = eval($getoptsub);
+	my $name = $usage_array->[$primary_infile_optid]->{USAGE_NAME};
+	$GetOptHash->{'<>'} = getGetoptSub($name,1);
 
-	$usage_array->[$usage_file_indexes->[$primary_infile_type]]
-	  ->{FLAGLESS} = 1;
+	$usage_array->[$primary_infile_optid]->{FLAGLESS} = 1;
       }
 
-    my $num_outfile_types = scalar(keys(%$outfile_types_hash));
+    my $num_outfile_types =
+      scalar(grep {$_->{OPTTYPE} eq 'outfile'} @$usage_array);
     my $num_suffix_types  = getNumSuffixTypes();
 
     #Add a default outfile suffix type if none was added and either no outfile
@@ -5684,7 +7639,13 @@ sub addDefaultFileOptions
     #than a 1:M relationship
     my $add_outf_suff =
       ($num_suffix_types == 0 &&
-       ($num_outfile_types == 0 || !isDefaultPrimaryOut1toMorUnrelated()));
+       ($num_outfile_types == 0 || (doesPrimaryOutOptExist(0) &&
+                                    !isDefaultPrimaryOut1toMorUnrelated())));
+    #Add a default outfile type if none was added and no primary suffix types
+    #were added
+    my $add_outf =
+      ($num_outfile_types == 0 &&
+       ($num_suffix_types == 0 || doesPrimaryOutOptExist(1)));
 
     #If the programmer did not add an outfile suffix option and one is
     #appropriate
@@ -5708,110 +7669,128 @@ sub addDefaultFileOptions
 	     "] 1:M relationships or no relationship defined with input ",
 	     "files.")}
 
-    #If the programmer did not add an outfile option
-    if($num_outfile_types == 0)
-      {addOutfileOption()}
+    #If the programmer did not add an outfile option, add one for standard out
+    if($add_outf)
+      {
+	debug({LEVEL => -1},"Adding default outfile option because the number ",
+	      "of outile types added [$num_outfile_types] == 0 and (the ",
+	      "number of suffix types [$num_suffix_types] == 0 or none of the ",
+	      "existing suffix types were primary.");
+	addOutfileOption();
+      }
+    else
+      {debug({LEVEL => -1},"Not adding default outfile option because the ",
+             "number of outile types added [$num_outfile_types] != 0 or (the ",
+             "number of suffix types [$num_suffix_types] != 0 and at least ",
+             "one of the existing suffix types is primary.")}
 
     #If one of the default outfile types was added, create a tagteam with it
     #and the first primary outfile/suffix type
     if($default_outfile_added || $default_outfile_suffix_added)
       {
-	my $def_outf_suff_id = '';
-	if($default_outfile_added)
-	  {$def_outf_suff_id = (getSuffixIDs($default_outfile_id))[0]}
 	if($default_outfile_added && $default_outfile_suffix_added)
 	  {
 	    if(!$default_tagteam_added)
-	      {createSuffixOutfileTagteam($default_outfile_suffix_id,
-					  $def_outf_suff_id)}
+	      {
+                my $ttid = createSuffixOutfileTagteam($default_suffix_optid,
+                                                      $default_outfile_optid);
+                if(!defined($ttid))
+                  {$success = 0}
+              }
 	  }
 	elsif($default_outfile_suffix_added)
 	  {
+	    my $def_suff_usg_hash  = $usage_array->[$default_suffix_optid];
 	    my $prim_outf_usg_hash = getDefaultPrimaryOutUsageHash(0);
-	    debug({LEVEL => -1},"The first primary out usage hash has [",
-		  scalar(keys(%$prim_outf_usg_hash)),"] keys,",
-		  (exists($prim_outf_usg_hash->{FILEID}) ? '' : ' but not'),
-		  " including FILEID.  The hash is: [\n",
-		  join("\n",map {"$_\t" .
-				   (defined($prim_outf_usg_hash->{$_}) ?
-				    $prim_outf_usg_hash->{$_} : 'undef')}
-		       keys(%$prim_outf_usg_hash)),"\n].");
-
-	    my $outf_linked_inf_id =
-	      (map {$_->[1]} grep {$prim_outf_usg_hash->{FILEID} == $_->[0]}
-	       @$required_relationships)[0];
-	    my $suff_linked_inf_id =
-	      $suffix_id_lookup->[$default_outfile_suffix_id]->[0];
 
 	    #If both outfile types are linked to the same input file type, go
 	    #ahead and create the tagteam, otherwise, skip it.  Note: Defined
 	    #state is checked because an outfile type can be created without
 	    #linking it to an input file.
-	    if(defined($outf_linked_inf_id) &&
-	       $outf_linked_inf_id == $suff_linked_inf_id)
+	    if(defined($prim_outf_usg_hash->{PAIRID}) &&
+	       $prim_outf_usg_hash->{PAIRID} == $def_suff_usg_hash->{PAIRID})
 	      {
-		my $outf_ids = getSuffixIDs($prim_outf_usg_hash->{FILEID});
-		my $outf_id = $outf_ids->[0];
-		if(scalar(@$outf_ids) > 1)
-		  {warning("Unexpected number of suffix IDs associated with ",
-			   "outfile type: [$prim_outf_usg_hash->{FILEID}].")}
-		createSuffixOutfileTagteam($default_outfile_suffix_id,
-					   $outf_id);
-	      }
+                my $ttid = createSuffixOutfileTagteam($default_suffix_optid,
+                                                      $prim_outf_usg_hash
+                                                      ->{OPTION_ID});
+                if(!defined($ttid))
+                  {$success = 0}
+              }
 	    else
 	      {debug({LEVEL => -1},"Skipping tagteam creation because each ",
-		     "outfile type is linked to different infiles.")}
+		     "outfile type is linked to different infiles: outfile's ",
+                     "infile ID: [$prim_outf_usg_hash->{PAIRID}] versus ",
+                     "suffix's infile ID: [$def_suff_usg_hash->{PAIRID}].")}
 	  }
 	elsif($default_outfile_added)
 	  {
-	    my $prim_suff_usg_hash = getDefaultPrimaryOutUsageHash(1);
-	    my $outf_linked_inf_id =
-	      (map {$_->[1]}
-	       grep {$suffix_id_lookup->[$def_outf_suff_id]->[0] == $_->[0]}
-	       @$required_relationships)[0];
-	    my $suff_linked_inf_id =
-	      $suffix_id_lookup->[$prim_suff_usg_hash->{FILEID}]->[0];
+	    my $prim_suff_optid = getDefaultPrimaryOutOptID(1);
 
-	    #If both outfile types are linked to the same input file type, go
-	    #ahead and create the tagteam, otherwise, skip it.
-	    if($outf_linked_inf_id == $suff_linked_inf_id)
-	      {createSuffixOutfileTagteam($prim_suff_usg_hash->{FILEID},
-					  $def_outf_suff_id)}
+            #If there aren't any primary out options (i.e. options that weren't
+            #explicitly set as non-primary).
+            if(defined($prim_suff_optid))
+              {
+                my $prim_suff_usg_hash = $usage_array->[$prim_suff_optid];
+                my $def_outf_usg_hash  = $usage_array->[$default_outfile_optid];
+
+                ##TODO: Note that I will have to make sure that I am comparing
+                ##      infile option types once options can be paired to
+                ##      something other than infile types.  See REQ #341.
+
+                #If both outfile types are linked to the same input file type,
+                #go ahead and create the tagteam, otherwise, skip it.
+                if(defined($prim_suff_usg_hash) &&
+                   scalar(keys(%$prim_suff_usg_hash)) &&
+                   $prim_suff_usg_hash->{PAIRID} ==
+                   $def_outf_usg_hash->{PAIRID})
+                  {
+                    my $ttid =
+                      createSuffixOutfileTagteam($prim_suff_optid,
+                                                 $default_outfile_optid);
+                    if(!defined($ttid))
+                      {$success = 0}
+                  }
+              }
 	  }
       }
 
     #If the programmer did not add an outdir option, add a default
     if(!$outdirs_added)
       {
-	addOutdirOption();
+	my $od_optid = addOutdirOption();
 
-	my $od_usg_hash = getOutdirUsageHash();
-
-	#Append notes to detail_descs of default-added outfile types and
-	#outfile suffix types (if the outdir type created above is not hidden)
-	#to indicate that they will deposit their files in the supplied outdir
-
-	if(!$od_usg_hash->{HIDDEN})
+	#If there was a problem adding the outdir, $od_optid will be undefined
+	if(defined($od_optid))
 	  {
-	    if($default_outfile_suffix_added)
-	      {
-		my $suf_usg_hash =
-		  getOutfileUsageHash($default_outfile_suffix_id);
-		$suf_usg_hash->{DETAILS} .= "  Does not replace extensions.  " .
-		  "Output files are placed in the same directory as each " .
-		    "input file (unless [" . getOutdirFlag() . "] is " .
-		      "supplied).  Will not overwrite without --overwrite.";
-	      }
+	    my $od_usg_hash = $usage_array->[$od_optid];
 
-	    if($default_outfile_added)
+	    #Append notes to detail_descs of default-added outfile types and
+	    #outfile suffix types (if the outdir type created above is not
+	    #hidden) to indicate that they will deposit their files in the
+	    #supplied outdir
+
+	    if(!$od_usg_hash->{HIDDEN})
 	      {
-		#This assumes there's only 1 (hidden) suffix when the type is
-		#outfile
-		my $of_usg_hash =
-		  getOutfileUsageHash((getSuffixIDs($default_outfile_id))[0]);
-		$of_usg_hash->{DETAILS} .= "  Output files are placed in " .
-		  "the current directory (unless [" . getOutdirFlag() .
-		    "] is supplied).  Will not overwrite without --overwrite.";
+		if($default_outfile_suffix_added)
+		  {
+		    my $suf_usg_hash = $usage_array->[$default_suffix_optid];
+		    $suf_usg_hash->{DETAILS} .= "  Does not replace " .
+		      "extensions.  Output files are placed in the same " .
+			"directory as each input file (unless [" .
+			  getOutdirFlag() . "] is supplied).  Will not " .
+			    "overwrite without --overwrite.";
+		  }
+
+		if($default_outfile_added)
+		  {
+		    #This assumes there's only 1 (hidden) suffix when the type
+		    #is outfile
+		    my $of_usg_hash = $usage_array->[$default_outfile_optid];
+		    $of_usg_hash->{DETAILS} .= "  Output files are placed in " .
+		      "the current directory (unless [" . getOutdirFlag() .
+			"] is supplied).  Will not overwrite without " .
+			  "--overwrite.";
+		  }
 	      }
 	  }
       }
@@ -5820,95 +7799,156 @@ sub addDefaultFileOptions
 	my $od_usg_hash = getOutdirUsageHash();
 
 	#Tell user where output will go if hidden and there's a default
-	if($od_usg_hash->{HIDDEN} && defined($od_usg_hash->{DEFAULT}) &&
-	   $od_usg_hash->{DEFAULT} ne '')
+	if($od_usg_hash->{HIDDEN} && defined($od_usg_hash->{DISPDEF}) &&
+	   $od_usg_hash->{DISPDEF} ne '')
 	  {
 	    if($default_outfile_suffix_added)
 	      {
-		my $suf_usg_hash =
-		  getOutfileUsageHash($default_outfile_suffix_id);
+		my $suf_usg_hash = $usage_array->[$default_suffix_optid];
 		$suf_usg_hash->{DETAILS} .= "\n\nOutput files will be " .
-		  "placed in [$od_usg_hash->{DEFAULT}].";
+		  "placed in [$od_usg_hash->{DISPDEF}].";
 	      }
 
 	    if($default_outfile_added)
 	      {
 		#This assumes there's only 1 (hidden) suffix when the type is
 		#outfile
-		my $of_usg_hash =
-		  getOutfileUsageHash((getSuffixIDs($default_outfile_id))[0]);
+		my $of_usg_hash = $usage_array->[$default_outfile_optid];
 		$of_usg_hash->{DETAILS} .= "\n\nOutput files will be placed " .
-		  "in [$od_usg_hash->{DEFAULT}].  Output file paths are not " .
+		  "in [$od_usg_hash->{DISPDEF}].  Output file paths are not " .
 		    "allowed unless the default output directory is removed.";
 	      }
 	  }
       }
+
+    if(!$logfile_added && (!$logfile_suffix_added ||
+                           !exists($exclusive_lookup->{$logfile_suffix_optid})))
+      {
+	addLogfileOption();
+	$logfile_default_added = 1;
+      }
+
+    if($logfile_added && $logfile_suffix_added)
+      {if(!createSuffixLogfileTagteam($logfile_optid,$logfile_suffix_optid))
+         {$success = 0}}
+
+    return($success);
+  }
+
+sub createSuffixLogfileTagteam
+  {
+    my $file_optid = $_[0];
+    my $suff_optid = $_[1];
+
+    my $of_usage = $usage_array->[$file_optid];
+    my $sf_usage = $usage_array->[$suff_optid];
+
+    my $required = $of_usage->{REQUIRED} || $sf_usage->{REQUIRED} ? 1 : 0;
+
+    #Check whether any options are hidden
+    my $hidden = $of_usage->{HIDDEN} + $sf_usage->{HIDDEN};
+    if($required && !hasDefault($of_usage) && !hasDefault($sf_usage) &&
+       $hidden == 2)
+      {
+	warning('Cannot hide both [',getBestFlag($sf_usage),'] and [',
+		getBestFlag($of_usage),'] when required and no default ',
+                'provided.  Unhiding.');
+	$of_usage->{HIDDEN} = 0;
+	$sf_usage->{HIDDEN} = 0;
+      }
+
+    my $mutex_success =
+      makeMutuallyExclusive(OPTIONIDS   => [$file_optid,$suff_optid],
+			    REQUIRED    => $required,
+			    OVERRIDABLE => 1,
+                            NAME        => 'logfile tagteam');
+
+    if(!defined($mutex_success))
+      {return(0)}
+
+    return(1);
   }
 
 #Returns true if the first (primary/required/unhidden) outfile type is 1:M or
-#is not linked/related to an input file
+#is not linked/related to an input file.  The purpose of this sub is to help
+#decide whether to add the default outfile suffix, which is only added (among
+#other requirements) when the "first"/primary outfile type the programmer
+#manually added is NOT in a 1:M relationship with an infile or if the programmer
+#has not added a relationship type (e.g. 1:1orM, 1:1, etc)
 sub isDefaultPrimaryOut1toMorUnrelated
   {
-    my $prim_suff_usg_hash = getDefaultPrimaryOutUsageHash(0);
+    my $prim_outf_usg_hash = getDefaultPrimaryOutUsageHash(0);
 
-    #If there was no hash returned, return false
-    if(scalar(keys(%$prim_suff_usg_hash)) == 0)
-      {
-	debug({LEVEL => -1},"No outfile types defined.");
-	return(0);
-      }
+    if(scalar(keys(%$prim_outf_usg_hash)) &&
+       ($prim_outf_usg_hash->{RELATION} eq '1:M' ||
+	$prim_outf_usg_hash->{RELATION} eq '1'   ||
+	$prim_outf_usg_hash->{RELATION} eq ''))
+      {return(1)}
 
-    my($file_index,$suffix_index);
-    if($prim_suff_usg_hash->{OPTTYPE} eq 'suffix')
-      {
-	($file_index,$suffix_index) =
-	  @{$suffix_id_lookup->[$prim_suff_usg_hash->{FILEID}]};
-      }
-    else
-      {
-	$file_index   = $prim_suff_usg_hash->{FILEID};
-	$suffix_index = 0;
-      }
+    if(scalar(keys(%$prim_outf_usg_hash)) == 0)
+      {debug({LEVEL => -1},"No primary outfile types defined.")}
 
-    my $relats = [map {$_->[2]}
-		  grep {$file_index == $_->[0]}
-		  @$required_relationships];
-    my $relat = (scalar(@$relats) ? $relats->[0] : '');
+    return(0);
+  }
 
-    debug({LEVEL => -1},"Relationship of primary out type [$file_index]: ",
-	  "[$relat].");
+#Globals used: $usage_array
+sub getDefaultPrimaryOutUsageHash
+  {
+    my $get_suffix = $_[0]; #Whether or not to retrieve suffix type (otherwise,
+                            #get an outfile type)
+    my $usage_index = getDefaultPrimaryOutOptID($get_suffix);
+    if(defined($usage_index))
+      {return($usage_array->[$usage_index])}
 
-    if($relat eq '1:M' || $relat eq '1' || $relat eq '')
+    return({});
+  }
+
+#Globals used: $usage_array
+sub doesPrimaryOutOptExist
+  {
+    my $get_suffix = $_[0]; #Whether or not to test suffix type (otherwise, test
+                            #an outfile type)
+    my $usage_index = getDefaultPrimaryOutOptID($get_suffix);
+    if(defined($usage_index))
       {return(1)}
 
     return(0);
   }
 
-#Globals used: $usage_hash, $outfile_types_hash
-sub getDefaultPrimaryOutUsageHash
+#Globals used: $usage_array
+sub getDefaultPrimaryOutOptID
   {
-    my $get_suffix = $_[0];
-    foreach my $usage_hash (sort {
+    my $get_suffix = $_[0]; #Whether or not to retrieve suffix type (otherwise,
+                            #get an outfile type)
+    foreach my $usgid (sort {
+      my $ah = $usage_array->[$a];
+      my $bh = $usage_array->[$b];
       #Primary options first.  Of primary options, required first. Of primary-
       #required options, unhidden first.  The first primary required unhidden
-      #option will be returned
-      $b->{PRIMARY} <=> $a->{PRIMARY} || $b->{REQUIRED} <=> $a->{REQUIRED} ||
-	$a->{HIDDEN} <=> $b->{HIDDEN}}
-			    grep {$get_suffix ? ($_->{OPTTYPE} eq 'suffix') :
-				    ($_->{OPTTYPE} eq 'outfile')}
-			    @$usage_array)
+      #option will be returned.  Explicitly non-primary options will be skipped.
+      $bh->{PRIMARY} <=> $ah->{PRIMARY} ||
+	$bh->{REQUIRED} <=> $ah->{REQUIRED} || $ah->{HIDDEN} <=> $bh->{HIDDEN}}
+		       grep {($get_suffix ?
+                              ($usage_array->[$_]->{OPTTYPE} eq 'suffix') :
+                              ($usage_array->[$_]->{OPTTYPE} eq 'outfile')) &&
+                             (!defined($usage_array->[$_]->{PRIMARY_PRG}) ||
+                              $usage_array->[$_]->{PRIMARY_PRG})}
+		       (0..$#{$usage_array}))
       {
-	#If we're looking for a purely suffix type and this is the hidden
+	my $usage_hash = $usage_array->[$usgid];
+
+	#If we're looking for a pure suffix type and this is the hidden
 	#suffix type of an outfile type, skip it
-	if($get_suffix && $usage_hash->{FILEID} < scalar(@$suffix_id_lookup) &&
-	   exists($outfile_types_hash->{$suffix_id_lookup
-					->[$usage_hash->{FILEID}]->[0]}))
+	if($get_suffix &&
+	   $usage_array->[$usage_hash->{PAIRID}]->{OPTTYPE} eq 'outfile')
 	  {next}
-	return($usage_hash);
+	return($usgid);
       }
+
     debug({LEVEL => -1},"There were no suffix IDs found for outfile type ",
 	  "defined by ",($get_suffix ? 'suffix' : 'outfile name'));
-    return({});
+
+    return(undef);
   }
 
 #This returns the default primary out's suffix type's FILETYPEID or outfile
@@ -5916,45 +7956,49 @@ sub getDefaultPrimaryOutUsageHash
 #undef if PAIR_WITH is not defined or if no outfile types have been defined
 sub getDefaultPrimaryLinkedInfileID
   {
-    my $outfile_usage_hash = getDefaultPrimaryOutUsageHash();
-    my $outfile_index = (defined($outfile_usage_hash) ?
-			 $outfile_usage_hash->{FILEID} : undef);
-    debug({LEVEL => -1},"Outfile index selected as default primary: [",
-	  (defined($outfile_index) ? $outfile_index : 'undef'),
-	  "] which belongs to [",
-	  (defined($outfile_index) ? getOutfileFlag($outfile_index,-1) :
-	   'undef'),"] and [",($outfile_usage_hash->{PRIMARY} ?
-			       'is' : 'is not'),"] primary.");
-    #I need the outfile_id to tell which one is the lesser between it and the
-    #suffix ID...
-    #There should be only 1 ID for this type since it's an outfile type, or at
-    #least the first one will be the relevant one (if I ever add the ability to
-    #add other suffixes to outfile types)
-    my $outfile_id = (defined($outfile_index) ?
-		      (getSuffixIDs($outfile_index))[0] : undef);
-    my($linked_index1);
-    if(defined($outfile_index) &&
-       scalar(grep {$_->[0] == $outfile_index} @$required_relationships))
-      {$linked_index1 =
-	 (grep {$_->[0] == $outfile_index} @$required_relationships)[0]->[1]}
+    my $outfile_usage_hash = getDefaultPrimaryOutUsageHash(0);
 
-    my $suffix_usage_hash  = getDefaultPrimaryOutUsageHash(1);
-    my $suffix_id = (defined($suffix_usage_hash) ?
-		     $suffix_usage_hash->{FILEID} : undef);
-    debug({LEVEL => -1},"Suffix ID selected as default primary: [",
-	  (defined($suffix_id) ? $suffix_id : 'undef'),
-	  "] which belongs to [",
-	  (defined($suffix_id) ? getOutfileSuffixFlag($suffix_id,-1) :
-	   'undef'),"] and [",($suffix_usage_hash->{PRIMARY} ?
-			       'is' : 'is not'),"] primary.");
-    my $linked_index2 = (defined($suffix_id) ?
-			 $suffix_id_lookup->[$suffix_id]->[0] : undef);
+    #Undefining an empty result to make it easier to determine
+    if(scalar(keys(%$outfile_usage_hash)) == 0)
+      {undef($outfile_usage_hash)}
 
+    debug({LEVEL => -1},"Outfile option ID selected as default primary: [",
+	  (defined($outfile_usage_hash) ? $outfile_usage_hash->{OPTION_ID} :
+	   'undef'),"] which belongs to [",
+	  (defined($outfile_usage_hash) ? getFlag($outfile_usage_hash,-1) :
+	   'undef'),"] and [",(defined($outfile_usage_hash) &&
+			       $outfile_usage_hash->{PRIMARY} ?
+			       'is' : 'is not'),"] primary.");
+    #I need to be able to tell which option is the lesser between the outfile &
+    #suffix options...
+    my $linked_index1 =
+      (defined($outfile_usage_hash) && defined($outfile_usage_hash->{PAIRID}) ?
+       $outfile_usage_hash->{PAIRID} : undef);
+
+    my $suffix_usage_hash = getDefaultPrimaryOutUsageHash(1);
+
+    #Undefining an empty result to make it easier to determine
+    if(scalar(keys(%$suffix_usage_hash)) == 0)
+      {undef($suffix_usage_hash)}
+
+    debug({LEVEL => -1},"Suffix option ID selected as default primary: [",
+	  (defined($suffix_usage_hash) ? $suffix_usage_hash->{OPTION_ID} :
+	   'undef'),"] which belongs to [",
+	  (defined($suffix_usage_hash) ? getFlag($suffix_usage_hash,-1) :
+	   'undef'),"] and [",(defined($suffix_usage_hash) &&
+			       $suffix_usage_hash->{PRIMARY} ?
+			       'is' : 'is not'),"] primary.");
+
+    my $linked_index2 = (defined($suffix_usage_hash) ?
+			 $suffix_usage_hash->{PAIRID} : undef);
+
+    #Select the infile option ID that was added earlier
     my($primary_linked_index);
-    if(defined($outfile_id) && defined($suffix_id))
-      {$primary_linked_index = ($outfile_id < $suffix_id ?
-				$linked_index1 : $linked_index2)}
-    elsif(defined($outfile_id))
+    if(defined($outfile_usage_hash) && defined($suffix_usage_hash))
+      {$primary_linked_index =
+	 ($outfile_usage_hash->{OPTION_ID} < $suffix_usage_hash->{OPTION_ID} ?
+	  $linked_index1 : $linked_index2)}
+    elsif(defined($outfile_usage_hash))
       {$primary_linked_index = $linked_index1}
     #Else - either linked_index2 is defined and primary or undefined and there
     #is no primary
@@ -5965,15 +8009,16 @@ sub getDefaultPrimaryLinkedInfileID
 	  (defined($primary_linked_index) ? $primary_linked_index : 'undef'),
 	  "] for infile type [",
 	  (defined($primary_linked_index) ?
-	   getInfileFlag($primary_linked_index) : 'undef'),"].");
+	   getFlag($usage_array->[$primary_linked_index]) : 'undef'),"].");
+
     return($primary_linked_index);
   }
 
 sub getDefaultPrimaryInfileID
   {
     #If the primary infile type has already been defined
-    if(defined($primary_infile_type))
-      {return($primary_infile_type)}
+    if(defined($primary_infile_optid))
+      {return($primary_infile_optid)}
     #If there are no input file types
     elsif(getNumInfileTypes() == 0)
       {return(undef)}
@@ -5984,612 +8029,928 @@ sub getDefaultPrimaryInfileID
     #descending primary status (though all should be 0 - we'll do this as a
     #safeguard), descending required status, ascending hidden status, or order
     #in which they were created
-    return((sort {my $ua = getInfileUsageHash($a);
-		  my $ub = getInfileUsageHash($b);
-		  exists($exp_nonprimary_inf_types->{$a}) <=>
-		    exists($exp_nonprimary_inf_types->{$b}) ||
-		      $ub->{PRIMARY} <=> $ua->{PRIMARY} ||
-			$ub->{REQUIRED} <=> $ua->{REQUIRED} ||
-			  $ua->{HIDDEN} <=> $ub->{HIDDEN} || $a <=> $b}
-	    grep {!exists($outfile_types_hash->{$_})}
-	    (0..$#{$input_files_array}))[0])
+    return((sort {my $ua = $usage_array->[$a];
+		  my $ub = $usage_array->[$b];
+		  #'a' is explicitly non-primary
+		  my $anp = defined($ua->{PRIMARY_PRG}) && !$ua->{PRIMARY_PRG};
+		  #'b' is explicitly non-primary
+		  my $bnp = defined($ub->{PRIMARY_PRG}) && !$ub->{PRIMARY_PRG};
+		  #Make options that were not explicitly set as non-primary or
+		  #are effectively primary, 1st
+		  $anp <=> $bnp || $ub->{PRIMARY} <=> $ua->{PRIMARY} ||
+		    $ub->{REQUIRED} <=> $ua->{REQUIRED} ||
+		      $ua->{HIDDEN} <=> $ub->{HIDDEN} || $a <=> $b}
+	    grep {$usage_array->[$_]->{OPTTYPE} eq 'infile'}
+	    (0..$#{$usage_array}))[0]);
   }
 
 sub getNumInfileTypes
-  {
-    my $ifa = (defined($_[0]) ? $_[0] : $input_files_array);
-
-    #getFileSets, called at the bottom of processCommandLine (just before
-    #$command_line_processed is set to 2) adds an outdirs array to the
-    #input_files_array, thus if any outdirs exist, we must subtract 1 from the
-    #total
-
-    return(scalar(@$ifa)                            #Num file types
-	   - scalar(keys(%$outfile_types_hash))     #Num outfile types
-	   - ($command_line_processed == 2 && scalar(@$outdirs_array) ? 1 : 0));
-  }
+  {return(scalar(grep {$_->{OPTTYPE} eq 'infile'} @$usage_array))}
 
 sub getInfileIndexes
   {
-    my $ifa = (defined($_[0]) ? $_[0] : $input_files_array);
-
-    #getFileSets, called at the bottom of processCommandLine (just before
-    #$command_line_processed is set to 2) adds an outdirs array to the
-    #input_files_array, thus if any outdirs exist, we must subtract 1 from the
-    #total
-
-    my $indexes =
-      [grep {!exists($outfile_types_hash->{$_})}
-       (0..($#{$input_files_array} - ($command_line_processed == 2 &&
-				      scalar(@$outdirs_array) ? 1 : 0)))];
-    return(wantarray ? @$indexes : $indexes);
+    my $i = [map {$_->{FILEID}} grep {$_->{OPTTYPE} eq 'infile'} @$usage_array];
+    return(wantarray ? @$i : $i);
   }
 
+#Checks just the pure suffix types (not the hidden ones for outfiles)
 sub getNumSuffixTypes
-  {
-    my $num = 0;
+  {return(scalar(grep {$_->{OPTTYPE} eq 'suffix' &&
+			 $usage_array->[$_->{PAIRID}]->{OPTTYPE} eq 'infile'}
+		 @$usage_array))}
 
-    foreach my $inf_type (0..$#{$outfile_suffix_array})
-      {
-	next if(exists($outfile_types_hash->{$inf_type}));
-	$num += scalar(@{$outfile_suffix_array->[$inf_type]});
-      }
-
-    return($num);
-  }
-
-#Variable options are those whose availability varies based on the
-#default_run_mode.  They include: --run, --dry-run, --usage, & --help.  This
-#method adds --usage, --help, --run, and/or --dry-run to accommodate the
-#default_run_mode.
+#Variable options are those whose visibility/availability varies based on their
+#default values.  They include: --run, --dry-run, --usage, & --help.  This
+#method adds --usage, --help, --run, and --dry-run.
 #
 #NOTE: various calls to addOption will set a value in the global GetOptHash,
 #but those values already exist for the options this method adds (e.g. --help).
 #That's fine.  The values were pre-added so that user defaults could be read in
 #to establish a user-defined default run mode.
-#
-#Uses globals: $default_run_mode, $run, $dry_run, $explicit_dry_run,
-#              $explicit_run, $explicit_usage, $explicit_help, $GetOptHash
 sub addRunModeOptions
   {
-    my $help_smry      = ('Print general info and file formats.');
-    my $help_desc      = ('Print general info and file format ' .
-			  'descriptions.  Includes advanced usage examples ' .
-			  'with --extended.');
-    my $usage_smry     = ('');
-    my $usage_desc     = ('Print this usage message.');
-    my $run_smry       = ('Run the script.');
-    my $run_desc       = ('This option runs the script.  It is only ' .
-			  'necessary to supply this option if the script ' .
-			  'contains no required options or when all ' .
-			  'required options have default values that are ' .
-			  'either hard-coded, or provided via --save-args.');
-    my $dry_run_smry   = ('');
-    my $dry_run_desc   = ('Run without generating output files.');
+    my $def_mode_set = 0;
+    my $errors       = 0;
 
-    if($default_run_mode ne 'run'  && $default_run_mode ne 'usage' &&
-       $default_run_mode ne 'help' && $default_run_mode ne 'dry-run')
+    #This handles the override of the CLI class default with the programmer's
+    #default.  This would otherwise fail in the mutex group processing.  The CLI
+    #default is the value set (of $run, $dry_run, $usage, and $help) to 1 in the
+    #_init method
+    my $custom_prg_default_exists = 0;
+    foreach my $opt (grep {$def_option_hash->{$_}->{ADDED}}
+		     qw(usage help run dry_run))
       {
-	error("Invalid DEFRUNMODE: [$default_run_mode].  Must be one of ",
-	      "['run','dry-run','usage','help'].  See ",
-	      "setDefaults(DEFRUNMODE => ...).");
-	quit(-9);
+	if(defined($def_option_hash->{$opt}->{PARAMS}->{DEFAULT}) &&
+	   $def_option_hash->{$opt}->{PARAMS}->{DEFAULT})
+	  {
+	    $custom_prg_default_exists = 1;
+	    $def_mode_set              = 1;
+	  }
       }
 
-    #Determine whether required options exist - assumes user defaults are set
-    my $status = getRunModeStatus(); #Returns: ready(0), not_ready(1), or
-                                     #unknown(-1)
+    #We have determined the run mode defaults above.  Now we need to set each
+    #affected option's default.
+    my $heading_added = 0;
+    foreach my $opt (grep {!$def_option_hash->{$_}->{ADDED}}
+		     qw(usage help run dry_run))
+      {
+	if(!$heading_added)
+	  {
+	    $heading_added = 1;
+	    if(!defined($def_option_hash->{$opt}->{PARAMS}->{HEADING}) ||
+	       $def_option_hash->{$opt}->{PARAMS}->{HEADING} eq '')
+	      {$def_option_hash->{$opt}->{PARAMS}->{HEADING} =
+		 'RUN MODE OPTIONS'}
+	  }
 
-    my $usage_hidden   = 0;
-    my $help_hidden    = 0;
-    my $run_hidden     = 0;
-    my $dry_run_hidden = 0;
+	if($custom_prg_default_exists &&
+	   defined($def_option_hash->{$opt}->{PARAMS}->{DEFAULT}) &&
+	   $def_option_hash->{$opt}->{PARAMS}->{DEFAULT})
+	  {
+	    $def_option_hash->{$opt}->{PARAMS}->{DEFAULT} = 0;
+	    $def_option_hash->{$opt}->{PARAMS}->{DISPDEF} = undef;
+	  }
+	elsif(defined($def_option_hash->{$opt}->{PARAMS}->{DEFAULT}) &&
+	      $def_option_hash->{$opt}->{PARAMS}->{DEFAULT})
+	  {$def_mode_set = 1}
+
+	my $id = addBuiltinOption($opt);
+
+        if(!defined($id))
+          {$errors++}
+      }
+
+    if(!$def_mode_set)
+      {
+	error('No default run mode was set.  Falling back to usage as the ',
+	      'default run mode.');
+	$usage_lookup->{usage}->{DEFAULT_PRG} = 1;
+      }
+
+    my $mut_excl_array = [];
+    foreach my $opt (qw(usage help run dry_run version))
+      {push(@$mut_excl_array,$usage_lookup->{$opt}->{OPTION_ID})}
+
+    #TODO: Make --version a run mode option
+
+    my $mtx_success = makeMutuallyExclusive(OPTIONIDS   => $mut_excl_array,
+                                            OVERRIDABLE => 1,
+                                            REQUIRED    => 1,
+                                            NAME        => 'run modes');
+    if(!defined($mtx_success))
+      {$errors++}
+
+    #Return 0 for success, non-zero for failure
+    return($errors);
+  }
+
+sub getDefaultRunMode
+  {
+    if($command_line_stage < DEFAULTED)
+      {error('getDefaultRunMode called before processing user defaults.')}
+
+    my $default_run_mode = '';
+    foreach my $opt (qw(usage help run dry_run))
+      {
+	my $uh = getUsageHash($opt);
+	if((defined($uh->{DEFAULT_USR}) && $uh->{DEFAULT_USR}) ||
+	   ($default_run_mode eq '' &&
+	    defined($uh->{DEFAULT_PRG}) && $uh->{DEFAULT_PRG}))
+	  {$default_run_mode = $opt}
+      }
+    if($default_run_mode eq '')
+      {
+	error("No default run mode set.  Falling back to usage.");
+	$default_run_mode = 'usage';
+      }
+
+    return($default_run_mode);
+  }
+
+#This is solely for backward compatibility with setDefaults()
+sub setDefaultRunMode
+  {
+    my $run_mode = $_[0];
+    $run_mode =~ s/-/_/; #For dry-run
+
+    my $set = 0;
+    foreach my $opt (qw(usage help run dry_run))
+      {
+	if($opt eq $run_mode)
+	  {
+	    $set = 1;
+	    if($def_option_hash->{$opt}->{ADDED})
+	      {
+		my $uh = getUsageHash($opt);
+		$uh->{DEFAULT_PRG} = 1;
+	      }
+	    else
+	      {$def_option_hash->{$opt}->{PARAMS}->{DEFAULT} = 1}
+	  }
+      }
+    if(!$set)
+      {error("Could not match run mode [$run_mode].")}
+    else
+      {
+	foreach my $opt (qw(usage help run dry_run))
+	  {
+	    if($opt ne $run_mode)
+	      {
+		if($def_option_hash->{$opt}->{ADDED})
+		  {
+		    my $uh = getUsageHash($opt);
+		    $uh->{DEFAULT_PRG} = 0;
+		  }
+		else
+		  {$def_option_hash->{$opt}->{PARAMS}->{DEFAULT} = 0}
+	      }
+	  }
+      }
+
+    return($set);
+  }
+
+#Performs updates to the usage output for the run mode options
+sub updateRunModeOptions
+  {
+    my $status           = getRunStatus(1); #Returns: ready(0), not_ready(1)
+    my $hidden_hash      = {usage   => 0,
+			    help    => 0,
+			    run     => 0,
+			    dry_run => 0};
+    my $default_run_mode = getDefaultRunMode();
 
     if($status == 1) #Required opts exist without default values
       {
 	if($default_run_mode eq 'usage' || $default_run_mode eq 'run')
 	  {
-	    $usage_hidden = 1;
-	    $run_hidden   = 1;
+	    $hidden_hash->{usage}  = 1;
+	    $hidden_hash->{run}    = 1;
 	  }
-	elsif($default_run_mode eq 'dry-run')
+	elsif($default_run_mode eq 'dry_run')
 	  {
-	    $usage_hidden   = 1;
-	    $dry_run_hidden = 1;
+	    $hidden_hash->{usage}    = 1;
+	    $hidden_hash->{dry_run}  = 1;
 	  }
 	elsif($default_run_mode eq 'help')
 	  {
-	    $help_hidden = 1;
-	    $run_hidden  = 1;
+	    $hidden_hash->{help}  = 1;
+	    $hidden_hash->{run}   = 1;
 	  }
-
-	#Add --usage as shown optional opt using addOption
-	addOption(GETOPTKEY   => 'usage',
-		  GETOPTVAL   => \$explicit_usage,
-		  TYPE        => 'bool',
-		  REQUIRED    => 0,
-		  HIDDEN      => $usage_hidden,
-		  SMRY_DESC   => $usage_smry,
-		  DETAIL_DESC => $usage_desc);
-
-	#Add --help as a hidden optional opt using addOption
-	addOption(GETOPTKEY   => 'help',
-		  GETOPTVAL   => \$explicit_help,
-		  TYPE        => 'bool',
-		  REQUIRED    => 0,
-		  HIDDEN      => $help_hidden,
-		  SMRY_DESC   => ($default_run_mode eq 'help' && $help &&
-				  defined($help_smry) && $help_smry ne '' ?
-				  '[On] ' : '') . $help_smry,
-		  DETAIL_DESC => (($default_run_mode eq 'help' ?
-				   '[On] ' : '') .
-				  $help_desc));
-
-	#Add --run as a hidden optional opt using addOption
-	addOption(GETOPTKEY   => 'run',
-		  GETOPTVAL   => \$explicit_run,
-		  TYPE        => 'bool',
-		  REQUIRED    => 0,
-		  HIDDEN      => $run_hidden,
-		  SMRY_DESC   => $run_smry,
-		  DETAIL_DESC => $run_desc);
-
-	#Add --dry-run as a shown optional opt using addOption
-	addOption(GETOPTKEY   => 'dry-run',
-		  GETOPTVAL   => \$explicit_dry_run,
-		  TYPE        => 'bool',
-		  REQUIRED    => 0,
-		  HIDDEN      => $dry_run_hidden,
-		  SMRY_DESC   => $dry_run_smry,
-		  DETAIL_DESC => $dry_run_desc);
       }
     elsif($status == 0) #No required opts or all reqd opts have defaults
       {
 	if($default_run_mode eq 'run')
 	  {
-	    #Add --run as a hidden optional opt using addOption
-	    addOption(GETOPTKEY   => 'run',
-		      GETOPTVAL   => \$explicit_run,
-		      TYPE        => 'bool',
-		      REQUIRED    => 0,
-		      HIDDEN      => 1,
-		      SMRY_DESC   => ($run &&
-				      defined($run_smry) && $run_smry ne '' ?
-				      '[On] ' : '') . $run_smry,
-		      DETAIL_DESC => '[On] ' . $run_desc);
-
-	    #Add --dry-run as a shown optional opt using addOption
-	    addOption(GETOPTKEY   => 'dry-run',
-		      GETOPTVAL   => \$explicit_dry_run,
-		      TYPE        => 'bool',
-		      REQUIRED    => 0,
-		      HIDDEN      => 0,
-		      SMRY_DESC   => $dry_run_smry,
-		      DETAIL_DESC => $dry_run_desc);
+	    $hidden_hash->{run}     = 1;
+	    $hidden_hash->{dry_run} = 0;
 	  }
-	elsif($default_run_mode eq 'dry-run')
+	elsif($default_run_mode eq 'dry_run')
 	  {
-	    #Add --run as a shown optional opt using addOption
-	    addOption(GETOPTKEY   => 'run',
-		      GETOPTVAL   => \$explicit_run,
-		      TYPE        => 'bool',
-		      REQUIRED    => 0,
-		      HIDDEN      => 0,
-		      SMRY_DESC   => $run_smry,
-		      DETAIL_DESC => $run_desc);
-
-	    #Add --dry-run as a hidden optional opt using addOption
-	    addOption(GETOPTKEY   => 'dry-run',
-		      GETOPTVAL   => \$explicit_dry_run,
-		      TYPE        => 'bool',
-		      REQUIRED    => 0,
-		      HIDDEN      => 1,
-		      SMRY_DESC   => ($dry_run &&
-				      (defined($dry_run_smry) &&
-				       $dry_run_smry ne '' ? '[On] ' : '') .
-				      $dry_run_smry),
-		      DETAIL_DESC => '[On] ' . $dry_run_desc);
+	    $hidden_hash->{run}     = 0;
+	    $hidden_hash->{dry_run} = 1;
 	  }
 	else
 	  {
-	    #Add --run as a shown optional opt using addOption
-	    addOption(GETOPTKEY   => 'run',
-		      GETOPTVAL   => \$explicit_run,
-		      TYPE        => 'bool',
-		      REQUIRED    => 0,
-		      HIDDEN      => 0,
-		      SMRY_DESC   => $run_smry,
-		      DETAIL_DESC => $run_desc);
-
-	    #Add --dry-run as a shown optional opt using addOption
-	    addOption(GETOPTKEY   => 'dry-run',
-		      GETOPTVAL   => \$explicit_dry_run,
-		      TYPE        => 'bool',
-		      REQUIRED    => 0,
-		      HIDDEN      => 0,
-		      SMRY_DESC   => $dry_run_smry,
-		      DETAIL_DESC => $dry_run_desc);
+	    $hidden_hash->{run}     = 0;
+	    $hidden_hash->{dry_run} = 0;
 	  }
 
 	if($default_run_mode eq 'help')
 	  {
-	    #Add --usage as a shown optional opt using addOption
-	    addOption(GETOPTKEY   => 'usage',
-		      GETOPTVAL   => \$explicit_usage,
-		      TYPE        => 'bool',
-		      REQUIRED    => 0,
-		      HIDDEN      => 0,
-		      SMRY_DESC   => $usage_smry,
-		      DETAIL_DESC => $usage_desc);
-
-	    #Add --help as a hidden optional opt using addOption
-	    addOption(GETOPTKEY   => 'help',
-		      GETOPTVAL   => \$explicit_help,
-		      TYPE        => 'bool',
-		      REQUIRED    => 0,
-		      HIDDEN      => 1,
-		      SMRY_DESC   => (($help && defined($help_smry) &&
-				       $help_smry ne '' ? '[On] ' : '') .
-				      $help_smry),
-		      DETAIL_DESC => '[On] ' . $help_desc);
+	    $hidden_hash->{usage} = 0;
+	    $hidden_hash->{help}  = 1;
 	  }
 	elsif($default_run_mode eq 'usage')
 	  {
-	    #Add --usage as a hidden optional opt using addOption
-	    addOption(GETOPTKEY   => 'usage',
-		      GETOPTVAL   => \$explicit_usage,
-		      TYPE        => 'bool',
-		      REQUIRED    => 0,
-		      HIDDEN      => 1,
-		      SMRY_DESC   => (($usage && defined($usage_smry) &&
-				       $usage_smry ne '' ? '[On] ' : '') .
-				      $usage_smry),
-		      DETAIL_DESC => $usage_desc);
-
-	    #Add --help as a shown optional opt using addOption
-	    addOption(GETOPTKEY   => 'help',
-		      GETOPTVAL   => \$explicit_help,
-		      TYPE        => 'bool',
-		      REQUIRED    => 0,
-		      HIDDEN      => 0,
-		      SMRY_DESC   => $help_smry,
-		      DETAIL_DESC => $help_desc);
+	    $hidden_hash->{usage} = 1;
+	    $hidden_hash->{help}  = 0;
 	  }
 	else
 	  {
-	    #Add --usage as a shown optional opt using addOption
-	    addOption(GETOPTKEY   => 'usage',
-		      GETOPTVAL   => \$explicit_usage,
-		      TYPE        => 'bool',
-		      REQUIRED    => 0,
-		      HIDDEN      => 0,
-		      SMRY_DESC   => (($default_run_mode eq 'usage' &&
-				       $usage && defined($usage_smry) &&
-				       $usage_smry ne '' ? '[On] ' : '') .
-				      $usage_smry),
-		      DETAIL_DESC => $usage_desc);
-
-	    #Add --help as a shown optional opt using addOption
-	    addOption(GETOPTKEY   => 'help',
-		      GETOPTVAL   => \$explicit_help,
-		      TYPE        => 'bool',
-		      REQUIRED    => 0,
-		      HIDDEN      => 0,
-		      SMRY_DESC   => $help_smry,
-		      DETAIL_DESC => $help_desc);
+	    $hidden_hash->{usage} = 0;
+	    $hidden_hash->{help}  = 0;
 	  }
       }
     else #status=-1 - Reqd opts exist but we don't know if they all have values
       {
-	#Add --usage as shown optional opt using addOption
-	addOption(GETOPTKEY   => 'usage',
-		  GETOPTVAL   => \$explicit_usage,
-		  TYPE        => 'bool',
-		  REQUIRED    => 0,
-		  HIDDEN      => 0,
-		  SMRY_DESC   => $usage_smry,
-		  DETAIL_DESC => $usage_desc);
+	$hidden_hash->{usage}   = 0;
+	$hidden_hash->{help}    = 0;
+	$hidden_hash->{run}     = 0;
+	$hidden_hash->{dry_run} = 0;
+      }
 
-	#Add --help as a shown optional opt using addOption
-	addOption(GETOPTKEY   => 'help',
-		  GETOPTVAL   => \$explicit_help,
-		  TYPE        => 'bool',
-		  REQUIRED    => 0,
-		  HIDDEN      => 0,
-		  SMRY_DESC   => $help_smry,
-		  DETAIL_DESC => $help_desc);
-
-	#Add --run as a shown optional opt using addOption
-	addOption(GETOPTKEY   => 'run',
-		  GETOPTVAL   => \$explicit_run,
-		  TYPE        => 'bool',
-		  REQUIRED    => 0,
-		  HIDDEN      => 0,
-		  SMRY_DESC   => $run_smry,
-		  DETAIL_DESC => $run_desc);
-
-	#Add --dry-run as a shown optional opt using addOption
-	addOption(GETOPTKEY   => 'dry-run',
-		  GETOPTVAL   => \$explicit_dry_run,
-		  TYPE        => 'bool',
-		  REQUIRED    => 0,
-		  HIDDEN      => 0,
-		  SMRY_DESC   => $dry_run_smry,
-		  DETAIL_DESC => $dry_run_desc);
+    #We have determined the run mode defaults above.  Now we need to set each
+    #affected option's default.
+    my $heading_added = 0;
+    foreach my $opt (qw(usage help run dry_run))
+      {
+	my $uh = getUsageHash($opt);
+	#If the programmer didn't explicitly set this option as hidden
+	if(!defined($def_option_hash->{$opt}->{PARAMS}->{HIDDEN}))
+	  {$uh->{HIDDEN} = $hidden_hash->{$opt}}
       }
   }
 
-#This adds all the builtin options like verbose, overwrite, etc..  All these
-#options are highly integrated into all functionality and cannot be disabled.
-#However future versions of this module may allow them to be hidden.
-#Globals used: $overwrite,$skip_existing,$append,$force,$verbose,$quiet,$DEBUG,
-#              $extended,$version,$header,$error_limit,$use_as_default,
-#              $user_collide_mode,$pipeline_mode,$error_limit_default
+#Globals used: $exclusive_options, $mutual_params
+sub makeMutuallyExclusive
+  {
+    my @in = getSubParams([qw(OPTIONIDS|OPTIONS REQUIRED OVERRIDABLE
+                              NAME MUTUAL_PARAMS|MUTUALS)],
+			  [qw(OPTIONS|OPTIONIDS)],[@_]);
+    my $option_ids          = $in[0]; #Ref to array of option IDs
+    my $reqd_defd           = defined($in[1]) ? 1 : 0;
+    my $required            = defined($in[1]) ? $in[1] : 0;
+    my $overridable         = defined($in[2]) ? $in[2] : 0;
+			              #cmdln > usrdef > progdef.  This sets
+			              #mutex conflicts as undef. Warning: has
+			              #potential to be confusing due to
+			              #unintended multiple overrides.
+    my $mutex_name          = (defined($in[3]) ? $in[3] :
+                               'custom ' . (scalar(@$exclusive_options) + 1));
+    my $local_mutual_params = $in[4]; #A hash, like a usage hash
+
+    my $dupecounts = {};
+    if(defined($option_ids) && ref($option_ids) eq 'ARRAY')
+      {$dupecounts->{$_}++ foreach(grep {defined($_)} @$option_ids)}
+
+    #Check the array supplied
+    if(!defined($option_ids) || ref($option_ids) ne 'ARRAY' ||
+       scalar(@$option_ids) < 2 ||
+       scalar(grep {!defined($_) || ref($_) ne '' || $_ !~ /^\d+$/ ||
+		      $_ > $#{$usage_array}} @$option_ids) ||
+       scalar(grep {$_ > 1} values(%$dupecounts)))
+      {
+	error('Invalid or no array reference of option IDs supplied to ',
+              'makeMutuallyExclusive: [',
+	      (defined($option_ids) ? (ref($option_ids) eq 'ARRAY' ?
+				       join(',',map {defined($_) ? $_ : 'undef'}
+					    @$option_ids) : ref($option_ids)) :
+	       'undef'),"].",
+	      {DETAIL => ('A reference to an array of option IDs with 2 or ' .
+	                  'more option IDs, as obtained from the add*Option ' .
+			  'methods, is required.' .
+                          (scalar(grep {$_ > 1} values(%$dupecounts)) ?
+                           '  Duplicate IDs supplied: [' .
+                           join(',',grep {$dupecounts->{$_} > 1}
+                                keys(%$dupecounts)) . '].' : ''))});
+
+        $num_setup_errors++;
+
+	#In case the user supplies --force
+	return(undef);
+      }
+
+    my @has_defs =
+      grep {hasValue($usage_array->[$_]->{OPTTYPE},
+		     $usage_array->[$_]->{DEFAULT_PRG})} @$option_ids;
+    #Make sure that only 1 (or 0) has a default value
+    if(scalar(@has_defs) > 1)
+      {
+	error("Cannot define default values for multiple mutually exclusive ",
+	      "options: [",join(',',map {$usage_array->[$_]->{OPTFLAG_DEF}}
+				@has_defs),"].",
+	      {DETAIL => ('Make sure that not only there was no DEFAULT ' .
+			  'value supplied, but that the variable referenced ' .
+			  'by the VARREF parameter has not been initialized ' .
+			  'with a (default) value.  Note, run mode options ' .
+			  'like --usage can be automatically defaulted.')});
+
+        $num_setup_errors++;
+
+	return(undef);
+      }
+
+    #Make sure that options in over-ridable mutex sets do not exist in any other
+    #mutex sets
+    if($overridable && scalar(@$exclusive_options))
+      {
+        my $ineligible = [grep {exists($exclusive_lookup->{$_})} @$option_ids];
+        #Check to make sure none of these options are in any other mutex sets
+        if(scalar(@$ineligible))
+          {
+            my $mutex_set_ids = {map {$_ => 1}
+                                 map {keys(%{$exclusive_lookup->{$_}})}
+                                 grep {exists($exclusive_lookup->{$_})}
+                                 @$option_ids};
+            error("Overlapping options [",
+                  join(', ',
+                       map {$usage_array->[$_]->{OPTFLAG_DEF}} @$ineligible),
+                  "] detected in overridable mutually-exclusive option sets ",
+                  "[(overridable set '$mutex_name': ",
+                  join(', ',
+                       map {$usage_array->[$_]->{OPTFLAG_DEF}} @$option_ids),
+                  "); (",
+                  join('); (',
+                       map {my $ary = [@{$exclusive_options->[$_]}];
+                            ($mutual_params->{$_}->{OVERRIDABLE} ? '' : 'un') .
+                              "overridable set '$mutual_params->{$_}->{NAME}'" .
+                                ': ' .
+                                join(', ',
+                                     map {$usage_array->[$_]->{OPTFLAG_DEF}}
+                                     @$ary)} sort {$a <=> $b}
+                       keys(%$mutex_set_ids)),")].",
+                  {DETAIL => ('Either make all of the sets unoverridable ' .
+                              '(meaning the override of default values must ' .
+                              'be explicit) or edit your sets to not contain ' .
+                              'options that are in other overridable ' .
+                              'mutually exclusive sets.')});
+
+            $num_setup_errors++;
+
+            return(undef);
+          }
+      }
+    elsif(!$overridable && scalar(grep {$mutual_params->{$_}->{OVERRIDABLE}}
+                                  keys(%$mutual_params)))
+      {
+        #Check over-ridable mutex sets to make sure that none of these options
+        #are included in an over-ridable mutex set
+        my $mtx_hash = {map {$_ => 1} @$option_ids};
+        my $ineligible = [];
+        foreach my $optid (@$option_ids)
+          {
+            if(exists($exclusive_lookup->{$optid}))
+              {
+                my $osets = [grep {$mutual_params->{$_}->{OVERRIDABLE}}
+                             keys(%{$exclusive_lookup->{$optid}})];
+                if(scalar(@$osets))
+                  {push(@$ineligible,[$optid,$osets])}
+              }
+          }
+        if(scalar(@$ineligible))
+          {
+            error("Unable to make mutually exclusive option set: [",
+                  join(', ',
+                       map {$usage_array->[$_]->{OPTFLAG_DEF}} @$option_ids),
+                  "].  1 or more contained options already belong to an over-",
+                  "ridable mutually exclusive set.",
+                  {DETAIL => 'Options in an over-ridable mutually exclusive ' .
+                   'set are only allowed to belong to one set of mutually ' .
+                   "exclusive options.\n" .
+                   join(".\n",
+                        map {my $i = $_;
+                             ($usage_array->[$i->[0]]->{OPTFLAG_DEF}) .
+                               ' belongs to over-ridable set(s) [[' .
+                                 join('],[',
+                                      map {my $s = $_;
+                                           join(',',
+                                                map {$usage_array->[$_]
+                                                       ->{OPTFLAG_DEF}}
+                                                @{$exclusive_options->[$s]})}
+                                      @{$i->[1]}) . ']]'} @$ineligible) . '.'});
+
+            $num_setup_errors++;
+
+            return(undef);
+          }
+      }
+
+    my $opts_reqd = [];
+    my $opts_optl = [];
+    foreach my $uh (map {$usage_array->[$_]} @$option_ids)
+      {
+        if($uh->{REQUIRED})
+          {push(@$opts_reqd,$uh->{OPTFLAG_DEF})}
+        else
+          {push(@$opts_optl,$uh->{OPTFLAG_DEF})}
+      }
+    #If there's a conflict
+    if(scalar(@$opts_reqd) && scalar(@$opts_optl))
+      {
+        my $reqmsg = 'required';
+        if($reqd_defd && !$required)
+          {$reqmsg = 'optional'}
+        elsif(!$reqd_defd)
+          {$required = 1}
+        warning("Conflicting required values for mutually exclusive set ",
+                "[$mutex_name]: required: [",join(' ',@$opts_reqd),
+                "] optional: [",join(' ',@$opts_optl),'].',
+                {DETAIL => 'All options will be made individually optional' .
+                 ($required ? (' and one of this mutually exclusive set will ' .
+                               'be required') : '') . '.'});
+      }
+    #Else if this method's required parameter is explicitly false and all of the
+    #supplied options are individually required, issue an error
+    elsif($reqd_defd && !$required && scalar(@$opts_reqd))
+      {warning("Mutually exclusive set [$mutex_name]: [",join(' ',@$opts_reqd),
+               "] is explicitly set as optional, but the individual options ",
+               "are set as required.",
+               {DETAIL => 'All options will be made individually optional.'})}
+    elsif(!$reqd_defd && scalar(@$opts_reqd))
+      {$required = 1}
+
+    #Set the options' required values
+    foreach my $uh (map {$usage_array->[$_]} @$option_ids)
+      {$uh->{REQUIRED} = 0}
+
+    my $exclusive_id = scalar(@$exclusive_options);
+    push(@$exclusive_options,[@$option_ids]);
+
+    #Save the mutual parameters that the set of options shares (e.g. REQUIRED)
+    foreach my $optid (@$option_ids)
+      {$exclusive_lookup->{$optid}->{$exclusive_id} = 1}
+
+    #Save the mutual parameters that the set of options shares (e.g. REQUIRED)
+    if(defined($local_mutual_params))
+      {$mutual_params->{$exclusive_id} = $local_mutual_params}
+
+    $mutual_params->{$exclusive_id}->{REQUIRED}    = $required;
+    $mutual_params->{$exclusive_id}->{OVERRIDABLE} = $overridable;
+    $mutual_params->{$exclusive_id}->{VALIDATED}   = 0;
+    $mutual_params->{$exclusive_id}->{NAME}        = $mutex_name;
+
+    #If all the options are builtin options, make this a builtin mutex set
+    if(scalar(@$option_ids) ==
+       scalar(grep {exists($def_option_hash->{$usage_array->[$_]
+					      ->{USAGE_NAME}})} @$option_ids))
+      {$mutual_params->{$exclusive_id}->{BUILTIN} = 1}
+    else
+      {$mutual_params->{$exclusive_id}->{BUILTIN} = 0}
+
+    return($exclusive_id);
+  }
+
+sub optionIDToMutualParam
+  {
+    my $optid = (defined($_[0]) ? $_[0] : return(undef));
+    my $param = (defined($_[1]) ? $_[1] : return(undef));
+
+    if(exists($exclusive_lookup->{$optid}))
+      {
+	my @matching_exclids = (grep {exists($mutual_params->{$_}->{$param})}
+				keys(%{$exclusive_lookup->{$optid}}));
+	if(scalar(@matching_exclids) == 1)
+	  {return($mutual_params->{$matching_exclids[0]}->{$param})}
+	elsif(scalar(@matching_exclids) > 1)
+	  {error("Option ID [$optid] is a member of multiple mutually ",
+		 "exclusive groups with parameter [$param] set.",
+		 {DETAIL => ('Use the exclusive set ID to retrieve this ' .
+			     'parameter value.')})}
+	else
+	  {warning("Option ID [$optid] is not a member of a mutually ",
+		   "exclusive group or else no group has parameter [$param].")}
+      }
+    else
+      {warning("Option ID [$optid] is not part of a mutually exclusive group.")}
+
+    return(undef);
+  }
+
+sub exclusiveOptSupplied
+  {
+    my $option_id = $_[0];
+
+    #Command line has to have been processed
+    if(!$command_line_stage >= ARGSREAD)
+      {
+	error("Invalid call of exclusiveOptSupplied.  Command line must be ",
+	      "processed first.");
+	quit(-16);
+      }
+
+    if(!exists($exclusive_lookup->{$option_id}))
+      {return(0)}
+
+    #An option can belong to mutliple mutually exclusive groups
+    foreach my $exclusive_id (keys(%{$exclusive_lookup->{$option_id}}))
+      {
+	#For each neighboring option in the exclusive group
+	foreach my $mutual_optid (grep {$_ != $option_id}
+				  @{$exclusive_options->[$exclusive_id]})
+	  {return(1) if($usage_array->[$mutual_optid]->{SUPPLIED})}
+      }
+
+    return(0);
+  }
+
+#Globals used: $genopt_types, $exclusive_lookup, $exclusive_options
+sub exclusiveOptUserDefaulted
+  {
+    my $opt_hash  = $_[0];
+    my $option_id = $opt_hash->{OPTION_ID};
+
+    #Command line has to have been processed
+    if(!$command_line_stage >= ARGSREAD)
+      {
+	error("Invalid call of exclusiveOptSupplied.  Command line must be ",
+	      "processed first.");
+	quit(-41);
+      }
+
+    if(!exists($exclusive_lookup->{$option_id}))
+      {return(0)}
+
+    #An option can belong to mutliple mutually exclusive groups
+    foreach my $exclusive_id (keys(%{$exclusive_lookup->{$option_id}}))
+      {
+	#If a neighboring option in the exclusive group has a default
+	if(scalar(grep {$_ != $option_id && hasDefault($usage_array->[$_])}
+		  @{$exclusive_options->[$exclusive_id]}))
+	  {return(1)}
+      }
+
+    return(0);
+  }
+
+#This adds all the builtin options like verbose, overwrite, etc. if they have
+#not already been added by the programmer.  It also adds/modifies headings to
+#the usage.  All these options are highly integrated into all functionality and
+#cannot be disabled.
+#Globals used: $user_collide_mode,$def_collide_mode,$def_option_hash
 sub addBuiltinOptions
   {
-    #short_descs extended 0
-    my $extended_short = 'Print detailed usage.';
+    editBuiltinOptions();
 
-    #long_descs extended 1
-    my $verbose_long   = 'Verbose mode.';
+    my $errors = 0;
+    my $saved_heading = '';
+    foreach my $opt (qw(verbose quiet overwrite skip header version force debug
+			pipeline error_lim append collision save_args extended))
+      {
+        if($def_option_hash->{$opt}->{ADDED})
+          {
+            if(exists($def_option_hash->{$opt}->{PARAMS}->{HEADINGBACKUP}) &&
+               defined($def_option_hash->{$opt}->{PARAMS}->{HEADINGBACKUP}) &&
+               $def_option_hash->{$opt}->{PARAMS}->{HEADINGBACKUP} ne '')
+              {$saved_heading =
+                 $def_option_hash->{$opt}->{PARAMS}->{HEADINGBACKUP}}
+          }
+        else
+          {
+            if($def_option_hash->{$opt}->{PARAMS}->{HEADING} eq '' &&
+               $saved_heading ne '')
+              {$def_option_hash->{$opt}->{PARAMS}->{HEADING} = $saved_heading}
+            $saved_heading = '';
 
-    my $quiet_long     = 'Quiet mode.';
+            if(!defined(addBuiltinOption($opt)))
+              {$errors++}
+          }
+      }
 
-    my $overwrite_long = join('',('Overwrite existing output files.  By ',
-				  'default, existing output files will not ',
-				  'be over-written.  Mutually exclusive with ',
-				  '--skip and --append.'));
+    if($def_option_hash->{quiet}->{ADDED} && $def_option_hash->{debug}->{ADDED})
+      {
+        #Set the mutually exclusive options included in the builtins
+        #quiet versus verbose and debug
+        my $quiet_debug_opts = [$usage_lookup->{quiet}->{OPTION_ID},
+                                $usage_lookup->{debug}->{OPTION_ID}];
+        my $qdid = makeMutuallyExclusive(OPTIONIDS => $quiet_debug_opts,
+                                         NAME      => 'quiet/debug');
+        if(!defined($qdid))
+          {
+            #Make sure quiet default is 0 if there was a problem so errors print
+            $usage_lookup->{quiet}->{DEFAULT_PRG} = 0;
+            $errors++;
+          }
+      }
+    else
+      {$errors++}
 
-    my $skip_long      = join('',('Skip existing output files.  Mutually ',
-				  'exclusive with --overwrite and --append.'));
+    if($def_option_hash->{quiet}->{ADDED} &&
+       $def_option_hash->{verbose}->{ADDED})
+      {
+        my $quiet_verbose_opts = [$usage_lookup->{quiet}->{OPTION_ID},
+                                  $usage_lookup->{verbose}->{OPTION_ID}];
+        my $qvid = makeMutuallyExclusive(OPTIONIDS => $quiet_verbose_opts,
+                                         NAME      => 'quiet/verbose');
+        #Make sure quiet default is 0 if there was a problem so errors are
+        #printed
+        unless(defined($qvid))
+          {
+            $usage_lookup->{quiet}->{DEFAULT_PRG} = 0;
+            $errors++;
+          }
+      }
+    else
+      {$errors++}
 
-    my $header_long    = join('',('Outfile header flag.  Headers are ',
-				  "commented with '#' and include script ",
-				  'version, date, and command line call at',
-				  ' the top of every output file.  See ',
-				  '--extended.'));
+    if($def_option_hash->{skip}->{ADDED} &&
+       $def_option_hash->{append}->{ADDED} &&
+       $def_option_hash->{overwrite}->{ADDED})
+      {
+        #overwrite versus skip versus append
+        my $existing_out_opts = [$usage_lookup->{skip}->{OPTION_ID},
+                                 $usage_lookup->{overwrite}->{OPTION_ID},
+                                 $usage_lookup->{append}->{OPTION_ID}];
+        my $soaid = makeMutuallyExclusive(OPTIONIDS => $existing_out_opts,
+                                          NAME      => 'output modes');
+        if(!defined($soaid))
+          {$errors++}
+      }
+    else
+      {$errors++}
 
-    my $version_long   = 'Print version info.  See --extended.';
+    #If there were errors adding run mode options
+    if(addRunModeOptions())
+      {$errors++}
 
-    my $extended_long  = join('',('Print extended usage/help/version/header ',
-				  '(and errors/ warnings where noted).  ',
-				  'Supply alone for extended usage.  ',
-				  'Includes extended version in output file ',
-				  'headers.  Incompatible with --noheader.  ',
-				  'See --help & --version.'));
+    if(!defined($builtin_add_failures) || $builtin_add_failures)
+      {
+	if(!$error_number)
+	  {error("Unknown error occurred.")}
+	elsif(defined($builtin_add_failures))
+	  {error("CommandLineInterface config error: Unable to complete set ",
+		 "up due to custom parameters used for builtin options.  ",
+		 "Please address the errors described above.")}
+        $errors++;
+      }
 
-    #long_descs - extended 2 (advanced)
-    my $force_long     = join('',('Prevent script-exit upon fatal error.  ',
-				  'Use with extreme caution.  Will not ',
-				  'override overwrite protection (see ',
-				  '--overwrite or --skip).'));
+    return($errors);
+  }
 
-    my $debug_long     = join('',('Debug mode.  Prepends trace to warning/',
-				  'error messages.  Prints debug() messages ',
-				  'based on debug level.  Values less than 0 ',
-				  'debug the CommandLineInterface module ',
-				  'used by this script.'));
+#This method mainly looks for options already added by the user and implicitly
+#over-rides every mutually exclusive option.  E.g. If they call
+#editHelpOption(DEFAULT => 1), both usage (the class default) and help will have
+#programmer defaults and will cause a fatal error
+sub editBuiltinOptions
+  {
+    #This creates a lookup of builtin option name to an array of mutex set
+    #arrays it belongs to.  This will allow us to check each added option's sets
+    my $mns_lookup = {};
+    foreach my $mutex_name_set (values(%$builtin_mutexes))
+      {foreach my $bi_name (@$mutex_name_set)
+	 {push(@{$mns_lookup->{$bi_name}},$mutex_name_set)}}
 
-    #If there are user defaults, include --save-args in the short usage
-    my $save_args_def  = join(' ',getUserDefaults());
-    my $save_args_shrt = ($save_args_def ne '' ? 'Save accompanying command ' .
-			  'line arguments as defaults.' : '');
-    my $save_args_long = join('',('Save accompanying command line arguments ',
-				  'as defaults to be used in every call of ',
-				  'this script.  Replaces previously saved ',
-				  'args.  Supply without other args to ',
-				  'removed saved args.'));
+    #For each builtin option that has been customized, has a default, and whose
+    #default is editable
+    foreach my $bi_name (grep {$def_option_hash->{$_}->{CHANGED} &&
+				 hasValue($def_option_hash->{$_}
+					  ->{PARAMS}->{TYPE},
+					  $def_option_hash->{$_}
+					  ->{PARAMS}->{DEFAULT}) &&
+			         scalar(grep {$_ eq 'DEFAULT'}
+					@{$def_option_hash->{$_}->{EDITABLE}})}
+			 keys(%$def_option_hash))
+      {
+	#Cycle through all of its mutually exclusive partner groups which may
+	#have a class default among them
+	foreach my $mns (@{$mns_lookup->{$bi_name}})
+	  {
+	    #Got through those that have not been customized, but have a default
+	    #and unset them so they don't conflict with the class default
+	    #(yes, whether it's editable or not)
+	    foreach my $ucbi_name (grep {!$def_option_hash->{$_}->{CHANGED} &&
+					   hasValue($def_option_hash->{$_}
+						    ->{PARAMS}->{TYPE},
+						    $def_option_hash->{$_}
+						    ->{PARAMS}->{DEFAULT})}
+				   @$mns)
+	      {$def_option_hash->{$ucbi_name}->{PARAMS}->{DEFAULT} = undef}
+	  }
+      }
+  }
 
-    my $pipeline_long  = join('',('Supply --pipeline to include the script ',
-				  'name in errors, warnings, and debug ',
-				  'messages.  If not supplied (and no ',
-				  'default set), the script will ',
-				  'automatically determine if it is running ',
-				  'within a series of piped commands or as a ',
-				  'part of a parent script.  Note, supplying ',
-				  'either flag will prevent that check from ',
-				  'happening.'));
+sub getDesc
+  {
+    my $opt   = $_[0];
+    my $short = $_[1];
+    my $desc  = '';
+    my $opts  = ['extended','verbose','quiet','overwrite','skip','header',
+		 'version','force','debug','collision','save_args','error_lim',
+		 'append','pipeline','run','dry_run','usage','help'];
 
-    my $errlim_long    = join('',('Limits each type of error/warning to this ',
-				  'number of outputs.  Intended to declutter ',
-				  'output.  Note, a summary of warning/error ',
-				  'types is printed when the script ',
-				  'finishes, if one occurred or if in ',
-				  'verbose mode.  0 = no limit.  See also ',
-				  '--quiet.'));
+    if(!defined($opt))
+      {
+	error('Invalid built-in option: [',(defined($opt) ? $opt : 'undef'),
+	      '].',
+	      {DETAIL => ('Must be one of [' . join(',',@$opts) . ']')});
+	return('');
+      }
+    elsif($opt eq 'extended')
+      {
+	if($short)
+	  {$desc = 'Print detailed usage/help/version/header/errors/warnings.'}
+	else
+	  {
+	    $desc = << 'end_desc';
+Print extended usage/help/version/header (and errors/warnings where noted).
+end_desc
+	  }
+      }
+    elsif($opt eq 'verbose')
+      {
+	if($short)
+	  {$desc = ''}
+        else
+	  {$desc = 'Verbose mode.'}
+      }
+    elsif($opt eq 'quiet')
+      {
+	if($short)
+	  {$desc = ''}
+        else
+	  {$desc = 'Quiet mode.'}
+      }
+    elsif($opt eq 'overwrite')
+      {
+	if($short)
+	  {$desc = ''}
+        else
+	  {
+	    $desc = << 'end_desc';
+Overwrite existing output files.  By default, existing output files will not be over-written.
+end_desc
+	  }
+      }
+    elsif($opt eq 'skip')
+      {
+	if($short)
+	  {$desc = ''}
+        else
+	  {
+	    $desc = << 'end_desc';
+Skip existing output files.
+end_desc
+	  }
+      }
+    elsif($opt eq 'header')
+      {
+	if($short)
+	  {$desc = ''}
+        else
+	  {
+	    $desc = << 'end_desc';
+Outfile header flag.  Headers are commented with '#' and include script version, date, and command line call at the top of every output file.  See --extended.
+end_desc
+	  }
+      }
+    elsif($opt eq 'version')
+      {
+	if($short)
+	  {$desc = ''}
+        else
+	  {$desc = 'Print version info.  See --extended.'}
+      }
+    elsif($opt eq 'force')
+      {
+	if($short)
+	  {$desc = ''}
+        else
+	  {
+	    $desc = << 'end_desc';
+Prevent script-exit upon fatal error.  Use with extreme caution.  Will not override overwrite protection (see --overwrite or --skip).
+end_desc
+	  }
+      }
+    elsif($opt eq 'debug')
+      {
+	if($short)
+	  {$desc = ''}
+        else
+	  {
+	    $desc = << 'end_desc';
+Debug mode.  Prepends trace to warning/error messages.  Prints debug() messages based on debug level.  Values less than 0 debug the CommandLineInterface module used by this script.
+end_desc
+	  }
+      }
+    elsif($opt eq 'save_args')
+      {
+	if($short)
+	  {$desc = 'Save accompanying command line arguments as user defaults.'}
+        else
+	  {
+	    $desc = << 'end_desc';
+Save accompanying command line arguments as defaults to be used in every call of this script.  Replaces previously saved args.  Supply without other args to removed saved args.  When there are no user defaults set, this option will only appear in the advanced usage (--extended 2).
+end_desc
+	  }
+      }
+    elsif($opt eq 'pipeline')
+      {
+	if($short)
+	  {$desc = ''}
+        else
+	  {
+	    $desc = << 'end_desc';
+Supply --pipeline to include the script name in errors, warnings, and debug messages.  If not supplied (and no default set), the script will automatically determine if it is running within a series of piped commands or as a part of a parent script.  Note, supplying either flag will prevent that check from happening.
+end_desc
+	  }
+      }
+    elsif($opt eq 'error_lim')
+      {
+	if($short)
+	  {$desc = ''}
+        else
+	  {
+	    $desc = << 'end_desc';
+Limits each type of error/warning to this number of outputs.  Intended to declutter output.  Note, a summary of warning/error types is printed when the script finishes, if one occurred or if in verbose mode.  0 = no limit.  See also --quiet.
+end_desc
+	  }
+      }
+    elsif($opt eq 'append')
+      {
+	if($short)
+	  {$desc = ''}
+        else
+	  {
+	    $desc = << 'end_desc';
+Append mode.  Appends output to all existing output files instead of skipping or overwriting them.  This is useful for checkpointed jobs on a cluster.
+end_desc
+	  }
+      }
+    elsif($opt eq 'run')
+      {
+	if($short)
+	  {$desc = 'Run the script.'}
+        else
+	  {
+	    $desc = << 'end_desc';
+This option runs the script.  It is only necessary to supply this option if the script contains no required options or when all required options have default values that are either hard-coded, or provided via --save-args.
+end_desc
+	  }
+      }
+    elsif($opt eq 'dry_run')
+      {
+	if($short)
+	  {$desc = ''}
+        else
+	  {$desc = 'Run without generating output files.'}
+      }
+    elsif($opt eq 'usage')
+      {
+	if($short)
+	  {$desc = ''}
+        else
+	  {$desc = 'Print this usage message.'}
+      }
+    elsif($opt eq 'help')
+      {
+	if($short)
+	  {$desc = 'Print general info and file formats.'}
+        else
+	  {
+	    $desc = << 'end_desc';
+Print general info and file format descriptions.  Includes advanced usage examples with --extended.
+end_desc
+	  }
+      }
+    elsif($opt =~ /^collision/)
+      {
+	if($short)
+	  {$desc = ''}
+        else
+	  {
+	    my $cd = (#Case 1: User default (set via --save-args)
+		      defined($user_collide_mode) ? '' :
+		      (#Case 2: Programmer default (set via setDefaults)
+		       defined($def_collide_mode) ? '' :
+		       #Case 3: Default depends on out type
+		       "\n\n* The default differs based on whether the " .
+		       "output file is specified by an outfile suffix (in " .
+		       "which case the default is [$def_collide_mode_suff]) " .
+		       "or by a full output file name (in which case the " .
+		       "default is [$def_collide_mode_outf])."));
+	    $desc = << "end_desc";
+DEPRECATED.  When multiple input files output to the same output file, this option specifies what to do.  Merge mode will concatenate output in the common output file.  Rename mode (valid only if this script accepts multiple types of input files) will create a unique output file name by appending a unique combination ofinput file names together (with a delimiting dot).  Rename mode will throw an error if a unique file name cannot be constructed (e.g. when 2 input files of the same name in different directories are outputting to a common directory).  Error mode causes the script to quit with an error if multiple input files are detected to output to the same output file.$cd\n\nTHIS OPTION IS DEPRECATED AND HAS BEEN REPLACED BY 'SUPPLYING COLLISION MODE VIA addOutFileSuffixOptionAND addOutfileOption.  THIS OPTION HOWEVER WILL OVERRIDE THE COLLISION MODE OF ALL OUTFILE OPTIONS AND APPLY TO FILES THAT ARE NOT DEFINED BY addOutFileSuffixOption OR addOutfileOption IF OPENED MULTIPLE TIMES UNLESS SET EXPLICITLY IN THE openOut CALL.
+end_desc
+	  }
+      }
+    else
+      {
+	error("Invalid built-in option: [$opt].",
+	      {DETAIL => ('Must be one of [' . join(',',@$opts) . ']')});
+	return('');
+      }
 
-    my $append_long    = join('',('Append mode.  Appends output to all ',
-				  'existing output files instead of skipping ',
-				  'or overwriting them.  This is useful for ',
-				  'checkpointed jobs on a cluster.  Mutually ',
-				  'exclusive with --overwrite and --skip.'));
-
-    #long_descs - hidden
-    my $cd = (#Case 1: User default (set via --save-args)
-	      defined($user_collide_mode) ? '' :
-	      (#Case 2: Programmer default (set via setDefaults)
-	       defined($def_collide_mode) ? '' :
-	       #Case 3: Default depends on out type
-	       "\n\n* The default differs based on whether the output file " .
-	       "is specified by an outfile suffix (in which case the " .
-	       "default is [$def_collide_mode_suff]) or by a full output " .
-	       "file name (in which case the default is " .
-	       "[$def_collide_mode_outf])."));
-    my $collision_long = join('',('DEPRECATED.  When multiple input files ',
-				  'output to the same output file, this ',
-				  'option specifies what to do.  Merge mode ',
-				  'will concatenate output in the common ',
-				  'output file.  Rename mode (valid only if ',
-				  'this script accepts multiple types of ',
-				  'input files) will create a unique output ',
-				  'file name by appending a unique ',
-				  'combination ofinput file names together ',
-				  '(with a delimiting dot).  Rename mode ',
-				  'will throw an error if a unique file name ',
-				  'cannot be constructed (e.g. when 2 input ',
-				  'files of the same name in different ',
-				  'directories are outputting to a common ',
-				  'directory).  Error mode causes the script ',
-				  'to quit with an error if multiple input ',
-				  'files are detected to output to the same ',
-				  "output file.${cd}\n\nTHIS OPTION IS ",
-				  'DEPRECATED AND HAS BEEN REPLACED BY ',
-				  'SUPPLYING COLLISION MODE VIA ',
-				  'addOutFileSuffixOptionAND ',
-				  'addOutfileOption.  THIS OPTION HOWEVER ',
-				  'WILL OVERRIDE THE COLLISION MODE OF ALL ',
-				  'OUTFILE OPTIONS AND APPLY TO FILES THAT ',
-				  'ARE NOT DEFINED BY addOutFileSuffixOption ',
-				  'OR addOutfileOption IF OPENED MULTIPLE ',
-				  'TIMES UNLESS SET EXPLICITLY IN THE ',
-				  'openOut CALL.'));
-
-    addOption(FLAG       => 'verbose',
-	      VARREF     => \$verbose,
-	      TYPE       => 'count',
-	      REQUIRED   => 0,
-	      DEFAULT    => 0,
-	      HIDDEN     => 0,
-	      SHORT_DESC => '',
-	      LONG_DESC  => $verbose_long,
-	      ACCEPTS    => undef,
-	      ADVANCED   => 0);
-    addOption(FLAG       => 'quiet',
-	      VARREF     => \$quiet,
-	      TYPE       => 'bool',
-	      REQUIRED   => 0,
-	      DEFAULT    => 0,
-	      HIDDEN     => 0,
-	      SHORT_DESC => '',
-	      LONG_DESC  => $quiet_long,
-	      ACCEPTS    => undef,
-	      ADVANCED   => 0);
-    addOption(FLAG       => 'overwrite',
-	      VARREF     => \$overwrite,
-	      TYPE       => 'count',
-	      REQUIRED   => 0,
-	      DEFAULT    => 0,
-	      HIDDEN     => 0,
-	      SHORT_DESC => '',
-	      LONG_DESC  => $overwrite_long,
-	      ACCEPTS    => undef,
-	      ADVANCED   => 0);
-    addOption(FLAG       => 'skip',
-	      VARREF     => \$skip_existing,
-	      TYPE       => 'bool',
-	      REQUIRED   => 0,
-	      DEFAULT    => 0,
-	      HIDDEN     => 0,
-	      SHORT_DESC => '',
-	      LONG_DESC  => $skip_long,
-	      ACCEPTS    => undef,
-	      ADVANCED   => 0);
-    addOption(FLAG       => 'header',
-	      VARREF     => \$header,
-	      TYPE       => 'negbool',
-	      REQUIRED   => 0,
-	      DEFAULT    => 0,
-	      HIDDEN     => 0,
-	      SHORT_DESC => '',
-	      LONG_DESC  => $header_long,
-	      ACCEPTS    => undef,
-	      ADVANCED   => 0);
-    addOption(FLAG       => 'version',
-	      VARREF     => \$version,
-	      TYPE       => 'bool',
-	      REQUIRED   => 0,
-	      DEFAULT    => 0,
-	      HIDDEN     => 0,
-	      SHORT_DESC => '',
-	      LONG_DESC  => $version_long,
-	      ACCEPTS    => undef,
-	      ADVANCED   => 0);
-    addOption(FLAG       => 'extended',
-	      VARREF     => \$extended,
-	      TYPE       => 'count',
-	      REQUIRED   => 0,
-	      DEFAULT    => 0,
-	      HIDDEN     => 0,
-	      SHORT_DESC => $extended_short,
-	      LONG_DESC  => $extended_long,
-	      ACCEPTS    => undef,
-	      ADVANCED   => 0);
-    addOption(FLAG       => 'force',
-	      VARREF     => \$force,
-	      TYPE       => 'count',
-	      REQUIRED   => 0,
-	      DEFAULT    => 0,
-	      HIDDEN     => 0,
-	      SHORT_DESC => '',
-	      LONG_DESC  => $force_long,
-	      ACCEPTS    => undef,
-	      ADVANCED   => 1);
-    addOption(FLAG       => 'debug',
-	      VARREF     => \$DEBUG,
-	      TYPE       => 'count',
-	      REQUIRED   => 0,
-	      DEFAULT    => 0,
-	      HIDDEN     => 0,
-	      SHORT_DESC => '',
-	      LONG_DESC  => $debug_long,
-	      ACCEPTS    => undef,
-	      ADVANCED   => 1);
-    addOption(FLAG       => 'save-args',
-	      VARREF     => \$use_as_default,
-	      TYPE       => 'bool',
-	      REQUIRED   => 0,
-	      DEFAULT    => $save_args_def,
-	      HIDDEN     => 0,
-	      SHORT_DESC => $save_args_shrt,
-	      LONG_DESC  => $save_args_long,
-	      ACCEPTS    => undef,
-	      ADVANCED   => ($save_args_shrt eq '' ? 1 : 0));
-    addOption(FLAG       => 'pipeline',
-	      VARREF     => \$pipeline_mode,
-	      TYPE       => 'negbool',
-	      REQUIRED   => 0,
-	      DEFAULT    => undef,
-	      HIDDEN     => 0,
-	      SHORT_DESC => '',
-	      LONG_DESC  => $pipeline_long,
-	      ACCEPTS    => undef,
-	      ADVANCED   => 1);
-    addOption(FLAG       => 'error-limit',
-	      VARREF     => \$error_limit,
-	      TYPE       => 'integer',
-	      REQUIRED   => 0,
-	      DEFAULT    => $error_limit_default,
-	      HIDDEN     => 0,
-	      SHORT_DESC => '',
-	      LONG_DESC  => $errlim_long,
-	      ACCEPTS    => undef,
-	      ADVANCED   => 1);
-    addOption(FLAG       => 'append',
-	      VARREF     => \$append,
-	      TYPE       => 'bool',
-	      REQUIRED   => 0,
-	      DEFAULT    => 0,
-	      HIDDEN     => 0,
-	      SHORT_DESC => '',
-	      LONG_DESC  => $append_long,
-	      ACCEPTS    => undef,
-	      ADVANCED   => 1);
-    addOption(FLAG       => 'collision-mode',
-	      VARREF     => \$user_collide_mode,
-	      TYPE       => 'enum',
-	      REQUIRED   => 0,
-	      DEFAULT    => (#Case 1: User default (set via --save-args)
-			     defined($user_collide_mode) ? $user_collide_mode :
-			     (#Case 2: Programmer default (set via setDefaults)
-			      defined($def_collide_mode) ? $def_collide_mode :
-			      #Case 3: Default depends on out type
-			      "$def_collide_mode_suff|$def_collide_mode_outf*")
-			    ),
-	      HIDDEN     => 1,
-	      SHORT_DESC => '',
-	      LONG_DESC  => $collision_long,
-	      ACCEPTS    => ['merge','rename','error'],
-	      ADVANCED   => 1);
+    return($desc);
   }
 
 #This sub mainly adds little details to the usage and help output to explain
@@ -6598,67 +8959,260 @@ sub addBuiltinOptions
 #--save-args usage.
 sub applyOptionAddendums
   {
-    #Append the location of the defaults directory to the --save-args option
+    my $extended = getVarref('extended',1,1);
+
+    #This must be set after user defaults have been loaded so that the usage can
+    #display the user-set defaults
+    $usage_lookup->{collision}->{DISPDEF} =
+      (#Case 1: User default (set via --save-args)
+       defined($user_collide_mode) ? $user_collide_mode :
+       (#Case 2: Programmer default (set via setDefaults)
+	defined($def_collide_mode) ? $def_collide_mode :
+	#Case 3: Default depends on out type
+	"$def_collide_mode_suff|$def_collide_mode_outf*"));
+
+    #Update --save-args to show user defaults
     my $defdir = (defined($defaults_dir) ?
-		  $defaults_dir : (sglob('~/.rpst'))[0]);
+		  $defaults_dir : (sglob('~/.rpst',1))[0]);
     $defdir = 'undefined' if(!defined($defdir));
-    my $saveargs_usg = getUsageHash('save-args');
+    my $saveargs_usg = getUsageHash('save_args');
+    my $user_defaults = getUserDefaults();
+    if(scalar(@$user_defaults))
+      {
+	$saveargs_usg->{ADVANCED} = 0;
+	$saveargs_usg->{DISPDEF}  = join(' ',quoteArgs($user_defaults));
+      }
+    else
+      {
+	$saveargs_usg->{ADVANCED} = 1;
+	$saveargs_usg->{DISPDEF}  = undef;
+      }
     $saveargs_usg->{DETAILS} .= "  Values are stored in [$defdir].";
+
+    updateRunModeOptions();
 
     #Append overwrite's outdir abilities if an outdir option exists
     my $odf = getOutdirFlag();
-    my $overwrite_usg = getUsageHash('overwrite:+');
-    $overwrite_usg->{DETAILS} .= join('',('  Supply twice to safely remove ',
-					  'pre-existing output directories ',
-					  "(See $odf).  This will not remove ",
-					  'a directory containing manually ',
-					  'touched files.'));
+    if(defined($odf) && $odf ne '')
+      {
+	my $overwrite_usg = getUsageHash('overwrite');
+	$overwrite_usg->{DETAILS} .=
+	  join('',('  Supply twice to safely remove pre-existing output ',
+		   "directories (See $odf).  This will not remove a directory ",
+		   'containing manually touched files.'));
+      }
+
+    #Build 1 list of exclusive options per option (an option may belong to
+    #multiple mutually exclusive sets)
+    my $exclusives = {};
+    foreach my $excl_id (0..$#{$exclusive_options})
+      {
+	foreach my $opt1idx (0..$#{$exclusive_options->[$excl_id]})
+	  {
+	    my $optid1 = $exclusive_options->[$excl_id]->[$opt1idx];
+	    foreach my $opt2idx
+	      (($opt1idx + 1)..$#{$exclusive_options->[$excl_id]})
+	      {
+		my $optid2 = $exclusive_options->[$excl_id]->[$opt2idx];
+		$exclusives->{$optid1}->{$optid2} = 1;
+		$exclusives->{$optid2}->{$optid1} = 1;
+	      }
+	  }
+      }
+
+    ##
+    ## Make sure non-tagteamed outfile types are not hidden when required, non-
+    ## primary, and un-defaulted.  This must be done before cross-referencing so
+    ## that un-hidden options can be referenced.
+    ##
+
+    foreach my $usg (grep {$_->{OPTTYPE} =~ /^(outfile|suffix|logfile|logsuff)$/
+                             && !$_->{TAGTEAM} && $_->{HIDDEN} && $_->{REQUIRED}
+                               && !$_->{PRIMARY} && !hasDefault($_)}
+                     @$usage_array)
+      {
+        warning('Cannot hide [',getBestFlag($usg),'] when required',
+                ($usg->{OPTTYPE} =~ /^(outfile|suffix)$/ ? ', not primary ' .
+                 "(i.e. doesn't take input on standard in)" : ''),
+                ' and no default provided.  Unhiding.');
+        $usg->{HIDDEN} = 0;
+      }
+
+    #Append a mutually exclusive message to the detailed usage descriptions
+    foreach my $optid (keys(%$exclusives))
+      {
+	my $uh    = $usage_array->[$optid];
+	my @flags = map {$usage_array->[$_]->{OPTFLAG_DEF}}
+	  grep {($usage_array->[$_]->{HIDDEN} && $extended > 2) ||
+                  (((!$usage_array->[$_]->{HIDDEN} &&
+                     $usage_array->[$_]->{ADVANCED})) && $extended > 1) ||
+                       (!$usage_array->[$_]->{HIDDEN} &&
+                        !$usage_array->[$_]->{ADVANCED})}
+	    keys(%{$exclusives->{$optid}});
+	my @reqd_memberships =
+	  grep {exists($mutual_params->{$_}) &&
+		  exists($mutual_params->{$_}->{REQUIRED}) &&
+		    $mutual_params->{$_}->{REQUIRED}}
+	    keys(%{$exclusive_lookup->{$optid}});
+
+
+	#If there is no mention of 'mutually exclusive' flags
+	if(scalar(@flags) && $uh->{DETAILS} !~ /mutually exclusive/i)
+	  {
+	    $uh->{DETAILS} .=
+	      ($uh->{DETAILS} =~ /\n\n/ ? "\n\n" :
+	       ($uh->{DETAILS} =~ /\n/ ? "\n" : '  ')) .
+		 'Mutually exclusive with [' . join(', ',@flags) . ']';
+
+	    #Handle conditionally required (i.e. one of a mutually exclusive set
+	    #is required)
+	    if(scalar(keys(%{$exclusive_lookup->{$optid}})) == 1 &&
+	       scalar(@reqd_memberships))
+	      {$uh->{DETAILS} .= ', one of which is required.'}
+	    elsif(scalar(keys(%{$exclusive_lookup->{$optid}})) > 1 &&
+		  scalar(@reqd_memberships))
+	      {
+		foreach my $mutexid (@reqd_memberships)
+		  {
+		    my @rflags = map {$usage_array->[$_]->{OPTFLAG_DEF}}
+		      grep {($usage_array->[$_]->{HIDDEN} &&
+			     $usage_array->[$_]->{ADVANCED} && $extended > 2) ||
+			       ((($usage_array->[$_]->{HIDDEN} &&
+				  !$usage_array->[$_]->{ADVANCED}) ||
+				 (!$usage_array->[$_]->{HIDDEN} &&
+				  $usage_array->[$_]->{ADVANCED})) &&
+				$extended > 1) ||
+				  (!$usage_array->[$_]->{HIDDEN} &&
+				   !$usage_array->[$_]->{ADVANCED})}
+			@{$exclusive_options->[$mutexid]};
+		    if(scalar(@rflags) > 1)
+		      {$uh->{DETAILS} .=
+			 '.  One of [' . join(', ',@rflags) . '] is required'}
+		  }
+                $uh->{DETAILS} .= '.';
+	      }
+	    else
+	      {$uh->{DETAILS} .= '.'}
+	  }
+      }
   }
 
-#Uses globals: $explicit_dry_run, $explicit_run, $explicit_usage,
-#              $explicit_help, $run, $dry_run, $help, $usage
+sub quoteArgs
+  {
+    my $arg_array = $_[0];
+    my $str_array = [];
+
+    foreach my $arg (@$arg_array)
+      {
+	if($arg =~ /(?<!\\)[\s\*"']/ || $arg =~ /^<|>|\|(?!\|)/ ||
+	   $arg eq '' || $arg =~ /[\{\}\[\]\(\)]/)
+	  {
+	    if($arg =~ /(?<!\\)["]/)
+	      {$arg = "'" . $arg . "'"}
+	    else
+	      {$arg = '"' . $arg . '"'}
+	  }
+
+	push(@$str_array,$arg);
+      }
+
+    return(wantarray ? @$str_array : $str_array);
+  }
+
 sub determineRunMode
   {
-    my $determine_default_run_mode = (defined($_[0]) ? $_[0] : 0);
+    my $determine_default_run_mode  = (defined($_[0]) ? $_[0] : 0);
+    #This indicates whether a default infile name for a required infile type was
+    #found to be missing in the file system or had a permissions error, etc.
+    my $file_system_error           = (defined($_[1]) ? $_[1] : 0);
 
     #If the user explicitly set the run mode, there's nothing to be done
     if(setUserRunMode($determine_default_run_mode))
       {return()}
 
-    my $real_args = argsOrPipeSupplied();
-    my $status    = ($determine_default_run_mode ? getRunModeStatus() :
-		     doUnsetRequiredOptionsExist());
+    my $mode = getRunMode($determine_default_run_mode,$file_system_error);
 
-    debug({LEVEL => -1},"Default? [$determine_default_run_mode] ",
-	  "doUnsetRequiredOptionsExist: [$status].");
+    my $usgref = getVarref('usage',  0,1);
+    my $hlpref = getVarref('help',   0,1);
+    my $runref = getVarref('run',    0,1);
+    my $drnref = getVarref('dry_run',0,1);
 
-    $run     = 0;
-    $dry_run = 0;
-    $usage   = 0;
-    $help    = 0;
+    $$runref = 0;
+    $$drnref = 0;
+    $$usgref = 0;
+    $$hlpref = 0;
+
+    if($mode eq 'run')
+      {$$runref = 1}
+    elsif($mode eq 'dry-run')
+      {$$drnref = 1}
+    elsif($mode eq 'usage')
+      {$$usgref = 1}
+    elsif($mode eq 'help')
+      {$$hlpref = 1}
+    elsif($mode eq 'error')
+      {$$usgref = 2}
+
+    if((($$hlpref ? 1 : 0) + ($$usgref ? 1 : 0) + ($$runref ? 1 : 0) +
+	($$drnref ? 1 : 0)) > 1)
+      {error("Internal error(1): Ambiguous run mode.",
+	     {DETAIL =>
+	      "help:$$hlpref, usage:$$usgref, run:$$runref, dry-run:$$drnref"})}
+
+    debug({LEVEL => -1},"Values of: --usage $$usgref --run $$runref --dry-run ",
+	  "$$drnref --help $$hlpref.");
+
+    return($mode);
+  }
+
+sub getRunMode
+  {
+    my $determine_default_run_mode = (defined($_[0]) ? $_[0] : 0);
+    #This indicates whether a default infile name for a required infile type was
+    #found to be missing in the file system or had a permissions error, etc.
+    my $file_system_error          = (defined($_[1]) ? $_[1] : 0);
+
+    #If the user explicitly set the run mode, there's nothing to be done
+    my $user_mode = getUserRunMode($determine_default_run_mode);
+
+    if(defined($user_mode))
+      {return($user_mode)}
+
+    my $real_args = $determine_default_run_mode ? 0 : argsOrPipeSupplied();
+    my $status    = getRunStatus($determine_default_run_mode);
+
+    debug({LEVEL => -1},"Default? [$determine_default_run_mode] Run status: ",
+	  "[$status].");
+
+    my($mode);
+    my $default_run_mode = getDefaultRunMode();
 
     if($default_run_mode eq 'run')
       {
-	if($status == 0) #No required opts or all have values
-	  {$run = 1}
+	if($status == 0) #No required opts or all have values - proceed
+	  {$mode = 'run'}
 	else #Required opts not supplied
 	  {
-	    if(!$real_args) #No opts supplied
-	      {$usage = 1}
+	    #Set to run and expect an error if default files for a required
+	    #option do not exist, e.g. file not found or permission error
+	    if($file_system_error)
+	      {$mode = 'run'}
+	    elsif(!$real_args) #No opts supplied
+	      {$mode = 'usage'}
 	    else
-	      {$usage = 2}
+	      {$mode = 'error'}
 	  }
       }
-    elsif($default_run_mode eq 'dry-run')
+    elsif($default_run_mode eq 'dry_run')
       {
 	if($status == 0) #No required opts or all have values
-	  {$dry_run = 1}
+	  {$mode = 'dry-run'}
 	else #Required opts not supplied
 	  {
 	    if(!$real_args) #No opts supplied
-	      {$usage = 1}
+	      {$mode = 'usage'}
 	    else
-	      {$usage = 2}
+	      {$mode = 'error'}
 	  }
       }
     elsif($default_run_mode eq 'usage')
@@ -6666,16 +9220,16 @@ sub determineRunMode
 	if($status == 0) #No required opts or all have values
 	  {
 	    if($real_args)
-	      {$run = 1}
+	      {$mode = 'run'}
 	    else
-	      {$usage = 1}
+	      {$mode = 'usage'}
 	  }
 	else #Required opts not supplied
 	  {
 	    if(!$real_args) #No opts supplied
-	      {$usage = 1}
+	      {$mode = 'usage'}
 	    else
-	      {$usage = 2}
+	      {$mode = 'error'}
 	  }
       }
     elsif($default_run_mode eq 'help')
@@ -6683,242 +9237,89 @@ sub determineRunMode
 	if($status == 0) #No required opts or all have values
 	  {
 	    if($real_args)
-	      {$run = 1}
+	      {$mode = 'run'}
 	    else
-	      {$help = 1}
+	      {$mode = 'help'}
 	  }
 	else #Required opts not supplied
 	  {
 	    if(!$real_args) #No opts supplied
-	      {$help = 1}
+	      {$mode = 'help'}
 	    else
-	      {$usage = 2}
+	      {$mode = 'error'}
 	  }
       }
 
-    if((($help ? 1 : 0) + ($usage ? 1 : 0) + ($run ? 1 : 0) +
-	($dry_run ? 1 : 0)) > 1)
-      {error("Internal error: Ambigous run mode.")}
-
-    debug({LEVEL => -1},"Values of: --usage $usage --run $run --dry-run ",
-	  "$dry_run --help $help.  Mode: $default_run_mode Args: $real_args ",
-	  "Status: $status");
+    return($mode);
   }
 
-#This sub determines whether required options without (global default values or
-#user-supplied default values) exist.  Assumes user defaults have already been
-#set and that the command line has not been processed yet (but user defaults
-#have).
-#Globals used: $required_infile_types, $required_suffix_types,
-#              $required_outfile_types, $required_outdirs, $required_opt_refs
-sub getRunModeStatus
+#This sub determines whether it's possible to run the script, whether it's
+#before the command line has been processed or after.  To do this, it determines
+#whether required options without (global or user) default or command-line
+#supplied values exist.  Assumes all options have been added.
+#Returns 0 = ready to run or 1 = not ready to run
+sub getRunStatus
   {
-    #The following list of variables that track required options will be
-    #checked for default values.  If a required option exists with no default,
-    #returns 1(=not ready to run).  If no required options exist or all
-    #required options have defaults, returns 0(=ready to run).  If for some
-    #reason (e.g. a required value is a sub that it passed to GetOpt::Long),
-    #required options exist, but whether they have a value or not cannot be
-    #determined, returns -1(=unknown)
-    #$required_infile_types,   #Array of indexes
-    #$required_suffix_types,   #Array of arrays like [$idx,$suff_idx,$suff_id]
-    #$required_outfile_types,  #Array of indexes
-    #$required_outdirs,        #Integer/number
-    #$required_opt_refs        #Array of arrays of [references to ? - must
-    #                                               check,getoptstr,defstr]
+    my $defaults_only = (defined($_[0]) ? $_[0] : 0);
 
-    #If there are required input files
-    if(scalar(@$required_infile_types) > 0)
-       {
-	 #For each input file type
-	 foreach my $index (@$required_infile_types)
-	   {
-	     #default_infiles_array contains either undefined or validated 2D
-	     #arrays that may or may not be populated based on the user.  If
-	     #it's defined and populated, we can return true.
-	     if(scalar(@$default_infiles_array) < ($index + 1) ||
-	        !defined($default_infiles_array->[$index]) ||
-	        scalar(@{$default_infiles_array->[$index]}) == 0)
-	       {return(1)}
-	     else
-	       {
-		 foreach my $inner_array (@{$default_infiles_array->[$index]})
-		   {
-		     if(scalar(@$inner_array) == 0)
-		       {return(1)}
-		   }
-	       }
-	   }
-       }
-    #If there are required suffixes
-    if(scalar(@$required_suffix_types) > 0)
-       {
-	 #For each suffix type
-	 foreach my $suffix_array (@$required_suffix_types)
-	   {
-	     my $infile_index = $suffix_array->[0];
-	     my $suffix_index = $suffix_array->[1];
-
-	     #Note, this will process outfiles as well, which contain
-	     #artificial empty string (i.e. defined) suffixes, but that's OK.
-	     #It won't affect the result and outfiles are checked for defaults
-	     #later.
-
-	     #The outer and inner arrays are guaranteed/assumed to be there
-	     if(!defined($outfile_suffix_array->[$infile_index]
-			 ->[$suffix_index]))
-	       {return(1)}
-	   }
-       }
-    #If there are required output files
-    if(scalar(@$required_outfile_types) > 0)
-       {
-	 #For each output file type
-	 foreach my $index (@$required_outfile_types)
-	   {
-	     #This is processed the exact same way as the infiles because that
-	     #array is overloaded to contain outfiles as well.  Plus, the
-	     #default is saved in the same way and an artificial empty string
-	     #suffix is added.
-
-	     #default_infiles_array contains either undefined or validated 2D
-	     #arrays that may or may not be populated based on the user.  If
-	     #it's defined and populated, we can return true.
-	     if(scalar(@$default_infiles_array) < ($index + 1) ||
-	        !defined($default_infiles_array->[$index]) ||
-	        scalar(@{$default_infiles_array->[$index]}) == 0)
-	       {return(1)}
-	     else
-	       {
-		 foreach my $inner_array (@{$default_infiles_array->[$index]})
-		   {
-		     if(scalar(@$inner_array) == 0)
-		       {return(1)}
-		   }
-	       }
-	   }
-       }
-    #If there are required output directories
-    if(defined($required_outdirs) && $required_outdirs > 0)
-       {
-	 #TODO: Add support for more outdir types.  See req 212
-	 #Currently only 1 outdir type is supported.
-	 if(!defined($default_outdirs_array) ||
-	    scalar(@$default_outdirs_array) == 0)
-	   {return(1)}
-       }
-    #If there are required general options
-    if(scalar(@$required_opt_refs) > 0)
-       {
-	 #For each general option type
-	 foreach my $opt_info (@$required_opt_refs)
-	   {if(!wasGeneralOptionSupplied($opt_info))
-	      {return(1)}}
-       }
-
-    return(0);
-  }
-
-#This sub determines whether required options without (global default values or
-#user-supplied default values) exist.  Assumes user defaults have already been
-#set.
-#Globals used: $required_infile_types, $required_suffix_types,
-#              $required_outfile_types, $required_outdirs, $required_opt_refs
-sub doUnsetRequiredOptionsExist
-  {
-    #The following list of variables that track required options will be
-    #checked for default values.  If a required option exists with no default,
-    #resturns true, otherwise false.
-    #$required_infile_types,   #Array of indexes
-    #$required_suffix_types,   #Array of arrays like [$idx,$suff_idx,$suff_id]
-    #$required_outfile_types,  #Array of indexes
-    #$required_outdirs,        #Integer/number
-    #$required_opt_refs        #Array of references to ? - must check
-
-    #If there are required input files
-    if(scalar(@$required_infile_types) > 0)
-       {
-	 #For each input file type
-	 foreach my $index (@$required_infile_types)
-	   {
-	     #input_files_array contains either undefined or validated 2D
-	     #arrays that may or may not be populated based on the user.  If
-	     #it's defined and populated, we can return true.
-	     if(scalar(@$input_files_array) < ($index + 1) ||
-	        !defined($input_files_array->[$index]) ||
-	        scalar(@{$input_files_array->[$index]}) == 0)
-	       {return(1)}
-	     else
-	       {
-		 foreach my $inner_array (@{$input_files_array->[$index]})
-		   {
-		     if(scalar(@$inner_array) == 0)
-		       {return(1)}
-		   }
-	       }
-	   }
-       }
-    #If there are required suffixes
-    if(scalar(@$required_suffix_types) > 0)
-       {
-	 #For each suffix type
-	 foreach my $suffix_array (@$required_suffix_types)
-	   {
-	     my $infile_index = $suffix_array->[0];
-	     my $suffix_index = $suffix_array->[1];
-
-	     #Note, this will process outfiles as well, which contain
-	     #artificial empty string (i.e. defined) suffixes, but that's OK.
-	     #It won't affect the result and outfiles are checked for defaults
-	     #later.
-
-	     #The outer and inner arrays are guaranteed/assumed to be there
-	     if(!defined($outfile_suffix_array->[$infile_index]
-			 ->[$suffix_index]))
-	       {return(1)}
-	   }
-       }
-    #If there are required output files
-    if(scalar(@$required_outfile_types) > 0)
-       {
-	 #For each output file type
-	 foreach my $index (@$required_outfile_types)
-	   {
-	     #This is processed the exact same way as the infiles because that
-	     #array is overloaded to contain outfiles as well.  Plus, the
-	     #default is saved in the same way and an artificial empty string
-	     #suffix is added.
-
-	     #default_infiles_array contains either undefined or validated 2D
-	     #arrays that may or may not be populated based on the user.  If
-	     #it's defined and populated, we can return true.
-	     if(scalar(@$input_files_array) < ($index + 1) ||
-	        !defined($input_files_array->[$index]) ||
-	        scalar(@{$input_files_array->[$index]}) == 0)
-	       {return(1)}
-	     else
-	       {
-		 foreach my $inner_array (@{$input_files_array->[$index]})
-		   {
-		     if(scalar(@$inner_array) == 0)
-		       {return(1)}
-		   }
-	       }
-	   }
-       }
-    #If there are required output directories
-    if(defined($required_outdirs) && $required_outdirs > 0)
-       {
-	 #TODO: Add support for more outdir types.  See req 212
-	 #Currently only 1 outdir type is supported.
-	 if(!defined($outdirs_array) || scalar(@$outdirs_array) == 0)
-	   {return(1)}
-       }
-    #If there are required general options
-    if(scalar(@$required_opt_refs) > 0)
-       {foreach my $opt_info (@$required_opt_refs)
-	  {if(!wasGeneralOptionSupplied($opt_info))
-	     {return(1)}}}
+    foreach my $usg_hash (grep {$_->{REQUIRED}} @$usage_array)
+      {
+	#If this is a general option type
+	if(exists($genopt_types->{$usg_hash->{OPTTYPE}}))
+	  {if(!isRequiredGeneralOptionSatisfied($usg_hash,$defaults_only))
+	     {return(1)}}
+	#Else if this is an outdir
+	elsif($usg_hash->{OPTTYPE} eq 'outdir')
+	  {
+	    #TODO: Add support for more outdir types.  See req 212
+	    #Currently only 1 outdir type is supported.
+	    if(#There's no user default
+	       (!defined($usg_hash->{DEFAULT_USR}) ||
+		scalar(@{$usg_hash->{DEFAULT_USR}}) == 0) &&
+	       #There's no programmer default
+	       (!defined($usg_hash->{DEFAULT_PRG}) ||
+		scalar(@{$usg_hash->{DEFAULT_PRG}}) == 0) &&
+	       #The command line has not yet been processed or there's none
+	       #supplied on the command line
+	       ($defaults_only || $command_line_stage < ARGSREAD ||
+		!$usg_hash->{SUPPLIED} ||
+		scalar(@{getVarref($usg_hash,0,1)}) == 0))
+	      {return(1)}
+	  }
+	#Else if this is an outfile or infile (same structure)
+	elsif($usg_hash->{OPTTYPE} eq 'outfile' ||
+	      $usg_hash->{OPTTYPE} eq 'infile'  ||
+	      $usg_hash->{OPTTYPE} eq 'stub')
+	  {
+	    if(#There's no user default
+	       (!defined($usg_hash->{DEFAULT_USR}) ||
+		scalar(@{$usg_hash->{DEFAULT_USR}}) == 0) &&
+	       #There's no programmer default
+	       (!defined($usg_hash->{DEFAULT_PRG}) ||
+		scalar(@{$usg_hash->{DEFAULT_PRG}}) == 0) &&
+	       #The command line has not yet been processed or there's none
+	       #supplied on the command line
+	       ($defaults_only || $command_line_stage < ARGSREAD ||
+		!$usg_hash->{SUPPLIED} ||
+		scalar(@{getVarref($usg_hash,0,1)}) == 0))
+	      {return(1)}
+	  }
+	elsif(exists($scalar_fileopt_types->{$usg_hash->{OPTTYPE}}))
+	  {
+	    if(#There's no user default
+	       (!defined($usg_hash->{DEFAULT_USR}) ||
+		!defined($usg_hash->{DEFAULT_USR})) &&
+	       #There's no programmer default
+	       (!defined($usg_hash->{DEFAULT_PRG}) ||
+		!defined($usg_hash->{DEFAULT_PRG})) &&
+	       #The command line has not yet been processed or there's none
+	       #supplied on the command line
+	       ($defaults_only || $command_line_stage < ARGSREAD ||
+		!$usg_hash->{SUPPLIED} ||
+		!defined(getVarref($usg_hash,1,1))))
+	      {return(1)}
+	  }
+      }
 
     return(0);
   }
@@ -6926,194 +9327,1788 @@ sub doUnsetRequiredOptionsExist
 #Globals used: $GetOptHash
 sub loadUserDefaults
   {
-    debug({LEVEL => -1},"Default run mode before user: [$default_run_mode]");
-
     my @user_defaults = getUserDefaults();
+    my $status        = 0; #0=success
 
     if(scalar(@user_defaults) == 0)
-      {return(0)}
+      {return($status)}
 
     debug({LEVEL => -1},"Loading user defaults: [",join(' ',@user_defaults),
 	  "].");
 
-    #Set user-saved defaults
-    GetOptionsFromArray([@user_defaults],%$GetOptHash);
+    #Suppress warnings from GetOptionsFromArray if we're not in a run mode
+    my $orig_sig_warn = $SIG{__WARN__};
+    my $warn_buffer   = [];
+    $SIG{__WARN__}    = sub {push(@$warn_buffer,[@_])};
 
-    #Run mode may have been changed by the user via --save-args
-    setDefaultRunMode();
+    #Set the getopt_default_mode global for the getopt subs
+    $getopt_default_mode = 1;
 
-    updateDefaults(scalar(@user_defaults));
-
-    debug({LEVEL => -1},"Default run mode after user: [$default_run_mode]");
-
-    return(0);
-  }
-
-#This sets the default_run_mode based on flags supplied either on the command
-#line or from a user saved default
-sub setDefaultRunMode
-  {
-    my $num_exclusive_opts = (defined($explicit_dry_run) +
-			      defined($explicit_run)     +
-			      defined($explicit_usage)   +
-			      defined($explicit_help));
-    if($num_exclusive_opts > 1)
+    #Get the input options & catch any errors in option parsing
+    if(!GetOptionsFromArray([@user_defaults],%$GetOptHash))
       {
-	my @culprits = ();
-	push(@culprits,'--run')     if(defined($explicit_run));
-	push(@culprits,'--dry-run') if(defined($explicit_dry_run));
-	push(@culprits,'--usage')   if(defined($explicit_usage));
-	push(@culprits,'--help')    if(defined($explicit_help));
-	error('The following supplied options are mutually exclusive: [',
-	      join(',',@culprits),'].  Please provide only one.  If you ',
-	      'supplied only 1 or none, please check your saved user ',
-	      'defaults (reported at the bottom of the --usage output).');
-	quit(-10);
+        undef($getopt_default_mode);
+
+        my $fallbacks_hash = getBuiltinFallbacks();
+        my $arun_mode =
+          ($fallbacks_hash->{run} || $fallbacks_hash->{dry_run}) ? 1 : 0;
+
+        #If this is a run mode and (bad default values aren't over-ridden on the
+        #command line or there were unrecognized flags)
+	if($arun_mode &&
+           (!areBadOptValsReplaced(undef,0) || areThereBadFlags($warn_buffer)))
+	  {
+            $status = 1;
+
+	    if(scalar(@$warn_buffer))
+	      {$orig_sig_warn->(@$_) foreach(@$warn_buffer)}
+
+	    error('Getopt::Long::GetOptionsFromArray reported an error while ',
+		  'parsing the user default arguments [',
+		  join(' ',quoteArgs(\@user_defaults)),'].  The warning ',
+		  'should be above.  Please remove the offending argument(s) ',
+		  'by setting new defaults with --save-args and try again.');
+            $SIG{__WARN__} = $orig_sig_warn;
+	    quit(-9,0);
+	  }
       }
 
-    if(defined($explicit_run))
-      {$default_run_mode = 'run'}
-    elsif(defined($explicit_dry_run))
-      {$default_run_mode = 'dry-run'}
-    elsif(defined($explicit_help))
-      {$default_run_mode = 'help'}
-    elsif(defined($explicit_usage))
-      {$default_run_mode = 'usage'}
+    undef($getopt_default_mode);
 
-    #Clear out the explicit values so when we read the actual command line, we
-    #know what was actually supplied
-    undef($explicit_run);
-    undef($explicit_dry_run);
-    undef($explicit_help);
-    undef($explicit_usage);
+    $SIG{__WARN__} = $orig_sig_warn;
 
-    debug({LEVEL => -1},"Default Run Mode: [$default_run_mode].");
+    return($status);
   }
 
-#This sets the default_run_mode based on flags supplied either on the command
-#line or from a user saved default
+#This method checks if options whose user defaults are bad were explicitly
+#supplied (i.e. replaced) by values on the command line
+#This doesn't currently work for flagless-supplied options
+#Globals used: $bad_user_opts, $active_args
+sub areBadOptValsReplaced
+  {
+    my @bad_opt_hashes = (scalar(@_) > 0 && defined($_[0]) && scalar(@{$_[0]}) ?
+                          @{$_[0]} : @$bad_user_opts);
+    my $defaulted      = (scalar(@_) > 1 && defined($_[1]) ?
+                          $_[1] : $command_line_stage >= DEFAULTED);
+
+    #Create a hash of the strings from the command line
+    my $stop = 0;
+    my $arg_hash = {map {$_ => 1} grep {$stop = 1 if($_ eq '--');!$stop}
+                    @$active_args};
+
+    #If user defaults are not done (i.e. we're evaluating whether user defaults
+    #are replaced on the command line) and the --save-args flag was supplied,
+    #then all options are being replaced, whether they're on the command line or
+    #not
+    if(!$defaulted &&
+       #User defaults are being replaced
+       scalar(grep {exists($arg_hash->{$_})}
+              @{$usage_lookup->{save_args}->{OPTFLAGS}}))
+      {return(1)}
+
+    #For each option that has an invalid user default value
+    foreach my $opt_hash (@bad_opt_hashes)
+      {
+	my $replaced = 0;
+
+	#For each flag of the option whose user default is bad
+	foreach my $flag (@{$opt_hash->{OPTFLAGS}})
+	  {
+	    #If the flag exists on the command line
+	    if(exists($arg_hash->{$flag}))
+	      {
+		$replaced = 1;
+		last;
+	      }
+	  }
+
+	#If this option was not supplied on the command line to replace the bad
+	#user default, return false
+	if(!$replaced)
+	  {return(0)}
+      }
+
+    return(1);
+  }
+
+#Checks Getopt::Long warnings to see if it complains of an "Unknown option"
+sub areThereBadFlags
+  {
+    my $gol_warnings = $_[0];
+    return(scalar(grep {/Unknown option/} map {@$_} @$gol_warnings));
+  }
+
+#This gets the run mode based on flags supplied either on the command
+#line or from user defaults.  If requested, it will get the run mode only from
+#the user defaults and ignore the command line.
+#Globals used: $command_line_stage
+sub getUserRunMode
+  {
+    my $determine_default_run_mode = (defined($_[0]) ? $_[0] : 0);
+
+    my($mode);
+    my $usrdefopts           = [];
+    my $cmdlnopts            = [];
+    my $active_run_mode_opts = [];
+
+    #If we're looking for an explicitly supplied mode and the command line has
+    #not yet been parsed
+    if(!$determine_default_run_mode && $command_line_stage < ARGSREAD)
+      {
+	my $mode_flags_hash =
+	  {map {my $n = $_; map {$_ => $n} @{$usage_lookup->{$n}->{OPTFLAGS}}}
+	   qw(help usage run dry_run)};
+	if(scalar(grep {exists($mode_flags_hash->{$_})} @$active_args) == 1)
+	  {foreach my $name (map {$mode_flags_hash->{$_}}
+			     grep {exists($mode_flags_hash->{$_})}
+			     @$active_args)
+	     {push(@$cmdlnopts,getUsageHash($name))}}
+      }
+    #Else if we're looking for an explicitly supplied mode and the command line
+    #has been processed
+    elsif(!$determine_default_run_mode)
+      {foreach my $uh (map {getUsageHash($_)}
+		       qw(run dry_run usage help))
+	 {if($uh->{SUPPLIED})
+	    {push(@$cmdlnopts,$uh)}}}
+
+    #Get the user defaults (assuming they have been loaded)
+    foreach my $uh (map {getUsageHash($_)}
+		    qw(run dry_run usage help))
+      {if(defined($uh->{DEFAULT_USR}) && $uh->{DEFAULT_USR})
+	 {push(@$usrdefopts,$uh)}}
+
+    #Defer to the explicitly supplied options from the command line
+    if(scalar(@$cmdlnopts))
+      {$active_run_mode_opts = $cmdlnopts}
+    elsif(scalar(@$usrdefopts))
+      {$active_run_mode_opts = $usrdefopts}
+
+    if(scalar(@$active_run_mode_opts) == 1)
+      {
+	my $uh = $active_run_mode_opts->[0];
+
+	if($uh->{USAGE_NAME} eq 'run')
+	  {$mode = 'run'}
+	elsif($uh->{USAGE_NAME} eq 'dry_run')
+	  {$mode = 'dry-run'}
+	elsif($uh->{USAGE_NAME} eq 'help')
+	  {$mode = 'help'}
+	elsif($uh->{USAGE_NAME} eq 'usage')
+	  {$mode = 'usage'}
+      }
+    else
+      {debug({LEVEL => -1},scalar(@$active_run_mode_opts),
+	     " run mode options are set.")}
+
+    return($mode);
+  }
+
+sub getSavedUserRunMode
+  {
+    my $user_defaults_array = getUserDefaults();
+
+    my $run_mode_flags_hash = {};
+    foreach my $uhash (map {$usage_lookup->{$_}} qw(usage help run dry_run))
+      {foreach my $flag (@{$uhash->{OPTFLAGS}})
+	 {$run_mode_flags_hash->{$flag} = ($uhash->{USAGE_NAME} eq 'dry_run' ?
+					   'dry-run' : $uhash->{USAGE_NAME})}}
+
+    my $modes_hash = {};
+    foreach my $arg (@$user_defaults_array)
+      {if(exists($run_mode_flags_hash->{$arg}))
+	 {$modes_hash->{$run_mode_flags_hash->{$arg}}++}}
+
+    my($mode);
+    if(scalar(keys(%$modes_hash)) > 1)
+      {error("Ambiguous run modes among user-saved arguments: [",
+	     join(',',keys(%$run_mode_flags_hash)),"].")}
+    elsif(scalar(keys(%$modes_hash)) == 1)
+      {$mode = (keys(%$modes_hash))[0]}
+
+    return($mode);
+  }
+
+#This sets the run mode based on flags supplied either on the command
+#line or from user defaults.  If requested, it will set the run mode only from
+#the user defaults and ignore the command line.
 sub setUserRunMode
   {
-    my $determine_default_run_mode = $_[0];
+    my $determine_default_run_mode = (defined($_[0]) ? $_[0] : 0);
 
     my $setit = 0;
+    my $mode  = getUserRunMode($determine_default_run_mode);
 
-    my $num_exclusive_opts = (defined($explicit_dry_run) +
-			      defined($explicit_run)     +
-			      defined($explicit_usage)   +
-			      defined($explicit_help));
-    if($num_exclusive_opts > 1)
+    my $usgref = getVarref('usage',  0,1);
+    my $hlpref = getVarref('help',   0,1);
+    my $runref = getVarref('run',    0,1);
+    my $drnref = getVarref('dry_run',0,1);
+
+    if(defined($mode) && scalar(grep {$mode eq $_} qw(run dry-run help usage)))
       {
-	my @culprits = ();
-	push(@culprits,'--run')     if(defined($explicit_run));
-	push(@culprits,'--dry-run') if(defined($explicit_dry_run));
-	push(@culprits,'--usage')   if(defined($explicit_usage));
-	push(@culprits,'--help')    if(defined($explicit_help));
-	error('The following supplied options are mutually exclusive: [',
-	      join(',',@culprits),'].  Please provide only one.  If you ',
-	      'supplied only 1 or none, please check your saved user ',
-	      'defaults (reported at the bottom of the --usage output).');
-	unless($determine_default_run_mode)
-	  {usage(1)}
-	quit(-11,$determine_default_run_mode);
-      }
-
-    $run = $dry_run = $usage = $help = 0;
-
-    if(defined($explicit_run))
-      {
-	$run   = 1;
 	$setit = 1;
-      }
-    elsif(defined($explicit_dry_run))
-      {
-	$dry_run = 1;
-	$setit   = 1;
-      }
-    elsif(defined($explicit_help))
-      {
-	$help  = 1;
-	$setit = 1;
-      }
-    elsif(defined($explicit_usage))
-      {
-	$usage = 1;
-	$setit = 1;
+
+	$$runref = $$drnref = $$usgref = $$hlpref = 0;
+
+	if($mode eq 'run')
+	  {$$runref = 1}
+	elsif($mode eq 'dry-run')
+	  {$$drnref = 1}
+	elsif($mode eq 'help')
+	  {$$hlpref = 1}
+	elsif($mode eq 'usage')
+	  {$$usgref = 1}
       }
 
-    if((($help ? 1 : 0) + ($usage ? 1 : 0) + ($run ? 1 : 0) +
-	($dry_run ? 1 : 0)) > 1)
-      {error("Internal error: Ambigous run mode.")}
+    if((($$hlpref ? 1 : 0) + ($$usgref ? 1 : 0) + ($$runref ? 1 : 0) +
+	($$drnref ? 1 : 0)) > 1)
+      {error("Internal error(2): Ambiguous run mode.",
+	     {DETAIL =>
+	      "help:$$hlpref, usage:$$usgref, run:$$runref, dry-run:$$drnref " .
+	      "determine default:$determine_default_run_mode"})}
 
     return($setit);
   }
 
+#This sets the default_run_mode based on flags supplied either on the command
+#line or from a user saved default
+#Globals used: $exclusive_options
+sub processMutuallyExclusiveOptionSets
+  {
+    #Supply 1 to fill in DEFAULT_CLI based on user and programmer defaults
+    #instead of VARREF_STG
+    my $defaults_only = defined($_[0]) ? $_[0] : 0;
+    my $status        = 0;
+
+    if(!defined($exclusive_options) || ref($exclusive_options) ne 'ARRAY')
+      {
+	error("Invalid or no mutually exclusive options array supplied.",
+	      {DETAIL => 'Not defined or not an array.'});
+	return(1);
+      }
+
+    #This sub should only be called after the command line has been parsed
+    if($command_line_stage < ARGSREAD)
+      {
+	error("Command line has not yet been parsed.");
+	return(1);
+      }
+
+    if(scalar(@$exclusive_options) == 0)
+      {return($status)}
+
+    my %conflict_sets = ();
+    my %status_hash   = ();
+
+    if(scalar(@$exclusive_options) ==
+       scalar(grep {ref($_) eq 'ARRAY'} @$exclusive_options))
+      {
+	my $mutex_opt_hash = {};
+
+	#This records desired option states by each mutually exclusive set and
+	#the desire to set a value trumps not setting a value
+	foreach my $mutexid (0..$#{$exclusive_options})
+	  {
+            addMutexSettings($mutexid,$mutex_opt_hash,$defaults_only);
+            $status_hash{$mutexid} = 0;
+          }
+
+	#This checks to see if all the set values are copacetic between the
+	#mutex sets
+	foreach my $mutexid (0..$#{$exclusive_options})
+	  {
+	    if(checkMutuallyExclusiveSettings($mutexid,
+                                              $mutex_opt_hash,
+                                              $defaults_only))
+	      {
+		$status                  = 1;
+                $status_hash{$mutexid}   = 1;
+		$conflict_sets{$mutexid} = 1
+		  if($mutual_params->{$mutexid}->{BUILTIN});
+	      }
+	  }
+
+        foreach my $mutexid (0..$#{$exclusive_options})
+          {
+            #If status is OK (0), set the values
+            if(!$status_hash{$mutexid} &&
+               setMutuallyExclusiveOptions($mutexid,
+                                           $mutex_opt_hash,
+                                           $defaults_only))
+              {
+                $status                  = 1;
+                $status_hash{$mutexid}   = 1;
+                next if($defaults_only); #No fallbacks staging when setting defs
+                $conflict_sets{$mutexid} = 1
+                  if($mutual_params->{$mutexid}->{BUILTIN});
+              }
+          }
+
+        foreach my $mutexid (keys(%status_hash))
+          {$mutual_params->{$mutexid}->{VALIDATED} = $status_hash{$mutexid}}
+      }
+    else
+      {
+	error("Invalid or no mutually exclusive options array supplied.",
+	      {DETAIL => ('Not an array of scalars or an array of arrays of ' .
+			  'scalars.')});
+	$status = 1;
+      }
+
+    #If any builtin mutex sets had conflicts
+    if(scalar(keys(%conflict_sets)))
+      {
+	#Force-set their options' values to CLI defaults from the
+	#def_option_hash
+        my $all_conflict_opts = {}; #conflicted opts regardless of mutex set
+	foreach my $mutexid (keys(%conflict_sets))
+	  {foreach my $uh (map {$usage_array->[$_]}
+                           @{$exclusive_options->[$mutexid]})
+             {$all_conflict_opts->{$uh->{USAGE_NAME}} = $uh}}
+
+        my $one_set        = {}; #One of a mutex set has a CLI default value
+        my $fallbacks_hash = getBuiltinFallbacks(keys(%$all_conflict_opts));
+	foreach my $mutexid (keys(%conflict_sets))
+	  {
+            foreach my $uh (map {$usage_array->[$_]}
+                            @{$exclusive_options->[$mutexid]})
+              {
+                my $optname = $uh->{USAGE_NAME};
+                my $def     = (exists($fallbacks_hash->{$optname}) ?
+                               $fallbacks_hash->{$optname} :
+                               $def_option_hash->{$optname}->{DEFAULT});
+                if(hasValue($uh->{OPTTYPE},$def))
+                  {$one_set->{$mutexid} = 1}
+              }
+         }
+
+        my $already_done = {};
+        foreach my $optname (keys(%$all_conflict_opts))
+          {
+            my $uh  = $usage_lookup->{$optname};
+            my $def = (exists($fallbacks_hash->{$optname}) ?
+                       $fallbacks_hash->{$optname} :
+                       $def_option_hash->{$optname}->{DEFAULT});
+            $already_done->{$optname} = 1;
+            debug("Setting CLI default [$def] for $uh->{OPTFLAG_DEF} due to ",
+                  "conflict.",{LEVEL => -1});
+            stageVarref($uh,$def);
+          }
+
+        #If the mutex set is required (i.e. one must have a value) but there's a
+        #conflict potentially between options in the set, neither of whose CLI
+        #default is "set" (implied by existence in the $one_set hash), set the
+        #entire(/remainder of the) set
+        foreach my $mutexid (grep {exists($mutual_params->{$_}->{REQUIRED}) &&
+                                     $mutual_params->{$_}->{REQUIRED} &&
+                                       !exists($one_set->{$_})}
+                             keys(%conflict_sets))
+          {
+            foreach my $uh (grep {!exists($already_done->{$_->{USAGE_NAME}})}
+                            map {$usage_array->[$_]}
+                            @{$exclusive_options->[$mutexid]})
+              {
+                my $optname = $uh->{USAGE_NAME};
+                my $def     = (exists($fallbacks_hash->{$optname}) ?
+                               $fallbacks_hash->{$optname} :
+                               $def_option_hash->{$optname}->{DEFAULT});
+                $already_done->{$optname} = 1;
+                debug("Setting CLI default [$def] for $uh->{OPTFLAG_DEF} due ",
+                      "to conflict.",{LEVEL => -1});
+                stageVarref($uh,$def);
+              }
+          }
+
+	#Additionally set any undefined STG defaults to their CLI defaults,
+	#since we are going to issue a fatal error (and we don't want it to spew
+	#all sorts of debug junk (which may be desireable in other fatal error
+	#contexts)
+	foreach my $uh (grep {!hasValue($_->{OPTTYPE},$_->{VARREF_STG})}
+			map {$usage_lookup->{$_}}
+			grep {defined($def_option_hash->{$_}->{DEFAULT})}
+			keys(%$fallbacks_hash))
+	  {
+            #Only stage the value if it doesn't create another mutex conflict
+            my $mutex_partner_has_val =
+              scalar(grep {my $meid=$_;scalar(grep {hasValue($usage_array->[$_]
+                                                             ->{OPTTYPE},
+                                                             $usage_array->[$_]
+                                                             ->{VARREF_STG})}
+                                              @{$exclusive_options->[$meid]})}
+                     keys(%{$exclusive_lookup->{$uh->{OPTION_ID}}}));
+
+            if(!$mutex_partner_has_val)
+              {
+                my $optname = $uh->{USAGE_NAME};
+                my $def     = (exists($fallbacks_hash->{$optname}) ?
+                               $fallbacks_hash->{$optname} :
+                               $def_option_hash->{$optname}->{DEFAULT});
+                stageVarref($uh,$def);
+              }
+          }
+      }
+
+    return($status);
+  }
+
+#This method records the settings dictated by mutually exclusive options WRT
+#this hierarchy: command line, user defaults, and programmer defaults, but
+#doesn't implement those changes.  It just records what each set wants.  Another
+#sub checks if those desires conflict.  The reason to do this is that options
+#can belong to multiple mutually exclusive sets and can conflict.
+sub addMutexSettings
+  {
+    my $mutex_id         = $_[0];
+    my $mutex_opt_states = $_[1];
+    my $defaults_only    = defined($_[2]) ? $_[2] : 0;
+
+    my $local_exclusives = $exclusive_options->[$mutex_id];
+
+    if(!defined($local_exclusives) || ref($local_exclusives) ne 'ARRAY' ||
+       scalar(@$local_exclusives) != scalar(grep {ref($_) eq ''}
+					    @$local_exclusives))
+      {
+	error("Invalid or no mutually exclusive options array supplied.");
+	return($mutex_opt_states);
+      }
+
+    #This sub should only be called after the command line has been parsed
+    if($command_line_stage < ARGSREAD)
+      {
+	error("Command line has not yet been parsed.");
+	return($mutex_opt_states);
+      }
+
+    if(scalar(@$local_exclusives) == 0)
+      {return($mutex_opt_states)}
+
+    #The set opts are the things we use to test mutual exclusivity
+    my $num_sup             = 0;
+    my $set_opts            = [];
+    my $unset_opts          = [];
+    my $cmdln_sup           = 0;
+    my $cmdln_setopts       = [];
+    my $cmdln_expunsetopts  = [];
+    my $cmdln_unsetopts     = [];
+    my $usrdef_sup          = 0;
+    my $usrdef_setopts      = [];
+    my $usrdef_expunsetopts = [];
+    my $usrdef_unsetopts    = [];
+    my $prgdef_sup          = 0;
+    my $prgdef_setopts      = [];
+    my $prgdef_unsetopts    = [];
+
+    foreach my $uh (map {$usage_array->[$_]} @$local_exclusives)
+      {
+	if($uh->{SUPPLIED})
+	  {
+            $cmdln_sup++;
+            if(hasValue($uh->{OPTTYPE},getVarref($uh,0,1)))
+              {push(@$cmdln_setopts,$uh)}
+            else
+              {push(@$cmdln_expunsetopts,$uh)}
+          }
+	else
+	  {push(@$cmdln_unsetopts,$uh)}
+
+	if($uh->{SUPPLIED_UDF})
+	  {
+            $usrdef_sup++;
+            if(hasValue($uh->{OPTTYPE},$uh->{DEFAULT_USR}))
+              {push(@$usrdef_setopts,$uh)}
+            else
+              {push(@$usrdef_expunsetopts,$uh)}
+          }
+	else
+	  {push(@$usrdef_unsetopts,$uh)}
+
+        #Programmer defaults are not guaranteed to have been handled in a way
+        #that we can just check if its defined (or call something like
+        #hasActualDefinedDefault).  But that doesn't matter.  This is the bottom
+        #of the hierarchy.  All that matters is if it has a positive value.
+	if(hasValue($uh->{OPTTYPE},$uh->{DEFAULT_PRG}))
+          {
+            $prgdef_sup++;
+            push(@$prgdef_setopts,$uh);
+          }
+	else
+	  {push(@$prgdef_unsetopts,$uh)}
+      }
+
+    my $winner  = '';
+    my $num_set = 0;
+    #Figure out which set of options to use in order: supplied, user, programmer
+    if($cmdln_sup && !$defaults_only)
+      {
+        $num_sup    = $cmdln_sup;
+        $num_set    = scalar(@$cmdln_setopts);
+
+	$set_opts   = $cmdln_setopts;
+
+        #Save the explicitly unset values first
+	$unset_opts = $cmdln_expunsetopts;
+        #If anything was explicitly set, all the rest must be unset
+        if($num_set && scalar(@$cmdln_unsetopts))
+          {push(@$unset_opts,@$cmdln_unsetopts)}
+
+	$winner     = 'c'; #Command line
+      }
+    elsif($usrdef_sup)
+      {
+        $num_sup    = $usrdef_sup;
+        $num_set    = scalar(@$usrdef_setopts);
+
+	$set_opts   = $usrdef_setopts;
+
+        #Save the explicitly unset values first
+	$unset_opts = $usrdef_expunsetopts;
+        #If anything was explicitly set, all the rest must be unset
+        if($num_set && scalar(@$usrdef_unsetopts))
+          {push(@$unset_opts,@$usrdef_unsetopts)}
+
+	$winner     = 'u'; #User defaults
+      }
+    elsif($prgdef_sup)
+      {
+        $num_sup    = $prgdef_sup;
+        $num_set    = scalar(@$prgdef_setopts);
+
+	$set_opts   = $prgdef_setopts;
+
+	$unset_opts = $prgdef_unsetopts;
+
+	$winner     = 'p'; #Programmer defaults
+      }
+    else
+      {return($mutex_opt_states)}
+
+    #We will ignore everything except valid settings
+    if($num_set <= 1 && $num_sup)
+      {
+	#there should be only one "set" option, however, count options can be
+	#explicitly set on the command line or in user defaults as "unset"
+	#(i.e. 0), so we're going to mark all of them as being intentionally
+	#"set"
+        my($soid);
+	foreach $soid (map {$_->{OPTION_ID}} @$set_opts)
+	  {$mutex_opt_states->{$soid}->{1}->{$mutex_id} =
+	     {WINNERTYPE => $winner,
+	      WINNERID   => $soid}}
+
+	#Options of type bool are the only ones we can set an actual "unset"
+        #value to (i.e. '0')
+        foreach my $uoid (map {$_->{OPTION_ID}} @$unset_opts)
+	  {$mutex_opt_states->{$uoid}->{0}->{$mutex_id} =
+	     {WINNERTYPE => $winner,
+	      WINNERID   => $soid}} #$soid could be undef if 1 memb explty unset
+      }
+
+    return($mutex_opt_states);
+  }
+
+#This checks for conflicts between sets and what they want set/unset
+sub checkMutuallyExclusiveSettings
+  {
+    my $mutex_id         = $_[0];
+                                  #            SET?
+    my $mutex_opt_states = $_[1]; #->{optid}->{0|1}->{$mutexid}={WINNERTYPE=> ?,
+                                  #                              WINNERID  => ?}
+    my $defaults_only    = defined($_[2]) ? $_[2] : 0;
+    my $local_exclusives = $exclusive_options->[$mutex_id];
+    my $status           = 0;
+
+    if(!defined($local_exclusives) || ref($local_exclusives) ne 'ARRAY' ||
+       scalar(@$local_exclusives) != scalar(grep {ref($_) eq ''}
+					    @$local_exclusives))
+      {
+	error("Invalid mutex set ID supplied.");
+	return(1);
+      }
+
+    #This sub should only be called after the command line has been parsed
+    if($command_line_stage < ARGSREAD)
+      {
+	error("Command line has not yet been parsed.");
+	return(1);
+      }
+
+    if(scalar(@$local_exclusives) == 0)
+      {return($status)}
+
+    #The set opts are the things we use to test mutual exclusivity
+    my $num_chk             = 0;
+    my $set_opts            = [];
+    my $unset_opts          = [];
+    my $cmdln_chk           = 0;
+    my $cmdln_setopts       = [];
+    my $cmdln_expunsetopts  = [];
+    my $cmdln_unsetopts     = [];
+    my $usrdef_chk          = 0;
+    my $usrdef_setopts      = [];
+    my $usrdef_expunsetopts = [];
+    my $usrdef_unsetopts    = [];
+    my $prgdef_chk          = 0;
+    my $prgdef_setopts      = [];
+    my $prgdef_unsetopts    = [];
+
+    #This determines winners when you take into account saved winners of other
+    #sets (according to mutex_opt_states).  Basically, it needs 2 passes due to
+    #the order you go through the sets.  All conflicts will result in errors or
+    #warnings (if validly over-ridden) in the bottom of this sub.  But for right
+    #now, we're only deciding the winner of the current set if mutex_opt_states
+    #"allows" it, i.e. the states show that this set wasn't over-ridden
+    foreach my $uh (map {$usage_array->[$_]} @$local_exclusives)
+      {
+        #Don't need to check for conflicts, as this is the top of the hierarchy
+	if($uh->{SUPPLIED})
+	  {
+            $cmdln_chk++;
+            if(hasValue($uh->{OPTTYPE},getVarref($uh,0,1)))
+              {push(@$cmdln_setopts,$uh)}
+            else
+              {push(@$cmdln_expunsetopts,$uh)}
+          }
+	else
+	  {push(@$cmdln_unsetopts,$uh)}
+
+	if($uh->{SUPPLIED_UDF} &&
+
+           ## Only set as "set" if they made it through the hierarchical check
+           ## as set
+
+           #This option isn't in the states hash or it is in the states hash
+           #(implied) and it is set consistent with the winning states
+           (!exists($mutex_opt_states->{$uh->{OPTION_ID}}) ||
+
+            (hasValue($uh->{OPTTYPE},$uh->{DEFAULT_USR}) &&
+             exists($mutex_opt_states->{$uh->{OPTION_ID}}->{1})) ||
+
+            (!hasValue($uh->{OPTTYPE},$uh->{DEFAULT_USR}) &&
+             exists($mutex_opt_states->{$uh->{OPTION_ID}}->{0}))))
+	  {
+            $usrdef_chk++;
+            if(hasValue($uh->{OPTTYPE},$uh->{DEFAULT_USR}))
+              {push(@$usrdef_setopts,$uh)}
+            else
+              {push(@$usrdef_expunsetopts,$uh)}
+          }
+	else
+	  {push(@$usrdef_unsetopts,$uh)}
+
+        #Programmer defaults are not guaranteed to have been handled in a way
+        #that we can just check if its defined (or call something like
+        #hasActualDefinedDefault).  But that doesn't matter.  This is the bottom
+        #of the hierarchy.  All that matters is if it has a positive value.
+	if(hasValue($uh->{OPTTYPE},$uh->{DEFAULT_PRG}) &&
+
+	   ## Only set as "set" if they made it through the hierarchical check
+	   ## as set
+
+	   #This option isn't in the states hash or it is in
+	   #the states hash and it is set
+	   (!exists($mutex_opt_states->{$uh->{OPTION_ID}}) ||
+	    exists($mutex_opt_states->{$uh->{OPTION_ID}}->{1})))
+          {
+            $prgdef_chk++;
+            push(@$prgdef_setopts,$uh);
+          }
+	else
+	  {push(@$prgdef_unsetopts,$uh)}
+      }
+
+    my $message = '';
+    my $winner  = '';
+    my $num_set = 0;
+    #Figure out which set of options to use in order: supplied, user, programmer
+    if($cmdln_chk && !$defaults_only)
+      {
+        $num_chk    = $cmdln_chk;
+        $num_set    = scalar(@$cmdln_setopts);
+
+	$set_opts   = $cmdln_setopts;
+
+        #Save the explicitly unset values first
+	$unset_opts = $cmdln_expunsetopts;
+        #If anything was set and other unset opts exist, they must be unset
+        if($num_set && scalar(@$cmdln_unsetopts))
+          {push(@$unset_opts,@$cmdln_unsetopts)}
+
+	$winner     = 'c'; #Command line
+	$message    = 'as supplied on the command line';
+      }
+    elsif($usrdef_chk)
+      {
+        $num_chk    = $usrdef_chk;
+        $num_set    = scalar(@$usrdef_setopts);
+
+	$set_opts   = $usrdef_setopts;
+
+        #Save the explicitly unset values first
+	$unset_opts = $usrdef_expunsetopts;
+        #If anything was set and other unset opts exist, they must be unset
+        if($num_set && scalar(@$usrdef_unsetopts))
+          {push(@$unset_opts,@$usrdef_unsetopts)}
+
+	$winner     = 'u'; #User defaults
+	my $sauh    = getUsageHash('save_args');
+	my $uuh     = getUsageHash('usage');
+	$message = "as set by $sauh->{OPTFLAG_DEF} (see $uuh->{OPTFLAG_DEF})";
+      }
+    elsif($prgdef_chk)
+      {
+        $num_chk    = $prgdef_chk;
+        $num_set    = scalar(@$prgdef_setopts);
+
+	$set_opts   = $prgdef_setopts;
+
+	$unset_opts = $prgdef_unsetopts;
+
+	$winner     = 'p'; #Programmer defaults
+	$message    = 'as set by the script author';
+      }
+
+    if($num_set > 1)
+      {
+	error("The following options ($message) are mutually exclusive: [",
+	      join(',',map {getBestFlag($_)} @$set_opts),
+	      '].',
+	      {DETAIL =>
+	       ($winner eq 'c' ? 'Please provide only one.' :
+		($winner eq 'u' ?
+		 join('',('You can either update the user defaults using ',
+			  '--save-args to remove all but one of the listed ',
+			  'options above, or over-ride the user defaults by ',
+			  'supplying only one of the listed options on the ',
+			  'command line.')) :
+		 join('',('There are multiple defaults set in the creation of ',
+			  'these mutually exclusive options.  Either the ',
+			  'parameters to the add*Option calls should not ',
+			  'supply a DEFAULT, the VARREF should not be ',
+			  'initialized (treated as a default), or the ',
+			  'indicated options should not be included in the ',
+			  'call to makeMutuallyExclusive().  A user can over-',
+			  'ride these incompatible defaults either by using ',
+			  '--save-args to supply only one of the options ',
+			  '(applies to all runs) or by supplying one of the ',
+			  'options on the command line each time the script ',
+			  'is run.'))))}) unless($defaults_only);
+        $status = 1;
+      }
+    elsif($num_set == 1)
+      {
+	foreach my $soid (map {$_->{OPTION_ID}} @$set_opts)
+	  {
+	    #If we cannot implement the winner's setting and it's not overridden
+	    if(!(#Everything is copacetic because...
+		 #This option has no settings or
+		 !exists($mutex_opt_states->{$soid}) ||
+		 #nothing wants it to be unset or
+		 !exists($mutex_opt_states->{$soid}->{0}) ||
+		 #There are no mutex sets whose winner was decided at the same
+		 #hierarchy level that want this unset (i.e. there's a clear
+		 #winner)
+		 scalar(grep {$_->{WINNERTYPE} eq $winner}
+			values(%{$mutex_opt_states->{$soid}->{0}})) == 0))
+	      {
+		my $lfag1   = getBestFlag($usage_array->[$soid]);
+		my $flag2s  = [map {getBestFlag($usage_array->[$_])}
+			       map {$_->{WINNERID}}
+			       values(%{$mutex_opt_states->{$soid}->{0}})];
+		my $err_msg = "$lfag1 is mutually exclusive with [" .
+		  join(', ',@$flag2s) . '], all of which were set via ' .
+		    ($winner eq 'c' ? 'the command line' :
+		     ($winner eq 'u' ? 'user' : 'programmer') . ' default') .
+		       '.';
+		my $detail =
+		  "$lfag1 is a part of the mutually exclusive set(s): ";
+		#Another mutex set (or sets) at the same hierarchy level
+		#determined a different winner and thus they want this option to
+		#be unset, so let's identify the winners of those sets to report
+		#why there's a problem
+		my @conf_sets = ();
+		foreach my $mutex_conf (keys(%{$mutex_opt_states->{$soid}
+						 ->{0}}))
+		  {
+		    my $winnr_info = $mutex_opt_states->{$soid}->{0}
+		      ->{$mutex_conf};
+		    my $excl_opt   = $winnr_info->{WINNERID};
+		    my $flag2      = getBestFlag($usage_array->[$excl_opt]);
+		    my $mutexflags = [map {getBestFlag($usage_array->[$_])}
+				      @{$exclusive_options->[$mutex_conf]}];
+		    push(@conf_sets,join(', ',@$mutexflags));
+		  }
+		$detail .= '[' . (scalar(@$flag2s) > 1 ? '(' : '') .
+		  join('), (',@conf_sets) . (scalar(@$flag2s) > 1 ? ')' : '') .
+		    '].';
+		error({DETAIL => $detail},$err_msg) unless($defaults_only);
+		$status = 1;
+	      }
+	  }
+
+        #Check the options that should not be set as well
+        foreach my $uoid (map {$_->{OPTION_ID}} @$unset_opts)
+	  {
+	    #If we cannot implement the winner's setting and it's not over-
+	    #ridden
+	    if(!(!exists($mutex_opt_states->{$uoid}) ||
+		 #The value is not set (i.e. '1' as a key does not exist)
+                 !exists($mutex_opt_states->{$uoid}->{1}) ||
+                 #There are no mutex sets whose winner was decided at the same
+                 #hierarchy level that want this set (i.e. there's a clear
+                 #winner)
+                 scalar(grep {$_->{WINNERTYPE} eq $winner}
+                        values(%{$mutex_opt_states->{$uoid}->{1}})) == 0))
+	      {$status = 1}
+	  }
+
+	#Check the programmer defaults
+	if(scalar(grep {hasValue($_->{OPTTYPE},$_->{DEFAULT_PRG})}
+		  map {$usage_array->[$_]} @$local_exclusives) > 1)
+	  {
+	    warning("The following options are supposed to be mutually ",
+		    "exclusive, but they have all been configured in the ",
+		    "script with default values: [",
+		    join(',',map {$_->{OPTFLAG_DEF}}
+                         grep {hasValue($_->{OPTTYPE},$_->{DEFAULT_PRG})}
+                         map {$usage_array->[$_]} @$local_exclusives),'].',
+		    {DETAIL =>
+		     join('',('Either the parameters to the add*Option calls ',
+			      'should not supply a DEFAULT, the VARREF should ',
+			      'not be initialized (treated as a default), or ',
+			      'the indicated options should not be included ',
+			      'in the call to makeMutuallyExclusive().'))})
+              unless($defaults_only);
+	  }
+	#Check the user defaults
+	if(scalar(grep {$_->{SUPPLIED_UDF} &&
+                          hasValue($_->{OPTTYPE},$_->{DEFAULT_USR})}
+		  map {$usage_array->[$_]} @$local_exclusives) > 1)
+	  {
+	    warning("The following options are supposed to be mutually ",
+		    "exclusive, but they have all been configured in the ",
+		    "script with default values: [",
+		    join(',',map {$_->{OPTFLAG_DEF}}
+                         grep {$_->{SUPPLIED_UDF} &&
+                                 hasValue($_->{OPTTYPE},$_->{DEFAULT_USR})}
+		  map {$usage_array->[$_]} @$local_exclusives),'].',
+		    {DETAIL =>
+		     join('',('Please update the user defaults using ',
+			      '--save-args to remove all but one of the ',
+			      'listed options above.'))})
+              unless($defaults_only);
+	  }
+      }
+    #Else - there my be no values positively set because the user explicitly set
+    #all values negatively, but there may be lower hierarchy problems, for which
+    #we should issue warnings
+    elsif($winner ne 'p')
+      {
+	#Check the programmer defaults
+	if(scalar(grep {hasValue($_->{OPTTYPE},$_->{DEFAULT_PRG})}
+		  map {$usage_array->[$_]} @$local_exclusives) > 1)
+	  {
+	    warning("The following options are supposed to be mutually ",
+		    "exclusive, but they have all been configured in the ",
+		    "script with default values: [",
+		    join(',',map {$_->{OPTFLAG_DEF}}
+                         grep {hasValue($_->{OPTTYPE},$_->{DEFAULT_PRG})}
+                         map {$usage_array->[$_]} @$local_exclusives),'].',
+		    {DETAIL =>
+		     join('',('Either the parameters to the add*Option calls ',
+			      'should not supply a DEFAULT, the VARREF should ',
+			      'not be initialized (treated as a default), or ',
+			      'the indicated options should not be included ',
+			      'in the call to makeMutuallyExclusive().'))})
+              unless($defaults_only);
+	  }
+	#Check the user defaults
+	if(scalar(grep {$_->{SUPPLIED_UDF} &&
+                          hasValue($_->{OPTTYPE},$_->{DEFAULT_USR})}
+		  map {$usage_array->[$_]} @$local_exclusives) > 1)
+	  {
+	    warning("The following options are supposed to be mutually ",
+		    "exclusive, but they have all been configured in the ",
+		    "script with default values: [",
+		    join(',',map {$_->{OPTFLAG_DEF}}
+                         grep {$_->{SUPPLIED_UDF} &&
+                                 hasValue($_->{OPTTYPE},$_->{DEFAULT_USR})}
+		  map {$usage_array->[$_]} @$local_exclusives),'].',
+		    {DETAIL =>
+		     join('',('Please update the user defaults using ',
+			      '--save-args to remove all but one of the ',
+			      'listed options above.'))})
+              unless($defaults_only);
+	  }
+      }
+
+    return($status);
+  }
+
+#This sub takes the un-conflicting settings and tries to set them.  This could
+#result in an error due to the over-ride settings.  I.e. if a winning set wants
+#to implcitly change the setting of a lower hierarchy value (i.e. a default),
+#but the set is not over-ridable, it will generate an error and propose a way to
+#resolve the issue
+sub setMutuallyExclusiveOptions
+  {
+    my $mutex_id         = $_[0];
+                                  #            SET?
+    my $mutex_opt_states = $_[1]; #->{optid}->{0|1}->{$mutexid}={WINNERTYPE=> ?,
+                                  #                              WINNERID  => ?}
+    my $defaults_only    = defined($_[2]) ? $_[2] : 0;
+
+    my $local_exclusives = $exclusive_options->[$mutex_id];
+    my $overridable      = (exists($mutual_params->{$mutex_id}) &&
+                            exists($mutual_params->{$mutex_id}
+                                   ->{OVERRIDABLE}) &&
+                            defined($mutual_params->{$mutex_id}
+                                    ->{OVERRIDABLE}) ?
+                            $mutual_params->{$mutex_id}->{OVERRIDABLE} : 0);
+
+    if(!defined($local_exclusives) || ref($local_exclusives) ne 'ARRAY' ||
+       scalar(@$local_exclusives) != scalar(grep {ref($_) eq ''}
+					    @$local_exclusives))
+      {
+	error("Invalid mutex set ID supplied.");
+	return(1);
+      }
+
+    #This sub should only be called after the command line has been parsed
+    if($command_line_stage < ARGSREAD)
+      {
+	error("Command line has not yet been parsed.");
+	return(1);
+      }
+
+    if(scalar(@$local_exclusives) == 0)
+      {return(0)}
+
+    my $num_vld             = 0;
+    my $set_opts            = [];
+    my $unset_opts          = [];
+    my $cmdln_vld           = 0;
+    my $cmdln_setopts       = [];
+    my $cmdln_expunsetopts  = [];
+    my $cmdln_unsetopts     = [];
+    my $usrdef_vld          = 0;
+    my $usrdef_setopts      = [];
+    my $usrdef_expunsetopts = [];
+    my $usrdef_unsetopts    = [];
+    my $prgdef_vld          = 0;
+    my $prgdef_setopts      = [];
+    my $prgdef_expunsetopts = [];
+    my $prgdef_unsetopts    = [];
+
+    foreach my $uh (map {$usage_array->[$_]} @$local_exclusives)
+      {
+	if($uh->{SUPPLIED})
+	  {
+            if(hasValue($uh->{OPTTYPE},getVarref($uh,0,1)) &&
+               (!exists($mutex_opt_states->{$uh->{OPTION_ID}}) ||
+                (exists($mutex_opt_states->{$uh->{OPTION_ID}}->{1}) &&
+                 (!exists($mutex_opt_states->{$uh->{OPTION_ID}}->{0}) ||
+                  #There are no other command line options that want this unset
+                  scalar(grep {$_->{WINNERTYPE} eq 'c'}
+                         values(%{$mutex_opt_states->{$uh->{OPTION_ID}}
+                                    ->{0}})) == 0))))
+              {
+                $cmdln_vld++;
+                push(@$cmdln_setopts,$uh);
+              }
+            elsif(!hasValue($uh->{OPTTYPE},getVarref($uh,0,1)) &&
+                  (!exists($mutex_opt_states->{$uh->{OPTION_ID}}) ||
+                   (exists($mutex_opt_states->{$uh->{OPTION_ID}}->{0}) &&
+                    (!exists($mutex_opt_states->{$uh->{OPTION_ID}}->{1}) ||
+                     #There are no other command line options that want this set
+                     scalar(grep {$_->{WINNERTYPE} eq 'c'}
+                            values(%{$mutex_opt_states->{$uh->{OPTION_ID}}
+                                       ->{1}})) == 0))))
+              {
+                $cmdln_vld++;
+                push(@$cmdln_expunsetopts,$uh);
+              }
+            else
+              {push(@$cmdln_unsetopts,$uh)}
+          }
+	else
+	  {push(@$cmdln_unsetopts,$uh)}
+
+	if($uh->{SUPPLIED_UDF})
+	  {
+            if(## Only set as "set" if they made it through the hierarchical
+               ## check as set or we're recording states to look for conflicts
+
+               #This option isn't in the states hash or it is in
+               #the states hash and it is set and is not unset by an over-riding
+               #or conflicting mutex set
+               hasValue($uh->{OPTTYPE},$uh->{DEFAULT_USR}) &&
+               (!exists($mutex_opt_states->{$uh->{OPTION_ID}}) ||
+                (exists($mutex_opt_states->{$uh->{OPTION_ID}}->{1}) &&
+                 (!exists($mutex_opt_states->{$uh->{OPTION_ID}}->{0}) ||
+                  #There are no other command line or user default options that
+                  #want this option unset
+                  scalar(grep {$_->{WINNERTYPE} ne 'p'}
+                         values(%{$mutex_opt_states->{$uh->{OPTION_ID}}
+                                    ->{0}})) == 0))))
+              {
+                $usrdef_vld++;
+                push(@$usrdef_setopts,$uh);
+              }
+            elsif(!hasValue($uh->{OPTTYPE},$uh->{DEFAULT_USR}) &&
+                  (!exists($mutex_opt_states->{$uh->{OPTION_ID}}) ||
+                   (exists($mutex_opt_states->{$uh->{OPTION_ID}}->{0}) &&
+                    (!exists($mutex_opt_states->{$uh->{OPTION_ID}}->{1}) ||
+                     #There are no other command line or user default options
+                     #that want this option unset
+                     scalar(grep {$_->{WINNERTYPE} ne 'p'}
+                            values(%{$mutex_opt_states->{$uh->{OPTION_ID}}
+                                       ->{1}})) == 0))))
+              {
+                $usrdef_vld++;
+                push(@$usrdef_expunsetopts,$uh);
+              }
+            else
+              {push(@$usrdef_unsetopts,$uh)}
+          }
+	else
+	  {push(@$usrdef_unsetopts,$uh)}
+
+	if(hasValue($uh->{OPTTYPE},$uh->{DEFAULT_PRG}) &&
+
+	   ## Only set as "set" if they made it through the hierarchical check
+	   ## as set or we're recording states to look for conflicts
+
+	   #This option isn't in the states hash or it is in
+	   #the states hash and it is set and is not unset
+	   (!exists($mutex_opt_states->{$uh->{OPTION_ID}}) ||
+            (exists($mutex_opt_states->{$uh->{OPTION_ID}}->{1}) &&
+             #There are no other options (regardless of level) that want this
+             #unset
+             !exists($mutex_opt_states->{$uh->{OPTION_ID}}->{0}))))
+	  {
+            $prgdef_vld++;
+            push(@$prgdef_setopts,$uh);
+          }
+	else
+	  {push(@$prgdef_unsetopts,$uh)}
+      }
+
+    my $message = '';
+    my $winner  = '';
+    my $num_set = 0;
+    #Figure out which set of options to use in order: supplied, user, programmer
+    if($cmdln_vld && !$defaults_only)
+      {
+	$set_opts = $cmdln_setopts;
+        $num_set  = scalar(@$set_opts);
+
+        #Save the explicitly unset values first
+	$unset_opts = $cmdln_expunsetopts;
+        #If anything was set and other unset opts exist, they must be unset
+        if($num_set && scalar(@$cmdln_unsetopts))
+          {push(@$unset_opts,@$cmdln_unsetopts)}
+
+	$winner = 'c'; #Command line
+      }
+    elsif($usrdef_vld)
+      {
+	$set_opts = $usrdef_setopts;
+        $num_set  = scalar(@$set_opts);
+
+        #Save the explicitly unset values first
+	$unset_opts = $usrdef_expunsetopts;
+        #If anything was set and other unset opts exist, they must be unset
+        if($num_set && scalar(@$usrdef_unsetopts))
+          {push(@$unset_opts,@$usrdef_unsetopts)}
+
+	$winner = 'u'; #User defaults
+      }
+    else
+      {
+	$set_opts   = $prgdef_setopts;
+	$unset_opts = $prgdef_unsetopts;
+	$winner     = 'p'; #Programmer defaults
+      }
+
+    #This determines the number of options that are being set to an actual value
+    #as opposed to being unset (e.g. --verbose 0)
+    my $num_set_opts = scalar(@$set_opts);
+
+    #If any options were supplied or positively set
+    if($num_set_opts)
+      {
+	foreach my $soid (0..$#{$set_opts})
+	  {
+            #If we're staging defaults only (for the usage output), or if the
+            #option doesn't have a value and there was a selection made
+            if($winner eq 'u' &&
+               ($defaults_only ||
+                (!$set_opts->[$soid]->{SUPPLIED} &&
+                 !hasValue($set_opts->[$soid]->{OPTTYPE},
+                           getVarref($set_opts->[$soid],0,1)))))
+	      {stageVarref($set_opts->[$soid],
+                           $set_opts->[$soid]->{DEFAULT_USR},
+                           $defaults_only)}
+            elsif($winner eq 'p' &&
+                  ($defaults_only ||
+                   (!$set_opts->[$soid]->{SUPPLIED} &&
+                    !hasValue($set_opts->[$soid]->{OPTTYPE},
+                              getVarref($set_opts->[$soid],0,1)))))
+	      {stageVarref($set_opts->[$soid],
+                           $set_opts->[$soid]->{DEFAULT_PRG},
+                           $defaults_only)}
+	  }
+      }
+
+    #If there are any unset options
+    if(scalar(@$unset_opts))
+      {
+	#Options of type bool are the only ones we can set an actual "unset"
+        #value to (i.e. '0')
+        my $cannot_unset = [];
+        foreach my $uh (@$unset_opts)
+	  {
+            my $cl = hasValue($uh->{OPTTYPE},getVarref($uh,0,1));
+            my $ud = hasValue($uh->{OPTTYPE},$uh->{DEFAULT_USR});
+            my $pd = hasValue($uh->{OPTTYPE},$uh->{DEFAULT_PRG});
+            if(!$overridable &&
+               (#The option to unset has a set value on the command line and
+                #we're not setting defaults
+                ($cl && !$defaults_only) ||
+                #The option to unset was not supplied on the command line and
+                #its user default has a set value
+                ((!$uh->{SUPPLIED} || $defaults_only) && $ud) ||
+                #The option to unset was not supplied on the command line,
+                #was not supplied as a user default,
+                #and its programmer default has a set value
+                ((!$uh->{SUPPLIED} || $defaults_only) && !$uh->{SUPPLIED_UDF} &&
+                 $pd)))
+              {
+                my $vsb = ($cl && !$defaults_only ? 'c' : ($ud ? 'u' : 'p'));
+                push(@$cannot_unset,[$uh,$vsb]);
+	      }
+            else
+              {
+                my $unset_val = undef;
+                if(($cl && !$defaults_only) ||
+                   ((!$uh->{SUPPLIED} || $defaults_only) && $ud) ||
+                   ((!$uh->{SUPPLIED} || $defaults_only) &&
+                    !$uh->{SUPPLIED_UDF} && $pd))
+                  {$unset_val = ($uh->{OPTTYPE} eq 'bool' ? 0 : undef)}
+                elsif($uh->{OPTTYPE} eq 'bool' || $uh->{OPTTYPE} eq 'count')
+                  {
+                    #If there is a defined value
+                    if(!$defaults_only &&
+                       hasValue($uh->{OPTTYPE},getVarref($uh,0,1),1))
+                      {$unset_val = getVarref($uh,0,1)}
+                    elsif(hasValue($uh->{OPTTYPE},$uh->{DEFAULT_USR},1))
+                      {$unset_val = $uh->{DEFAULT_USR}}
+                    elsif(hasValue($uh->{OPTTYPE},$uh->{DEFAULT_PRG},1))
+                      {$unset_val = $uh->{DEFAULT_PRG}}
+                  }
+
+                stageVarref($uh,$unset_val,$defaults_only);
+              }
+          }
+
+        if(scalar(@$cannot_unset))
+          {
+	    #Remedies for the command line
+	    my $fixcl =
+	      join(' ',map {getBestFlag($_->[0]) . ' 0'}
+		   grep {$_->[0]->{OPTTYPE} =~ /^(negbool|count)$/}
+		   @$cannot_unset);
+	    #Remedies via user default
+	    my $fixud =
+	      join(' ',map {getBestFlag($_->[0])}
+		   grep {$_->[1] eq 'u' &&
+			   $_->[0]->{OPTTYPE} !~ /^(negbool|count)$/}
+		   @$cannot_unset);
+	    #Warn about no remedy case
+	    my $norem =
+	      join(' ',map {getBestFlag($_->[0])}
+		   grep {$_->[1] eq 'p' &&
+			   $_->[0]->{OPTTYPE} !~ /^(negbool|count)$/}
+		   @$cannot_unset);
+
+            #The only mutex sets allowed to have overlapping members are non-
+            #overridable sets.  The only way an option can be overridden is by
+            #another option in the same set, however this may affect the
+            #overridden option in other sets it may belong to. If this/these
+            #option/s are in a set where no overriding option was set, do not
+            #issue the error, because this set is not the source of the
+            #conflict.  That conflict is guaranteed to be reported in the set
+            #where it originated.  Also do not issue error when only checking
+            #defaults (otherwise, we'd get the error twice).
+            if($num_set_opts && !$defaults_only)
+              {
+                #Note, direct command line conflicts should have been caught
+                #earlier
+                error("Un-overridable mutually exclusive option(s) conflict: [",
+                      ($num_set_opts == 1 ?
+                       getBestFlag($set_opts->[0]) .
+                       ($winner eq 'c' ? ' supplied on the command line' :
+                        ($winner eq 'u' ? ' set via user-default' :
+                         ' set by hard-coded default')) . ' cannot override ' :
+                       ''),
+                      join(', ',map {getBestFlag($_->[0]) .
+                                       ($_->[1] eq 'c' ? ' supplied on the ' .
+                                        'command line' :
+                                        ($_->[1] eq 'u' ?
+                                         ' set via user-default' :
+                                         ' set by hard-coded default'))}
+                           @$cannot_unset),"].",
+                      {DETAIL =>
+                       join('',
+                            ($fixcl ne '' ? "Supply the following on the " .
+                             "command line to perform a manual override: [" .
+                             "$fixcl].\n" : ''),
+                            ($fixud ne '' ? "These options must be removed " .
+                             "from the user defaults (see --save-args): [" .
+                             "$fixud].\n" : ''),
+                            ($norem ne '' ? "The only way to unset a hard-" .
+                             "coded, non-overridable default, such as " .
+                             "[$norem], is to change the script code, " .
+                             "because there's no flag to supply to un-set " .
+                             "this default.\n" : '')) .
+                       ('The non-overridable mutually exclusive set related ' .
+                        'to this error is: [' .
+                        join(', ',map {getBestFlag($usage_array->[$_])}
+                             @$local_exclusives) . '].')});
+                return(1);
+              }
+          }
+      }
+
+    #If nothing from this mutex group was set, but one from the set is required
+    if(scalar(@$set_opts) == 0 &&
+       exists($mutual_params->{$mutex_id}->{REQUIRED}) &&
+       $mutual_params->{$mutex_id}->{REQUIRED})
+      {
+        my $num_set = scalar(grep {exists($mutex_opt_states->{$_}) &&
+                                     exists($mutex_opt_states->{$_}->{1})}
+                             @$local_exclusives);
+        if($num_set)
+          {
+            my $set_opts   = [grep {exists($mutex_opt_states->{$_}) &&
+                                      exists($mutex_opt_states->{$_}->{1})}
+                              @$local_exclusives];
+            my $num_unset  = scalar(grep {exists($mutex_opt_states->{$_}) &&
+                                            exists($mutex_opt_states->{$_}
+                                                   ->{0})} @$local_exclusives);
+
+            foreach my $set_opt (@$set_opts)
+              {
+                my $overriders = [map {[#option ID,         MutexID it comes frm
+                                        $_->[1]->{WINNERID},$_->[0]]}
+                                  map {[each(%{$mutex_opt_states->{$_}->{0}})]}
+                                  grep {exists($mutex_opt_states->{$_}->{0})}
+                                  ($set_opt)];
+                error("A default setting for [",
+                      getBestFlag($usage_array->[$set_opt]),
+                      "] from the required mutually exclusive option group: ",
+                      "[",join(', ',map {getBestFlag($usage_array->[$_])}
+                               @$local_exclusives),
+                      "] appears to have been over-ridden by one of [",
+                      join(', ',
+                           map {my $i = $_;
+                                getBestFlag($usage_array->[$i->[0]]) .
+                                   ' in the mutually exclusive group: (' .
+                                     join(', ',
+                                          map {getBestFlag($usage_array->[$_])}
+                                          @{$exclusive_options->[$i->[1]]}) .
+                                            ')'}
+                           @$overriders),"] in another mutually exclusive ",
+                      "group, and there is no fallback default.  Please re-",
+                      "run and supply one of [",
+                      join(', ',map {getBestFlag($usage_array->[$_])}
+                           grep {!exists($mutex_opt_states->{$_}) ||
+                                   !exists($mutex_opt_states->{$_}->{0})}
+                           @$local_exclusives),
+                      "] (or if that list is empty, remove the settings for: [",
+                      join(', ',map {getBestFlag($usage_array->[$_->[0]])}
+                           @$overriders),"]).") unless($defaults_only);
+              }
+          }
+      }
+
+    return(0);
+  }
+
+#This returns either $uh->{VARREF_CLI} or the scalar it refers to.  Errors if
+#called before validation of the command line - this is so I can find everywhere
+#where values are inappropriately accessed too early
+sub getVarref
+  {
+    my $arg   = $_[0];
+    my $drf   = (defined($_[1]) ? $_[1] : 0); #De-reference scalar references
+    my $stg   = (defined($_[2]) ? $_[2] : 0); #Whether the staged value is OK
+    my $noerr = (defined($_[3]) ? $_[3] : 0); #Use when called from error()
+    unless(defined($arg))
+      {
+	error('1st arg required.') unless($noerr);
+	return($_[0]);
+      }
+    my $uh  = (ref($arg) eq 'HASH' ?
+	       $arg : (ref($arg) eq '' && exists($usage_lookup->{$arg}) ?
+		       $usage_lookup->{$arg} : undef));
+    if(ref($arg) ne '' && ref($arg) ne 'HASH')
+      {
+	error('1st arg must be a usage hash or option name.') unless($noerr);
+	return(undef);
+      }
+    elsif(ref($arg) eq '' && !exists($usage_lookup->{$arg}))
+      {
+        if(!$noerr && (!exists($def_option_hash->{$arg}) ||
+                       $def_option_hash->{$arg}->{ADDED}))
+          {error("1st arg [$arg] must be a usage hash or valid option name.")}
+	return(undef);
+      }
+
+    my $vrk = 'VARREF_CLI';
+    if($stg && $command_line_stage < COMMITTED)
+      {$vrk = 'VARREF_STG'}
+    elsif(!$stg && $command_line_stage < COMMITTED)
+      {
+	#This is mainly here for debugging the module
+	error("VARREF for option [$uh->{USAGE_NAME}] accessed before ",
+	      "validation $command_line_stage.") unless($noerr);
+      }
+
+    return($drf ? deRefVarref($uh->{$vrk}) : $uh->{$vrk});
+  }
+
+sub stageVarref
+  {
+    my $uh    = $_[0];
+    my $val   = $_[1];
+    my $dodef = defined($_[2]) ? $_[2] : 0;
+    my $type  = $uh->{OPTTYPE};
+    my $flag  = getBestFlag($uh);
+
+    if(ref($val) ne 'ARRAY' && ref($val) ne 'SCALAR' && ref($val) ne '')
+      {
+	error("Invalid variable type supplied: [",ref($val),"].",
+	      {DETAIL => 'Only SCALAR and ARRAY are supported.'});
+	return(1);
+      }
+
+    if(exists($array_genopt_types->{$type}) ||
+       exists($array2dopt_types->{$type}))
+      {
+	if(!defined($val))
+	  {$val = []}
+
+	if(ref($val) ne 'ARRAY')
+	  {error("Variable and option type mismatch for option $flag: [",
+		 ref($val),"] vs. [$type: ARRAY].")}
+	elsif($dodef)
+          {@{$uh->{DEFAULT_CLI}} = @{copyArray($val)}}
+        else
+	  {
+            #Need to preserve the reference in the staged value so that
+            #callGOLCodeRef will be able to identify which value is supplied
+            #(programmer default, user default, or other value)
+            #@{$uh->{VARREF_STG}}  = @{copyArray($val)};
+            $uh->{VARREF_STG} = $val;
+          }
+      }
+    elsif(exists($scalaropt_types->{$type}))
+      {
+	my $tvar = $val;
+	if(ref($val) eq '')
+	  {$tvar = \$val}
+
+	if(ref($tvar) ne 'SCALAR')
+	  {error("Variable and option type mismatch for option $flag: [",
+		 ref($tvar),"] vs. [$type: SCALAR].")}
+	elsif($dodef)
+          {$uh->{DEFAULT_CLI}   = $$tvar}
+	else
+	  {${$uh->{VARREF_STG}} = $$tvar}
+      }
+    else
+      {error("Type unrecognized for option $flag: [$type].")}
+
+    return(0);
+  }
+
+#Copies values from VARREF_STG to the user's variable in main (VARREF_PRG) and
+#CLI's copy (VARREF_CLI).  They will NOT be copied if 2 or more equivalent-level
+#mutex options have values.
+sub commitAllVarrefs
+  {foreach my $uh (@$usage_array)
+     {commitVarrefs($uh)}}
+
+sub commitVarrefs
+  {
+    my $uh     = $_[0];
+    my $var    = $uh->{VARREF_STG};
+    my $type   = $uh->{OPTTYPE};
+    my $flag   = getBestFlag($uh);
+
+    my $DEBUG = getVarref('debug',1,1,1);
+
+    if(ref($var) ne 'ARRAY' && ref($var) ne 'SCALAR' && ref($var) ne '')
+      {
+	error("Invalid staged reference variable: [",ref($var),"].",
+	      {DETAIL => 'Must be SCALAR or ARRAY.'});
+	return(1);
+      }
+
+    #Handle the special case where we do not want to initialize a value in main
+    #(via a code ref) that is in a mutex set
+    my $callcoderef = 1;
+    if(!$uh->{SUPPLIED} && !$uh->{SUPPLIED_UDF} &&
+       !hasValue($uh->{OPTTYPE},$uh->{DEFAULT_PRG},1) &&
+       exists($exclusive_lookup->{$uh->{OPTION_ID}}))
+      {
+        #If any member of any mutex group this option belongs
+        #to has a value.  We're treating the code ref differently
+        #than we treat undefined defaults
+        my $mutex_partner_has_val =
+          scalar(grep {my $meid=$_;scalar(grep {hasValue($usage_array->[$_]
+                                                         ->{OPTTYPE},
+                                                         $usage_array->[$_]
+                                                         ->{VARREF_STG})}
+                                          @{$exclusive_options->[$meid]})}
+                 keys(%{$exclusive_lookup->{$uh->{OPTION_ID}}}));
+
+        if(!$mutex_partner_has_val)
+          {$callcoderef = 0}
+      }
+
+    if(exists($array_genopt_types->{$type}) ||
+       exists($array2dopt_types->{$type}))
+      {
+	if(!defined($var))
+	  {$var = []}
+
+	if(ref($var) ne 'ARRAY')
+	  {error("Variable and option type mismatch for option $flag: [",
+		 ref($var),"] vs. [$type: ARRAY].")}
+	else
+	  {
+	    #Set the local copy
+	    @{$uh->{VARREF_CLI}} = @{copyArray($var)};
+
+            #If there was an explicitly set value either on the command line,
+            #as a user default, or as a programmer default; or if this option is
+            #being over-ridden as a part of a mutex set (inferred from
+            #membership in a mutex set (because it's only staged if overridden))
+            if($uh->{SUPPLIED} || $uh->{SUPPLIED_UDF} ||
+               hasValue($uh->{OPTTYPE},$uh->{DEFAULT_PRG},1) ||
+               exists($exclusive_lookup->{$uh->{OPTION_ID}}))
+              {
+                #Set the programmer's variable in main
+                if(ref($uh->{VARREF_PRG}) eq 'CODE')
+                  {
+                    #If $var is a default being filled in
+                    if($type =~ /array/ && $DEBUG &&
+                       ((defined($uh->{DEFAULT_PRG}) &&
+                         $var eq $uh->{DEFAULT_PRG}) ||
+                        (defined($uh->{DEFAULT_USR}) &&
+                         $var eq $uh->{DEFAULT_USR})))
+                      {warning("Attempting to fill in default array for ",
+                               "[$flag] without knowing if there is a pre-",
+                               "existing default value.",
+                               {DETAIL => "We are unable to determine if the " .
+                                "programmer initialized the array with a " .
+                                "default value because they submitted a code " .
+                                "reference to handle option processing.  " .
+                                "Default array contents were provided by the " .
+                                "[" .
+                                (defined($uh->{DEFAULT_PRG}) &&
+                                 $var eq $uh->{DEFAULT_PRG} ?
+                                 'programmer' : 'user') . '].  If the ' .
+                                'programmer initialized the array handled by ' .
+                                'the code reference and their code appends ' .
+                                'to those values instead of sets them, this ' .
+                                'may result in the default array contents ' .
+                                'being appended to that array.'})}
+                    elsif($type =~ /array/ && !$uh->{SUPPLIED} && $DEBUG &&
+                          exists($exclusive_lookup->{$uh->{OPTION_ID}}) &&
+                          $callcoderef)
+                      {debug("Attempting to clear out the array for [$flag] ",
+                             "without knowing if there is a pre-existing ",
+                             "default value.",
+                             {DETAIL => "We are unable to determine if the " .
+                              "programmer initialized the array with a " .
+                              "default value because they submitted a code " .
+                              "reference to handle option processing.  Nor " .
+                              "do we know how their code handles supplied " .
+                              "values.  A mutually exclusive option was " .
+                              "supplied, so any default the programmer had " .
+                              "in main will be cleared out.  If the " .
+                              'programmer initialized the array handled by ' .
+                              'the code reference and their code appends to ' .
+                              'those values instead of sets them, this may ' .
+                              'result in the default array contents being ' .
+                              'appended to that array.'})}
+
+                    callGOLCodeRef($uh->{VARREF_PRG},$uh,$var)
+                      if($callcoderef);
+                  }
+                #These may be the same reference, so don't copy twice if so
+                elsif($uh->{VARREF_PRG} ne $uh->{VARREF_CLI})
+                  {@{$uh->{VARREF_PRG}} = @{copyArray($var)}}
+              }
+	  }
+      }
+    elsif(exists($scalaropt_types->{$type}))
+      {
+	my $tvar = $var;
+	if(ref($var) eq '')
+	  {$tvar = \$var}
+
+	if(ref($tvar) ne 'SCALAR')
+	  {error("Variable and option type mismatch for option $flag: [",
+		 ref($tvar),"] vs. [$type: SCALAR].")}
+	else
+	  {
+	    ${$uh->{VARREF_CLI}} = $$tvar;
+
+            #If there was an explicitly set value either on the command line,
+            #as a user default, or as a programmer default; or if this option is
+            #being over-ridden as a part of a mutex set (imferred from
+            #membership in a mutex set (because it's only staged if overridden))
+            if($uh->{SUPPLIED} || $uh->{SUPPLIED_UDF} ||
+               hasValue($uh->{OPTTYPE},$uh->{DEFAULT_PRG},1) ||
+               exists($exclusive_lookup->{$uh->{OPTION_ID}}))
+              {
+                #Set the programmer's variable in main
+                if(ref($uh->{VARREF_PRG}) eq 'CODE')
+                  {if($callcoderef)
+                     {callGOLCodeRef($uh->{VARREF_PRG},$uh,$tvar)}}
+                else
+                  {${$uh->{VARREF_PRG}} = $$tvar}
+              }
+	  }
+      }
+    else
+      {error("Type unrecognized for option [$flag]: [$type].")}
+
+    return(0);
+  }
+
+#Takes the code reference, the associated usage hash, and an array or scalar
+#reference value
+sub callGOLCodeRef
+  {
+    my $sub = $_[0];
+    my $uh  = $_[1];
+    my $var = $_[2];
+
+    my $supplied_opt_name = getBestFlag($uh);
+    $supplied_opt_name =~ s/^-+//;
+
+    if(ref($var) eq 'SCALAR')
+      {$sub->($supplied_opt_name,$$var)}
+    elsif(ref($var) eq 'ARRAY')
+      {
+        #If the reference of the supplied variable is the same reference as the
+        #user default (i.e. it is the same array reference because the user
+        #default is what was supplied as the $var being used to call $sub)
+	if(defined($uh->{DEFAULT_USR}) && $var eq $uh->{DEFAULT_USR})
+	  {
+	    #Cycle through the saved user default arguments that were saved when
+            #the user defaults were set (i.e. the delimited strings supplied to
+            #each flag) and supply them to the programmer's sub
+	    foreach my $gol_args_array (@{$uh->{SUPPLIED_ARGS_UDF}})
+	      {$sub->(@$gol_args_array)}
+	  }
+        elsif(exists($uh->{SUPPLIED}) && defined($uh->{SUPPLIED}) &&
+              $uh->{SUPPLIED} && scalar(@{$uh->{SUPPLIED_ARGS}}))
+          {foreach my $gol_args_array (@{$uh->{SUPPLIED_ARGS}})
+             {$sub->(@$gol_args_array)}}
+        #Else, the programmer probably supplied a default array without a
+        #delimiter
+	else
+	  {
+	    #Build a getopt long argument list using the delimiter
+	    my $delim = getDisplayDelimiter($uh->{DELIMITER},
+					    $uh->{OPTTYPE},
+					    $uh->{ACCEPTS});
+            if(defined($delim) && $delim eq 'ERROR')
+              {return(undef)}
+
+	    if(exists($array2dopt_types->{$uh->{OPTTYPE}}))
+	      {
+                if(scalar(@$var))
+                  {
+                    foreach my $inner (@$var)
+                      {
+                        my $arg_str = join($delim,@$inner);
+                        $sub->($supplied_opt_name,$arg_str);
+                      }
+                  }
+                else
+                  {
+                    #All we can provide is a string. Test 869 demonstrates that
+                    #doing so can be used to clear out the array, however it's
+                    #debatable to possibly send undef if this is found to cause
+                    #a problem in the future.  The undef would just have to be
+                    #handled. This also presumes they treat the supplied value
+                    #appropriately and not push it onto a pre-populated array
+                    $sub->($supplied_opt_name,'');
+                  }
+	      }
+	    elsif(defined($delim))
+	      {
+		my $arg_str = join($delim,@$var);
+		$sub->($supplied_opt_name,$arg_str);
+	      }
+            else
+              {
+                #$uh->{DELIMITER} is always defined for 2D arrays, but may not
+                #be defined for arrays, which forces a per-flag submission
+                if(scalar(@$var))
+                  {foreach my $elem (@$var)
+                     {$sub->($supplied_opt_name,$elem)}}
+                else
+                  {
+                    #See comment in the else above (inside the if)
+                    $sub->($supplied_opt_name,'');
+                  }
+              }
+	  }
+      }
+    else
+      {error("Unsupported type: [",ref($var),"].")}
+  }
+
+#This is for VARREFs and DEFAULTs
+#If definechk is true, it checks the definedness of bool and count values.
+#Otherwise, it only returns true for those types when they have a non-zero value
+sub hasValue
+  {
+    my $type      = $_[0];
+    my $var       = $_[1];
+    my $definechk = (defined($_[2]) ? $_[2] : 0); #Use to check var definedness
+    my $has_value = 0; #undef = error
+
+    if(ref($var) ne 'ARRAY' && ref($var) ne 'SCALAR' && ref($var) ne '')
+      {
+	error("Invalid variable type supplied: [",ref($var),"].",
+	      {DETAIL => 'Only SCALAR and ARRAY are supported.'});
+	return(undef);
+      }
+    elsif(!defined($type))
+      {
+        error("Type supplied to hasValue: [undef].",
+	      {DETAIL => 'A defined type is required.'});
+	return(undef);
+      }
+
+    if(exists($array_genopt_types->{$type}) ||
+       exists($array2dopt_types->{$type}))
+      {
+	if(defined($var) && ref($var) ne 'ARRAY')
+	  {error("Variable and option type [$type] mismatch: [",ref($var),
+		 "] vs. [ARRAY].")}
+	else
+	  {$has_value = (defined($var) && scalar(@$var) ? 1 : 0)}
+      }
+    elsif(exists($scalaropt_types->{$type}))
+      {
+	#Note, if the type is bool, we will only say it has a value if it's true
+	if(ref($var) eq 'SCALAR')
+	  {
+	    if($type eq 'bool' || $type eq 'count')
+	      {$has_value = (defined($$var) && ($definechk || $$var) ? 1 : 0)}
+	    elsif($type eq 'logfile' || $type eq 'logsuff')
+	      {$has_value = (defined($$var) && $$var ne '' ? 1 : 0)}
+	    else
+	      {$has_value = (defined($$var) ? 1 : 0)}
+	  }
+	elsif(ref($var) eq '')
+	  {$has_value = defined($var) &&
+	     (!$definechk && ($type eq 'bool' || $type eq 'count') ?
+              ($var ? 1 : 0) : 1)}
+	else
+	  {error("Variable and option type mismatch: [",ref($var),
+		 "] vs. [$type: SCALAR].")}
+      }
+    else
+      {error("Type unrecognized: [$type].")}
+
+    return($has_value);
+  }
+
+#Returns (hierarchically) 2 if user default, 1 if programmr default, 0 otherwise
+sub hasDefault
+  {
+    my $usg_hash = $_[0];
+    my $pdef     = hasValue($usg_hash->{OPTTYPE},$usg_hash->{DEFAULT_PRG});
+    my $udef     = hasValue($usg_hash->{OPTTYPE},$usg_hash->{DEFAULT_USR});
+    return($udef ? 2 : ($pdef ? 1 : 0));
+  }
+
+sub getDefault
+  {
+    my $usg_hash = $_[0];
+
+    if($command_line_stage < DEFAULTED)
+      {
+        warning('getDefault called before defaults have been fully processed.');
+        return(hasValue($usg_hash->{OPTTYPE},$usg_hash->{DEFAULT_USR}) ?
+               $usg_hash->{DEFAULT_USR} :
+               (hasValue($usg_hash->{OPTTYPE},$usg_hash->{DEFAULT_PRG}) ?
+                $usg_hash->{DEFAULT_PRG} : undef));
+      }
+
+    return(hasValue($usg_hash->{OPTTYPE},$usg_hash->{DEFAULT_CLI}) ?
+           $usg_hash->{DEFAULT_CLI} : undef);
+  }
+
 sub getOptions
   {
+    my $default_mode   = $_[0];
+    my $initial_errors = defined($error_number) ? $error_number : 0;
+
+    #Set the getopt_default_mode global for the getopt subs
+    if(!defined($default_mode))
+      {
+        #Let the getopt subs know whether to initialize defaults or varrefs
+        $getopt_default_mode = ($command_line_stage < DEFAULTED);
+      }
+    else
+      {$getopt_default_mode = $default_mode}
+
     #Get the input options & catch any errors in option parsing
     if(!GetOptions(%$GetOptHash))
       {
-	#Try to guess which arguments GetOptions is complaining about
-	my @possibly_bad = grep {!(-e $_)} grep {$_ ne '-'} map {@$_} map {@$_}
-	  map {$input_files_array->[$_]}
-	    grep {!exists($outfile_types_hash->{$_})}
-	      (0..$#{$input_files_array});
+        undef($getopt_default_mode);
 
-	#We're quitting, so let's set the various options to false so
-	#the buffered debug statements do not puke out on the terminal
-	$DEBUG       = 0 if(!defined($DEBUG));
-	$verbose     = 0 if(!defined($verbose));
-	$quiet       = 0 if(!defined($quiet));
-	$error_limit = 0 if(!defined($error_limit));
-	$extended    = 0 if(!defined($extended));
-
-	#This will set the usage, run, etc vars in a pinch
+	#This will set the usage, run, etc vars in a pinch based on the defaults
 	determineRunMode(1);
 
-	error('Getopt::Long::GetOptions reported an error while parsing the ',
+	error('Getopt::Long::GetOptions() reported an error while parsing the ',
 	      'command line arguments.  The warning should be above.  Please ',
 	      'correct the offending argument(s) and try again.');
-	usage(1);
 	quit(-12,0);
       }
     #Else if there are no flagless options but unprocessed arguments
-    elsif((!defined($flagless_multival_type) || $flagless_multival_type < 0) &&
-       scalar(@ARGV))
-      {warning("Unprocessed/unrecognized command line arguments: [",
-	       join(' ',map {/\s/ ? "'$_'" : $_} @ARGV),"].")}
+    elsif((!defined($flagless_multival_optid) ||
+	   $flagless_multival_optid < 0) && scalar(@ARGV))
+      {
+	my $argv_copy = [@ARGV];
+	warning("Unprocessed/unrecognized command line arguments: [",
+		join(' ',map {/\s/ ? "'$_'" : $_} @$argv_copy),"].");
+      }
 
-    #Set defaults if not defined - assumes command line has already been parsed
-    $default_stub        = 'STDIN' unless(defined($default_stub));
-    $DEBUG               = 0       unless(defined($DEBUG));
-    $quiet               = 0       unless(defined($quiet));
-    $dry_run             = 0       unless(defined($dry_run));
-    $help                = 0       unless(defined($help));
-    $version             = 0       unless(defined($version));
-    $use_as_default      = 0       unless(defined($use_as_default));
-    $skip_existing       = 0       unless(defined($skip_existing));
-    $overwrite           = 0       unless(defined($overwrite));
-    $append              = 0       unless(defined($append));
-    $verbose             = 0       unless(defined($verbose));
-    $force               = 0       unless(defined($force));
-    $header              = 0       unless(defined($header));
-    $extended            = 0       unless(defined($extended));
-    $error_limit_default = 5       unless(defined($error_limit_default));
-    $error_limit         = $error_limit_default unless(defined($error_limit));
-    $defaults_dir        =(sglob('~/.rpst'))[0] unless(defined($defaults_dir));
-    $preserve_args       = [@ARGV]   unless(defined($preserve_args));
-    $created_on_date     = 'UNKNOWN' unless(defined($created_on_date));
-    $script_version_number = 'UNKNOWN'
-      unless(defined($script_version_number));
+    undef($getopt_default_mode);
 
+    if(defined($error_number) && $error_number > $initial_errors)
+      {quit(-38)}
+
+    ##TODO: See requirement #338 regarding this commented code
     #If pipeline mode is not defined and I know it will be needed (i.e. we
     #anticipate there will be messages printed on STDERR because either verbose
     #or DEBUG is true), guess - otherwise, do it lazily (in the warning or
     #error subs) because pgrep & lsof can be slow sometimes
-#    if(!defined($pipeline_mode) && ($verbose || $DEBUG))
-#      {$pipeline_mode = inPipeline()}
-
-    #Now that all the vars are set, flush the buffer if necessary
-    flushStderrBuffer();
+#    if(!defined($pipeline) && ($verbose || $DEBUG))
+#      {$pipeline = inPipeline()}
 
     return(0);
   }
@@ -7121,101 +11116,138 @@ sub getOptions
 sub processCommandLine
   {
     #Only ever run once (unless _init has been called)
-    if($processCommandLine_called)
+    if($command_line_stage)
       {
 	error("processCommandLine() has been called more than once ",
 	      "without re-initializing.");
 	return(0);
       }
+    #This is in an else in case called in cleanup mode
     else
-      {$processCommandLine_called = 1}
+      {$command_line_stage = CALLED}
+
+    #Keep track of errors during processing by saving the starting number
+    my $initial_error_num = defined($error_number) ? $error_number : 0;
 
     #In case the programmer did not add any in/out files/dirs, add defaults
-    addDefaultFileOptions();
+    my $fileopt_success = addDefaultFileOptions();
 
-    #Add the builtin options after the programmer's and default file opts
-    addBuiltinOptions();
+    $command_line_stage = STARTED;
 
-    #Clear out array defaults so that user defaults and user supplied values
-    #don't append to them, but rather set the arrays from scratch.  We will re-
-    #load them in loadDefaults (if the user didn't supply values).  We're doing
-    #this here instead of earlier because we have references to array variables
-    #in main and don't want to change them until the last moment (during
-    #processCommandLine) so that the programmer can access the default values
-    #they set before the user changes them.  And we need to do it before
-    #loading the user defaults so they won't be appended together with the
-    #programmer's defaults.
-    clearArrayDefaults();
+    #Add the builtin options after the programmer's and default file opts, so
+    #that files appear at the top of the usage
+    if(addBuiltinOptions())
+      {quit(-15)}
+
+    #All necessary options added
+    $command_line_stage = DECLARED;
 
     #Set user-saved defaults
     loadUserDefaults();
 
-    #Set the defaults for the usage
-    $extended_def      = $extended;
-    $verbose_def       = $verbose;
-    $DEBUG_def         = $DEBUG;
-    $force_def         = $force;
-    $overwrite_def     = $overwrite;
-    $pipeline_mode_def = $pipeline_mode;
+    #This is to indicate that all options are added and user defaults read in,
+    #but the command line has not yet been processed.  This is above
+    #applyOptionAddendums so it knows whether an outdir could still be added.
+    $command_line_stage = DEFAULTED;
 
-    #Determine the default run mode (based possibly on user defaults)
-    determineRunMode(1);
+    #If there was a fatal error during the add default file options step, now is
+    #the time to quit (after the defaults have been loaded and before the
+    #command line is processed)
+    if(!$fileopt_success)
+      {quit(-7)}
 
-    #Adds --usage --run --help and/or --dry-run (see setDefaults(DEFRUNMODE =>
-    #...)).  We're doing this after setting user defaults because if required
-    #options have defaults, we don't want the script to run without an explicit
-    #option manually provided.
-    addRunModeOptions();
-
-    #Certain options need to get addendums or be modified after user defaults
-    #have been processed.  Mostly, these are automated notes added to the usage
-    applyOptionAddendums();
-
-    #Get the input options & catch any errors in option parsing
-    my $status_code = getOptions();
-    if($status_code && (!defined($force) || !$force))
-      {return($status_code)}
+    #Get the input options (0 means set varrefs, not defaults)
+    getOptions(0);
 
     #Set the fact that the command line has been processed (after having added
     #the default options above with the calls to addDefaultFileOptions and
     #addRunModeOptions (because adding options checks this value to
     #decide whether adding options is valid))
-    $command_line_processed = 1;
+    $command_line_stage = ARGSREAD;
+
+    ##
+    ## Validate Mutex Options and Set Defaults
+    ##
+
+    #Load all the previously saved default values for input files, output
+    #files, output directories, arrays, and 2D arrays - Does not handle mutex
+    #options
+    my $fatal_def_req_file_errors = [fillInDefaults()];
+
+    #Load defaults of mutex options and check for conflicts
+    my $mutex_conflict = processMutuallyExclusiveOptionSets();
+
+    #Determine actual run mode
+    determineRunMode(0,scalar(@$fatal_def_req_file_errors));
+
+    ##
+    ## Edit options based on option values and option relationships
+    ##
+
+    #Certain options need to get addendums or be modified after user defaults &
+    #command line options have been initialized.  Mostly, these are automated
+    #notes added to the usage about mutually exclusive options, changes to
+    #option visibility, and user defaults.  Some of these depend on the value of
+    #--extended.
+    applyOptionAddendums();
+
+    $command_line_stage = VALIDATED;
+
+    commitAllVarrefs();
+
+    $command_line_stage = COMMITTED;
 
     #If we're in cleanup mode after a fatal error has occurred, quit has
     #already been called and all we needed to do was make sure all the command
     #line options had been added so that getOptions doesn't issue irrelevant
     #warnings.
     if($cleanup_mode > 1)
-      {
-	$command_line_processed = 2;
-	return(0);
-      }
+      {return(0)}
 
-    ##
-    ## Validate Options
-    ##
+    my $force_ref      = getVarref('force');
+    my $usage          = getVarref('usage',1);
+    my $help           = getVarref('help',1);
+    my $run            = getVarref('run',1);
+    my $dry_run        = getVarref('dry_run',1);
+    my $version        = getVarref('version',1);
+    my $use_as_default = getVarref('save_args',1);
 
-    #Load all the previously saved default values for input files, output
-    #files, output directories, arrays, and 2D arrays
-    loadDefaults();
-
-    #Allow the user to over-ride the run mode explicitly
-    determineRunMode();
-
-    debug({LEVEL => -1},"Processing default options.");
+    #Don't allow saving of mutex conflicts
+    if($use_as_default && $mutex_conflict)
+      {quit(-11)}
 
     #Process & validate default options (supply whether there will be outfiles)
-    processDefaultOptions(scalar(@$outfile_suffix_array));
+    my $done = processDefaultOptions(scalar(grep {$_->{OPTTYPE} eq 'suffix'}
+                                            @$usage_array));
+    if($done)
+      {
+        $command_line_stage = DONE;
+        #1 = success, < 0 = fatal error
+        quit($done < 0 ? $done : 0);
+      }
 
     #If processCommandLine was called from quit (e.g. via the END block), calls
     #to quit (e.g. when usage or help modes are active) will not work (because
     #quit has already been called), so we must return here in either of those
     #cases to not generate weird errors.
-    if($help || $usage == 1)
+    if($help || $usage == 1 || $use_as_default || $version)
       {return(0)}
 
-    debug({LEVEL => -1},"Done processing default options.");
+    startLogging();
+
+    $command_line_stage = LOGGING;
+
+    #Now that all the vars are set, flush the buffer if necessary
+    flushStderrBuffer();
+
+    #If we are in either run or dry run mode, then any issues with default
+    #files, directories, or mutex sets must now cause a fatal error
+    if(scalar(@$fatal_def_req_file_errors) || $mutex_conflict)
+      {
+	error($_) foreach(@$fatal_def_req_file_errors);
+	usage(1);
+	quit(-19);
+      }
 
     #The addRunModeOptions determineRunMode methods, (each
     #called earlier/above) establish whether the script should proceed or not
@@ -7241,167 +11273,82 @@ sub processCommandLine
 	      "See --usage for details.  Note: --force will not circumvent ",
 	      "this error.");
 	#Do not allow the user to --force their way past this error
-	$force = 0;
+	$$force_ref = 0;
 	quit(-14);
       }
 
-    #Make sure there is input
-    if(scalar(grep {!exists($outfile_types_hash->{$_})}
-	      (0..$#{$input_files_array})) == 0 &&
-       !isThereInputOnSTDIN() && (scalar(@$required_infile_types)))
-      {
-	error('No input detected.');
-	usage(1);
-	quit(-15);
-      }
+    debug({LEVEL => -1},"Done processing default options.");
+
+    ##
+    ## Validate Required & Required Tagteam Options
+    ##
 
     #Make sure that the tagteams' suffix and outfile options' mutual
     #exclusivity is enforced.  This also records which option was supplied on
-    #the command line in tagteam_to_supplied_oid
+    #the command line in tagteam_to_supplied_optid
     foreach my $ttkey (keys(%$outfile_tagteams))
       {validateTagteam($ttkey)}
 
-    #This makes sure that required tagteams had 1 of their 2 linked options
-    #supplied
-    my($missing_flags,$conflicting_flags) =
-      getMissingConflictingTagteamFlags();
-    my $requirement_defficiency = scalar(@$missing_flags);
-
-    debug({LEVEL => -1},"Checking [",scalar(@$required_infile_types),
-	  "] required input file types");
-
-    foreach my $req_type (@$required_infile_types)
+    my $opts_sat = requiredOptionsSatisfied();
+    my $rels_sat = requiredOptionRelationshipsSatisfied();
+    if(!$opts_sat || !$rels_sat)
       {
-	if(getNumInfileTypes() == 0 ||
-	   (scalar(@{$input_files_array->[$req_type]}) == 0 &&
-	    (defined($primary_infile_type) &&
-	     ($req_type != $primary_infile_type || !isThereInputOnSTDIN()))))
-	  {
-	    my $iflag = getInfileFlag($req_type);
-	    push(@$missing_flags,
-		 (defined($iflag) && $iflag ne '' ?
-		  $iflag : 'internal error'));
-	    $requirement_defficiency = 1;
-	  }
-      }
-
-    foreach my $req_type (@$required_suffix_types)
-      {
-	if(scalar(@$outfile_suffix_array) == 0 ||
-	   !defined($outfile_suffix_array->[$req_type->[0]]) ||
-	   scalar(@{$outfile_suffix_array->[$req_type->[0]]}) == 0 ||
-	   !defined($outfile_suffix_array->[$req_type->[0]]->[$req_type->[1]]))
-	  {
-	    push(@$missing_flags,getOutfileSuffixFlag($req_type->[2]));
-	    $requirement_defficiency = 1;
-	  }
-      }
-
-    foreach my $req_type (@$required_outfile_types)
-      {
-	if(scalar(@{$input_files_array->[$req_type]}) == 0
-	   #TODO: Do a version of this if/when requirement 11b is implemented
-	   #&& ($req_type != $primary_outfile_type ||
-	   #    isStandardOutputToTerminal())
-	  )
-	  {
-	    my $iflag = getInfileFlag($req_type);
-	    push(@$missing_flags,
-		 (defined($iflag) && $iflag ne '' ?
-		  $iflag : 'internal error'));
-	    $requirement_defficiency = 1;
-	  }
-      }
-
-    if($required_outdirs)
-      {
-	if(scalar(@$outdirs_array) == 0)
-	  {
-	    push(@$missing_flags,getOutdirFlag());
-	    $requirement_defficiency = 1;
-	  }
-      }
-
-    #Now let's check other options
-    #If there are required general options
-    if(scalar(@$required_opt_refs) > 0)
-       {
-	 #For each general option type
-	 foreach my $opt_info (@$required_opt_refs)
-	   {
-	     if(!wasGeneralOptionSupplied($opt_info))
-	       {
-		 $requirement_defficiency = 1;
-		 push(@$missing_flags,
-		      (exists($general_flag_hash->{$opt_info->[0]}) &&
-		       defined($general_flag_hash->{$opt_info->[0]}) ?
-		       $general_flag_hash->{$opt_info->[0]} :
-		       'internal error'));
-	       }
-	   }
-       }
-
-    #Require input file(s)
-    if($requirement_defficiency || scalar(@$conflicting_flags))
-      {
-	if(scalar(@$conflicting_flags))
-	  {error("The following pairs of options are mutually exclusive: [",
-		 join(',',@$conflicting_flags),"].",
-		 {DETAIL =>
-		  join('These pairs of flags each specify a different way of ',
-		       'naming output files for the same output.  You can ',
-		       'either specify an output file using a suffix to be ',
-		       'appended to an input file name or you can supply a ',
-		       'full filename, but not both at the same time.')});
-	 }
-
-	if($requirement_defficiency)
-	  {error('Missing required options: [',join(',',@$missing_flags),'].')}
-
 	usage(1);
 	quit(-17,0);
       }
 
-    if(scalar(@$required_relationships))
-      {requireFileRelationships()}
+    ##
+    ## Validate Option Values
+    ##
+
+    #TODO: The outdir option will change.  See requirement 178.
+    my $outdirs = [];
+    my $oduhash = getOutdirUsageHash();
+    if(defined($oduhash))
+      {$outdirs = getVarref($oduhash)}
 
     #Require an outfile suffix if an outdir has been supplied
-    if(scalar(@$outdirs_array) && scalar(@$outfile_suffix_array) == 0)
+    if(scalar(@$outdirs) &&
+       scalar(grep {$_->{OPTTYPE} eq 'suffix'} @$usage_array) == 0)
       {
-	#We're quitting, so let's set the various options to false so
-	#the buffered debug statements do not puke out on the terminal
-	$DEBUG       = 0 if(!defined($DEBUG));
-	$verbose     = 0 if(!defined($verbose));
-	$quiet       = 0 if(!defined($quiet));
-	$error_limit = 0 if(!defined($error_limit));
-
 	error("An outfile suffix is required if an output directory is ",
 	      "supplied.");
 	quit(-18,0);
       }
 
-    unless(validateNonFileOptions())
-      {quit(-94)}
+    unless(validateGeneralOptions())
+      {quit(-48)}
 
     #If there are no files and we're in cleanup mode, we have already processed
     #the options to get things like verbose, debug, etc. and that's all we
     #need. We can assume that since quit has been called without having
     #processed the command line options, that the user is not using this module
     #for file processing, so return
-    if($cleanup_mode && scalar(grep {scalar(@$_)} @$input_files_array) == 0)
+    if($cleanup_mode &&
+       scalar(grep {$_->{OPTTYPE} eq 'infile' &&
+		      scalar(@{getVarref($_)})} @$usage_array) == 0)
       {
-	$command_line_processed = 2;
+        #cleanup_mode 1 is when processCommandLine is never called.  >1 is from
+        #a fatal error during setup
+	$command_line_stage = $cleanup_mode == 1 ? DONE : LOGGING;
 	return(0);
       }
 
-    ($input_file_sets,  #getFileSets(3DinfileArray,2DsuffixArray,2DoutdirArray)
+    ##
+    ## Check and prepare files for processing
+    ##
+
+    makeFileArrays();
+
+    ($input_file_sets,   #getFileSets(3DinfileArray,2DsuffixArray,2DoutdirArray)
      $output_file_sets) = getFileSets($input_files_array,
 				      $outfile_suffix_array,
-				      $outdirs_array,
-				      $collid_modes_array);
+				      $outdirs);
 
     #Create the output directories
-    mkdirs(@$outdirs_array);
+    mkdirs(@$outdirs);
+
+    my $header = getVarref('header',1,0);
 
     #If standard output is to a redirected file and the header flag has been
     #specified and there exists an undefined outfile suffix (which means that
@@ -7417,242 +11364,398 @@ sub processCommandLine
 	print STDOUT (getHeader());
       }
 
+    #Any/all errors during this sub should be followed by quit. If not, this
+    #warning will be issued
+    if(defined($error_number) && $initial_error_num != $error_number &&
+       !$cleanup_mode && !$$force_ref)
+      {warning("Uncaught fatal error during command-line processing.",
+               {DETAIL => ('Fatal error numbers without exit or force: [' .
+                           join(',',(($initial_error_num + 1)..$error_number)) .
+                           '].')})}
+
     #Really done with command line processing
-    $command_line_processed = 2;
+    $command_line_stage = DONE;
+
+    #If there were errors during setup, quit with a bad exit status
+    if($num_setup_errors)
+      {quit(-2);}
 
     return(0);
   }
 
-#After the command line has been parsed, supply default values to any options
-#that weren't supplied on the command line
-sub loadDefaults
+sub requiredOptionsSatisfied
   {
-    loadDefaultArrays();
+    #This makes sure that required tagteams had 1 of their 2 linked options
+    #supplied
+    my $missing_flags           = [];
+    my $requirement_defficiency = 0;
 
-    #Supply default input & output file(s) (indicated by the programmer) so
-    #that we can determine the run mode (e.g. run if all required options have
-    #values)
-    loadDefaultFiles();
-    loadDefaultOutdirs();
-  }
+    debug({LEVEL => -1},"Checking [",
+	  scalar(grep {$_->{OPTTYPE} eq 'infile' && $_->{REQUIRED}}
+		 @$usage_array),"] required input file types");
 
-sub loadDefaultArrays
-  {
-    foreach my $array_ref (keys(%$array_defaults_hash))
-      {if(scalar(@{$array_defaults_hash->{$array_ref}->{VALUES}}) == 0 &&
-	  scalar(@{$array_defaults_hash->{$array_ref}->{DEFAULTS}}))
-	 {@{$array_defaults_hash->{$array_ref}->{VALUES}} =
-	    @{$array_defaults_hash->{$array_ref}->{DEFAULTS}}}}
-  }
-
-sub loadDefaultFiles
-  {
-    #If there are no default input files of any type (or default_infiles_array
-    #is not an array reference)
-    if(!defined($default_infiles_array)       ||
-       ref($default_infiles_array) ne 'ARRAY' ||
-       scalar(@$default_infiles_array) == 0)
-      {return()}
-
-    my $error_status  = 0;
-    my $got_some      = 0;
-    my $all_err_globs = '';
-    my $some_required = 0;
-
-    #Cycle through the default_infiles_array's indexes
-    #This assumes that default_infiles_array is properly populated.
-    #Specifically, it assumes that it's a 3D array and that the outer array
-    #elements are either undefined (i.e. no defaults present) or defined and
-    #containing a 2D array of defined non-empty-string file name/glob strings
-    foreach my $i (0..$#{$default_infiles_array})
+    #Now let's check other options
+    #If there are unsatisfied required general or outdir options
+    foreach my $usg_hash (grep {$_->{REQUIRED} && !optionSatisfied($_)}
+			  @$usage_array)
       {
-	#This assumes that the first element will be populated if there were
-	#any files at all supplied on the command line
-	if(#There are defaults defined
-	   defined($default_infiles_array->[$i]) &&
-	   #The defaults object at this index is an array (sanity check)
-	   ref($default_infiles_array->[$i]) eq 'ARRAY' &&
-	   #The defaults array for this type is populated
-	   scalar(@{$default_infiles_array->[$i]}) &&
+	$requirement_defficiency = 1;
+	push(@$missing_flags,$usg_hash->{OPTFLAGS}->[0]);
+      }
 
-	   ##
-	   ## Now check to see if the user did not supply files of this type
-	   ##
-
-	   (#The input files array is not defined OR
-	    !defined($input_files_array) ||
-
-	    #The input files array is smaller than the defaults
-	    (ref($input_files_array) eq 'ARRAY' &&
-	     scalar(@$input_files_array) < ($i + 1)) ||
-
-	    #The contained input files 2D array is not an array
-	    (ref($input_files_array) eq 'ARRAY' &&
-	     ref($input_files_array->[$i]) ne 'ARRAY') ||
-
-	    #The contained input files 2D array is size 0
-	    (ref($input_files_array) eq 'ARRAY' &&
-	     ref($input_files_array->[$i]) eq 'ARRAY' &&
-	     scalar(@{$input_files_array->[$i]}) == 0) ||
-
-	    #Its first element is not defined
-	    (ref($input_files_array) eq 'ARRAY' &&
-	     ref($input_files_array->[$i]) eq 'ARRAY' &&
-	     !defined($input_files_array->[$i]->[0])) ||
-
-	    #Its first element is not an array
-	    (ref($input_files_array) eq 'ARRAY' &&
-	     ref($input_files_array->[$i]) eq 'ARRAY' &&
-	     ref($input_files_array->[$i]->[0]) ne 'ARRAY') ||
-
-	    #Its first element's array is size 0
-	    (ref($input_files_array) eq 'ARRAY' &&
-	     ref($input_files_array->[$i]) eq 'ARRAY' &&
-	     ref($input_files_array->[$i]->[0]) eq 'ARRAY' &&
-	     scalar(@{$input_files_array->[$i]->[0]}) == 0)))
+    foreach my $exclusive_set (map {$exclusive_options->[$_]}
+			       grep {exists($mutual_params->{$_}) &&
+				       exists($mutual_params->{$_}->{REQUIRED})
+					 && $mutual_params->{$_}->{REQUIRED}}
+			      (0..$#{$exclusive_options}))
+      {
+	my $one_supplied = 0;
+	foreach my $optid (grep {optionSatisfied($usage_array->[$_])}
+			   @$exclusive_set)
 	  {
-	    #Add the defaults to the input_files_array
-	    foreach my $flag_instance_array (@{$default_infiles_array->[$i]})
+	    $one_supplied = 1;
+	    last;
+	  }
+
+	if(!$one_supplied)
+	  {
+	    push(@$missing_flags,
+		 [map {$usage_array->[$_]->{OPTFLAG_DEF}} @$exclusive_set]);
+	    $requirement_defficiency = 1;
+	  }
+      }
+
+    if($requirement_defficiency)
+      {error('Missing required options: [',
+             join(',',
+                  map {ref($_) eq 'ARRAY' ? 'one of (' . join(',',@$_) . ')' :
+                         $_} @$missing_flags),'].')}
+
+    return(!$requirement_defficiency);
+  }
+
+#This does not check REQUIRED. It assumes the option is required. This is
+#because an option's REQUIRED value may be 0, but may be in a required mutually
+#exclusive set and is intended to be called for options in a set individually.
+#See requiredOptionsSatisfied.  It is similar to hasValue when called with
+#VARREF, but also checks standard in and out for PRIMARY options.  Also, this
+#method assumes that default values have been filled in into the VARREF(_CPY)
+sub optionSatisfied
+  {
+    my $usg_hash  = $_[0];
+    my $satisfied = 1;
+
+    #Allow the programmer to handle filling in the default, indicated by setting
+    #a display default and not providing an actual default value
+    if(defined($usg_hash->{DISPDEF}) &&
+       !hasValue($usg_hash->{OPTTYPE},$usg_hash->{DEFAULT_PRG}))
+      {
+	debug("Allowing programmer to fill in default for option: [",
+	      $usg_hash->{OPTFLAG_DEF},"] because display default (DISPDEF) ",
+	      "is defined: [$usg_hash->{DISPDEF}] and no actual DEFAULT value ",
+	      "was set.");
+	return($satisfied);
+      }
+
+    if($usg_hash->{OPTTYPE} eq 'infile')
+      {
+	if(!hasValue($usg_hash->{OPTTYPE},getVarref($usg_hash)) &&
+	   (!$usg_hash->{PRIMARY} || !isThereInputOnSTDIN()))
+	  {$satisfied = 0}
+      }
+    elsif($usg_hash->{OPTTYPE} eq 'outfile' || $usg_hash->{OPTTYPE} eq 'suffix')
+      {
+	if(!hasValue($usg_hash->{OPTTYPE},getVarref($usg_hash)) &&
+	   (!$usg_hash->{PRIMARY} || isStandardOutputToTerminal()))
+	  {$satisfied = 0}
+      }
+    elsif(!hasValue($usg_hash->{OPTTYPE},getVarref($usg_hash)))
+      {$satisfied = 0}
+
+    return($satisfied)
+  }
+
+#This returns a flattened array of committed defined input files.  It is meant
+#to be called after the command line options have been committed.  Note, we
+#don't want a dash that's automatically added - we only want explicitly added
+#dash(es).  This is so we can use the return of this method to check the
+#validity of input present on STDIN.
+sub getAllInfiles
+  {
+    if($command_line_stage < COMMITTED)
+      {
+        error("Internal method getAllInfiles called before the command line ",
+              "options have been committed.");
+        return(undef);
+      }
+
+    my $flat_infiles = [];
+
+    foreach my $uhash (grep {$_->{OPTTYPE} eq 'infile'} @$usage_array)
+      {
+        my $inf_array2d = getVarref($uhash);
+        if(defined($inf_array2d) && scalar(@$inf_array2d))
+          {
+            foreach my $inf_array (@$inf_array2d)
+              {
+                if(defined($inf_array) && scalar(@$inf_array))
+                  {
+                    foreach my $inf (@$inf_array)
+                      {push(@$flat_infiles,$inf)}
+                  }
+              }
+          }
+      }
+
+    return(wantarray ? @$flat_infiles : $flat_infiles);
+  }
+
+sub makeFileArrays
+  {
+    #For now, we will just populate the global variables:
+    #  input_files_array        xx
+    #  outfile_types_hash       xx
+    #  outfile_suffix_array     xx
+    #  file_indexes_to_usage    xx
+
+    foreach my $uhash (grep {$_->{OPTTYPE} eq 'infile' ||
+			       $_->{OPTTYPE} eq 'outfile' ||
+				 $_->{OPTTYPE} eq 'suffix'} @$usage_array)
+      {
+	if($uhash->{OPTTYPE} eq 'infile')
+	  {
+	    my $file_type_index = scalar(@$input_files_array);
+	    push(@$input_files_array,getVarref($uhash));
+	    $uhash->{FILEID} = $file_type_index;
+	  }
+	elsif($uhash->{OPTTYPE} eq 'outfile')
+	  {
+	    my $file_type_index = scalar(@$input_files_array);
+	    if(defined(getVarref($uhash)) && scalar(@{getVarref($uhash)}))
+	      {push(@$input_files_array,getVarref($uhash))}
+	    else
+	      {push(@$input_files_array,[])}
+	    $outfile_types_hash->{$file_type_index} = 1;
+	    $uhash->{FILEID} = $file_type_index;
+	  }
+	elsif($uhash->{OPTTYPE} eq 'suffix')
+	  {
+	    my $file_type_index = $usage_array->[$uhash->{PAIRID}]->{FILEID};
+	    my($suffix_index);
+	    if((scalar(@$outfile_suffix_array) - 1) < $file_type_index ||
+	       !defined($outfile_suffix_array->[$file_type_index]))
 	      {
-		my $files     = [];
-		my $err_globs = '';
-		my $an_error  = 0;
+		$outfile_suffix_array->[$file_type_index] =
+		  [getVarref($uhash,1)];
+		$suffix_index = 0;
+	      }
+	    else
+	      {
+		$suffix_index =
+		  scalar(@{$outfile_suffix_array->[$file_type_index]});
+		push(@{$outfile_suffix_array->[$file_type_index]},
+		     getVarref($uhash,1));
+	      }
+	    #Fix any subarrays in the middle that are undefined
+	    foreach my $osi (0..$#{$outfile_suffix_array})
+	      {if(!defined($outfile_suffix_array->[$osi]))
+		 {$outfile_suffix_array->[$osi] = []}}
 
-		#Require a matching/existing file for each infile glob string
-		#supplied separately (no match required for output file string)
-		foreach my $globstr (@$flag_instance_array)
+	    $file_indexes_to_usage->{$file_type_index}->{$suffix_index} =
+	      $uhash->{OPTION_ID};
+	  }
+      }
+  }
+
+#This sub basically goes through the usage_array and preferentially assigns the
+#user default or programmer default.
+#Globals used: usage_array
+sub fillInDefaults
+  {
+    my $fatal_errors = [];
+
+    #Defaults of mutually exclusive options are handled in
+    #processMutuallyExclusiveOptionSets because defaults should not be set if a
+    #mutex option was supplied
+    foreach my $usg_hash (grep {!exists($exclusive_lookup->{$_->{OPTION_ID}})}
+			  @$usage_array)
+      {
+        #Set the final default value
+        $usg_hash->{DEFAULT_CLI} =
+          (defined($usg_hash->{DEFAULT_USR}) ?
+           $usg_hash->{DEFAULT_USR} : $usg_hash->{DEFAULT_PRG});
+
+        next if($usg_hash->{SUPPLIED});
+
+	my($default);
+
+	if(exists($scalaropt_types->{$usg_hash->{OPTTYPE}}))
+	  {
+	    #Select the default value
+	    if(defined($usg_hash->{DEFAULT_USR}))
+	      {$default = $usg_hash->{DEFAULT_USR}}
+	    elsif(defined($usg_hash->{DEFAULT_PRG}))
+	      {$default = $usg_hash->{DEFAULT_PRG}}
+
+	    #If there's a defined default
+	    if(defined($default))
+	      {stageVarref($usg_hash,$default)}
+	  }
+	elsif((exists($array_genopt_types->{$usg_hash->{OPTTYPE}}) ||
+	       exists($array2dopt_types->{$usg_hash->{OPTTYPE}})) &&
+	      $usg_hash->{OPTTYPE} ne 'infile')
+	  {
+	    #Prefer the user's default, if present
+	    if(defined($usg_hash->{DEFAULT_USR}) &&
+	       scalar(@{$usg_hash->{DEFAULT_USR}}))
+	      {$default = $usg_hash->{DEFAULT_USR}}
+	    elsif(defined($usg_hash->{DEFAULT_PRG}) &&
+		  scalar(@{$usg_hash->{DEFAULT_PRG}}))
+	      {$default = $usg_hash->{DEFAULT_PRG}}
+
+	    if(defined($default))
+	      {stageVarref($usg_hash,$default)}
+	  }
+	elsif($usg_hash->{OPTTYPE} eq 'infile')
+	  {
+	    $default = [];
+	    my($default,$glob_default,$twodarray);
+	    #Prefer the user's default, if present
+	    if(defined($usg_hash->{DEFAULT_USR}) &&
+	       scalar(@{$usg_hash->{DEFAULT_USR}}))
+	      {$glob_default = $usg_hash->{DEFAULT_USR}}
+	    elsif(defined($usg_hash->{DEFAULT_PRG}) &&
+		  scalar(@{$usg_hash->{DEFAULT_PRG}}))
+	      {$glob_default = $usg_hash->{DEFAULT_PRG}}
+
+	    #Globs should already have been expanded by the getoptSubHelper
+	    if(defined($glob_default) && scalar(@$glob_default))
+	      {
+		my $got_some  = 0;
+		my $err_globs = [];
+		foreach my $glob_array (@$glob_default)
 		  {
-		    #Glob the default glob str and make sure the return value
-		    #is defined and is an existing file unless this is an
-		    #output file type.
-		    my $newfiles =
-		      [grep {defined($_) &&
-			       (exists($outfile_types_hash->{$i}) ? 1 : -e $_)}
-		       sglob($globstr)];
-		    if(scalar(@$newfiles))
+		    push(@$default,[]) if(scalar(@$glob_array));
+		    foreach my $globstr (@$glob_array)
 		      {
-			$got_some = 1;
-			push(@$files,@$newfiles);
-		      }
-		    else
-		      {
-			#Keep track of the glob strings that didn't match
-			$err_globs .= ($an_error ? ' ' : '') . $globstr;
-			$an_error   = 1;
+			my $files = [grep {-e $_} sglob($globstr,1)];
+			if(scalar(@$files))
+			  {
+			    $got_some = 1;
+			    push(@{$default->[-1]},@$files);
+			  }
+			else
+			  {push(@$err_globs,$globstr)}
 		      }
 		  }
 
-		if($an_error)
+		if(scalar(@$err_globs) == 0 && scalar(@$default))
+		  {stageVarref($usg_hash,$default)}
+		elsif($got_some)
 		  {
-		    $all_err_globs .= ($error_status ? ' ' : '') . $err_globs;
-		    $error_status = 1;
-
-		    if(scalar(grep {$_ == $i} @$required_infile_types))
-		      {$some_required = 1}
+		    my $errmsg =
+		      join('',
+			   ("Some of the expected default input files were ",
+			    "not found: [",join(' ',@$err_globs),"].  Unable ",
+			    "to proceed.  Please create the default files."));
+		    push(@$fatal_errors,$errmsg);
 		  }
-		else
-		  {push(@{$input_files_array->[$i]},$files)}
+		elsif($usg_hash->{REQUIRED})
+		  {
+		    my $errmsg =
+		      join('',
+			   ("Expected required default input files were not ",
+			    "found: [",join(' ',@$err_globs),"].  Unable to ",
+			    "proceed.  Please create the default files."));
+		    push(@$fatal_errors,$errmsg);
+		  }
+		#Else - quietly do not fill in default because it's not required
+		#and the default glob didn't match anything
 	      }
 	  }
       }
 
-    #If there was an error (e.g. some default files not found)
-    if($error_status)
-      {
-	#If a portion of the patterns did match existing files
-	if($got_some)
-	  {
-	    error("Some of the expected default input files were not found: ",
-		  "[$all_err_globs].  Unable to proceed.  Please create the ",
-		  "default files.");
-	    usage();
-	    quit(-19);
-	  }
-	#If one of the file types is a required option
-	elsif($some_required)
-	  {
-	    error("Expected required default input files were not found: ",
-		  "[$all_err_globs].  Unable to proceed.  Please create the ",
-		  "default files.");
-	    usage();
-	    quit(-20);
-	  }
-      }
+    return(@$fatal_errors);
   }
 
-sub loadDefaultOutdirs
-  {
-    #If there is no outdir option or no default outdirs, return
-    if(!$outdirs_added || scalar(@$default_outdirs_array) == 0)
-      {return()}
-
-    #If there were no outdirs supplied on the command line
-    if(scalar(@$outdirs_array) == 0)
-      {@$outdirs_array = @$default_outdirs_array}
-  }
-
-sub requireFileRelationships
+sub requiredOptionRelationshipsSatisfied
   {
     my $relationship_violation = 0;
 
-    foreach my $rel_array (@$required_relationships)
+    #For every defined relationship pair. See REQ #341.
+    foreach my $pair_from_id
+      (grep {defined($usage_array->[$_]->{PAIRID})} (0..$#{$usage_array}))
       {
-	my $test_ftype   = $rel_array->[0];
-	my $valid_ftype  = $rel_array->[1];
-	my $relationship = $rel_array->[2];
+	my $pair_to_id   = $usage_array->[$pair_from_id]->{PAIRID};
+	my $relationship = $usage_array->[$pair_from_id]->{RELATION};
 
-	debug({LEVEL => -1},"Checking relationship of file types ",
-	      "[$test_ftype,",(defined($valid_ftype) ? $valid_ftype : 'undef'),
-	      "] is: [$relationship].");
+	next unless(defined($pair_to_id));
 
-	my $test_files = $input_files_array->[$test_ftype];
-
-	#If the test file type is not required and there are none, skip
-	if(scalar(@$test_files) == 0)
+	#If the relationship is infile-to-infile or outfile-to-infile
+	if(($usage_array->[$pair_from_id]->{OPTTYPE} eq 'infile' ||
+	    $usage_array->[$pair_from_id]->{OPTTYPE} eq 'outfile') &&
+	   $usage_array->[$pair_to_id]->{OPTTYPE} eq 'infile')
 	  {
-	    if(isFileTypeRequired($test_ftype))
+	    ##TODO: Make this support more than just infile/outfile options
+	    ##      See REQ #341
+
+	    debug({LEVEL => -1},"Checking relationship of file options ",
+		  "[$pair_from_id,",
+		  (defined($pair_to_id) ? $pair_to_id : 'undef'),
+		  "] is: [$relationship].");
+
+	    my $test_files = getVarref($usage_array->[$pair_from_id]);
+
+	    #If the test file type is not required and there are none, skip
+	    if(scalar(@$test_files) == 0)
 	      {
-		my $hid = isFileTypeHidden($test_ftype);
-		if($hid && defined($primary_infile_type) &&
-		   $test_ftype == $primary_infile_type)
-		  {error("Input file supplied via standard input redirect is ",
-			 "required.")}
-		elsif(!$hid)
-		  {error("Input file(s): [",getInfileFlag($test_ftype),
-			 "] are required.")}
-		else
+		if($usage_array->[$pair_from_id]->{REQUIRED})
 		  {
-		    #This shouldn't happen, but putting it here just in case
-		    error("Input file supplied by hidden flag [",
-			  getInfileFlag($test_ftype,-1),"] is required.");
+		    my $hid = $usage_array->[$pair_from_id]->{HIDDEN};
+		    if($hid && defined($primary_infile_optid) &&
+		       $pair_from_id == $primary_infile_optid)
+		      {error("Input file supplied via standard input redirect ",
+			     "is required.")}
+		    elsif(!$hid)
+		      {error("Input file(s): [",
+			     getFlag($usage_array->[$pair_from_id]),
+			     "] are required.")}
+		    else
+		      {
+			#This shouldn't happen, but putting it here just in case
+			error("Input file supplied by hidden flag [",
+			      getFlag($usage_array->[$pair_from_id],-1),
+			      "] is required.");
+		      }
+		    $relationship_violation = 1;
 		  }
-		$relationship_violation = 1;
+		next;
 	      }
-	    next;
-	  }
 
-	#If the valid_ftype files do not matter
-	if($relationship =~ /^(\d+)$/)
-	  {
-	    my $static_num_files = $1;
-	    if(scalar(@$test_files) != 1 ||
-	       scalar(@{$test_files->[0]}) != $static_num_files)
+	    #If the pair_to files do not matter
+	    if($relationship =~ /^(\d+)$/)
 	      {
-		my $numf = scalar(map {scalar(@$_)} @$test_files);
-		error("Exactly [$static_num_files] file",
-		      ($static_num_files > 1 ? "s are " : " is "),
-		      "expected via [",getInfileFlag($test_ftype),"], but ",
-		      "[$numf] (",join(',',map {scalar(@$_)} @$test_files),
-		      ") ",($numf != 1 ? 'were' : 'was')," supplied.");
-		$relationship_violation = 1;
+		my $static_num_files = $1;
+		if(scalar(@$test_files) != 1 ||
+		   scalar(@{$test_files->[0]}) != $static_num_files)
+		  {
+		    my $numf = scalar(map {scalar(@$_)} @$test_files);
+		    error("Exactly [$static_num_files] file",
+			  ($static_num_files > 1 ? "s are " : " is "),
+			  "expected via [",
+			  getBestFlag($usage_array->[$pair_from_id]),"], but ",
+			  "[$numf] (",join(',',map {scalar(@$_)} @$test_files),
+			  ") ",($numf != 1 ? 'were' : 'was')," supplied.");
+		    $relationship_violation = 1;
+		  }
+		next;
 	      }
-	    next;
-	  }
 
-	my $valid_files =
-	  defined($valid_ftype) ? $input_files_array->[$valid_ftype] : [];
+	    my $valid_files = [];
+	    if(defined($pair_to_id))
+	      {$valid_files = getVarref($usage_array->[$pair_to_id])}
 
-	##TODO: The following logic does not make sense when the programmer CAN do something with the file type in question and the other type is not supplied (such as a secondary output file).  Case-in-point: codonHomologizer.pl can make a matrix file (1:1orM with sequence files) from a codon usage file, but the sequence files aren't needed to do that.  But is there any circumstance where this check makes sense?  Figure this out.
+	    ##TODO: The following logic does not make sense when the programmer CAN do something with the file type in question and the other type is not supplied (such as a secondary output file).  Case-in-point: codonHomologizer.pl can make a matrix file (1:1orM with sequence files) from a codon usage file, but the sequence files aren't needed to do that.  But is there any circumstance where this check makes sense?  Figure this out.
 #	#If there are none of the files in the file type we're testing against,
 #	#we cannot enforce the relationship.  This is an error.  Any of the
 #	#relationship types require the one it's in a relationship with to be
@@ -7662,83 +11765,144 @@ sub requireFileRelationships
 #	#are checked elsewhere.
 #	if(scalar(@$valid_files) == 0)
 #	  {
-#	    error("File type: [",getInfileFlag($test_ftype),"] requires at ",
-#		  "least 1 file of type: [",getInfileFlag($valid_ftype),
+#	    error("File type: [",
+#                 getFlag($usage_array->[fileIDToOptionID($test_ftype,'file')]),
+#                 "] requires at least 1 file of type: [",
+#                 getFlag($usage_array->[fileIDToOptionID($valid_ftype,'file')]),
 #		  "] to be present, however none were supplied.");
 #	    $relationship_violation = 1;
 #	    next;
 #	  }
 
-	if($relationship eq '1:M')
-	  {
-	    if(!twoDArraysAre1toM($test_files,$valid_files))
+	    if($relationship eq '1:M')
 	      {
-		error("There may be only 1 file supplied as: [",
-		      getInfileFlag($test_ftype),"] for each file ",
-		      "group supplied as: [",getInfileFlag($valid_ftype),
-		      "], however there were: [",
-		      join(',',map {scalar(@$_)} @$test_files),"] files ",
-		      "supplied with [",scalar(@$valid_files),"] files ",
-		      "respectively.");
+		if(!twoDArraysAre1toM($test_files,$valid_files))
+		  {
+		    error("There may be only 1 file supplied as: [",
+			  getBestFlag($usage_array->[$pair_from_id]),
+			  "] for each file group supplied as: [",
+			  getBestFlag($usage_array->[$pair_to_id]),
+			  "], however there were: [",
+			  join(',',map {scalar(@$_)} @$test_files),"] files ",
+			  "supplied with [",scalar(@$valid_files),"] files ",
+			  "respectively.");
+		    $relationship_violation = 1;
+		  }
+	      }
+	    elsif($relationship eq '1:1')
+	      {
+		#If the outer arrays are not the same size or any of the inner
+		#arrays are not the same size
+		if(!twoDArraysAre1to1($test_files,$valid_files))
+		  {
+		    error("The number and group sizes of files supplied as [",
+			  getBestFlag($usage_array->[$pair_from_id]),
+			  "] and [",
+			  getBestFlag($usage_array->[$pair_to_id]),
+			  "] must be the same, but there were [",
+			  join(',',map {scalar(@$_)} @$test_files),
+			  "] and [",join(',',map {scalar(@$_)} @$valid_files),
+			  "] files supplied.");
+		    $relationship_violation = 1;
+		  }
+	      }
+	    elsif($relationship eq '1:1orM')
+	      {
+		if(!twoDArraysAre1to1($test_files,$valid_files) &&
+		   !twoDArraysAre1toM($test_files,$valid_files) &&
+		   #Mixed state option:
+		   #The outer arrays are the same size but inner test_files
+		   #arrays are not a combo of equal and size 1
+		   (scalar(@$test_files) == scalar(@$valid_files) &&
+		    scalar(grep {scalar(@{$test_files->[$_]}) != 1 &&
+				   scalar(@{$test_files->[$_]}) !=
+				     scalar(@{$valid_files->[$_]})}
+			   0..$#{$test_files})))
+		  {
+		    error("The number and group sizes of files supplied as [",
+			  getBestFlag($usage_array->[$pair_from_id]),
+			  "] and [",
+			  getBestFlag($usage_array->[$pair_to_id]),
+			  "] must either be the same or have a one to many ",
+			  "relationship, but there were [",
+			  join(',',map {scalar(@$_)} @$test_files),
+			  "] and [",join(',',map {scalar(@$_)} @$valid_files),
+			  "] files supplied.");
+		    $relationship_violation = 1;
+		  }
+	      }
+	    #NOTE: Requirement 140 needs to be implemented to properly support
+	    #M:M
+	    elsif($relationship eq 'M:M')
+	      {
+		#Since we already checked that some of each file are present,
+		#there's nothing to check here.  Anything goes.
+	      }
+	    elsif($relationship ne '1' && $relationship ne '')
+	      {error("Invalid relationship type (PAIR_RELAT): ",
+		     "[$relationship].  Unable to enforce relationship ",
+		     "between file types supplied as: [",
+		     getBestFlag($usage_array->[$pair_from_id]),
+		     "(ID:[$pair_from_id])",
+		     getBestFlag($usage_array->[$pair_to_id]),
+		     "(ID:[$pair_to_id])].")}
+	  }
+	elsif($usage_array->[$pair_from_id]->{OPTTYPE} eq 'logsuff' &&
+	      $usage_array->[$pair_to_id]->{OPTTYPE} eq 'string')
+	  {
+	    #Relationship is irrelevant. Each opt is a scalar. Defaults should
+	    #already be filled in.
+	    if(($usage_array->[$pair_from_id]->{REQUIRED} ||
+		$usage_array->[$pair_from_id]->{SUPPLIED}) &&
+	       !hasValue($usage_array->[$pair_to_id]->{OPTTYPE},
+			 getVarref($usage_array->[$pair_to_id])))
+	      {
+		error('Missing required dependent option: [',
+                      getBestFlag($usage_array->[$pair_to_id]),'].',
+                      {DETAIL =>
+                       join('',("Option [",
+                                getBestFlag($usage_array->[$pair_from_id]),
+                                "] requires option [",
+                                getBestFlag($usage_array->[$pair_to_id]),
+                                "], but it was not supplied."))});
 		$relationship_violation = 1;
 	      }
 	  }
-	elsif($relationship eq '1:1')
+	elsif($usage_array->[$pair_from_id]->{OPTTYPE} eq 'suffix' &&
+	      $usage_array->[$pair_to_id]->{OPTTYPE} eq 'infile')
 	  {
-	    #If the outer arrays are not the same size or any of the inner
-	    #arrays are not the same size
-	    if(!twoDArraysAre1to1($test_files,$valid_files))
+	    if(($usage_array->[$pair_from_id]->{REQUIRED} ||
+		$usage_array->[$pair_from_id]->{SUPPLIED}) &&
+	       !hasValue($usage_array->[$pair_to_id]->{OPTTYPE},
+			 getVarref($usage_array->[$pair_to_id])) &&
+	       (!$usage_array->[$pair_to_id]->{PRIMARY} ||
+	        !isThereInputOnSTDIN()))
 	      {
-		error("The number and group sizes of files supplied as [",
-		      getInfileFlag($test_ftype),"] and [",
-		      getInfileFlag($valid_ftype),"] must be the same, but ",
-		      "there were [",join(',',map {scalar(@$_)} @$test_files),
-		      "] and [",join(',',map {scalar(@$_)} @$valid_files),
-		      "] files supplied.");
+		error('Missing required dependent option: [',
+                      getBestFlag($usage_array->[$pair_to_id]),'].',
+                      {DETAIL =>
+                       join('',("Option [",
+                                getBestFlag($usage_array->[$pair_from_id]),
+                                "] requires option [",
+                                getBestFlag($usage_array->[$pair_to_id]),
+                                "], but it was not supplied."))});
 		$relationship_violation = 1;
 	      }
 	  }
-	elsif($relationship eq '1:1orM')
+	elsif($usage_array->[$pair_from_id]->{OPTTYPE} eq 'suffix' &&
+	      $usage_array->[$pair_to_id]->{OPTTYPE} eq 'outfile')
 	  {
-	    if(!twoDArraysAre1to1($test_files,$valid_files) &&
-	       !twoDArraysAre1toM($test_files,$valid_files) &&
-	       #Mixed state option:
-	       #The outer arrays are the same size but inner test_files arrays
-	       #are not a combo of equal and size 1
-	       (scalar(@$test_files) == scalar(@$valid_files) &&
-		scalar(grep {scalar(@{$test_files->[$_]}) != 1 &&
-			       scalar(@{$test_files->[$_]}) !=
-				 scalar(@{$valid_files->[$_]})}
-		       0..$#{$test_files})))
-	      {
-		error("The number and group sizes of files supplied as [",
-		      getInfileFlag($test_ftype),"] and [",
-		      getInfileFlag($valid_ftype),"] must either be the ",
-		      "same or have a one to many relationship, but there ",
-		      "were [",join(',',map {scalar(@$_)} @$test_files),
-		      "] and [",join(',',map {scalar(@$_)} @$valid_files),
-		      "] files supplied.");
-		$relationship_violation = 1;
-	      }
-	  }
-	#NOTE: Requirement 140 needs to be implemented to properly support M:M
-	elsif($relationship eq 'M:M')
-	  {
-	    #Since we already checked that some of each file are present,
-	    #there's nothing to check here.  Anything goes.
+	    #This is not a supported relationship for users.  It is a hidden/
+	    #internally managed relationship
 	  }
 	else
-	  {
-	    error("Invalid relationship type (PAIR_RELAT): ",
-		  "[$relationship].  Unable to enforce relationship between ",
-		  "file types supplied as: [",getInfileFlag($test_ftype),
-		  "(ID:[$test_ftype])",getInfileFlag($valid_ftype),
-		  "(ID:[$valid_ftype])].");
-	  }
+	  {error("Unsupported option relationship: [",
+		 $usage_array->[$pair_from_id]->{OPTTYPE},"] to [",
+		 $usage_array->[$usage_array->[$pair_from_id]->{PAIRID}]
+		 ->{OPTTYPE},"], [$usage_array->[$pair_from_id]->{RELATION}].")}
       }
 
-    if($relationship_violation)
-      {quit(-21)}
+    return(!$relationship_violation);
   }
 
 #For use with testing the matching dimensionality of 2D file arrays
@@ -7786,10 +11950,21 @@ sub twoDArraysAre1to1
 sub getNextFileGroup
   {
     my @in = getSubParams([qw(FILETYPEID)],[],[@_]);
-    my $file_type_id = $in[0];
+    my $optid        = $in[0];
+    my $file_type_id = (isInt($optid) && $optid >= 0 &&
+			$optid <= $#{$usage_array} &&
+			($usage_array->[$optid]->{OPTTYPE} eq 'infile' ||
+			 $usage_array->[$optid]->{OPTTYPE} eq 'outfile') ?
+			$usage_array->[$optid]->{FILEID} : undef);
 
-    unless($processCommandLine_called)
+    unless($command_line_stage)
       {processCommandLine()}
+
+    if(defined($optid) && !defined($file_type_id))
+      {
+	error("Invalid infile option ID: [$optid].");
+	return(undef);
+      }
 
     #Allow file_type_id to be optional when there's only 1 infile type
     #OR allow file_type_id to be optional when called in list context
@@ -7831,10 +12006,21 @@ sub getNextFileGroup
 sub resetFileGroupIterator
   {
     my @in = getSubParams([qw(FILETYPEID)],[],[@_]);
-    my $file_type_id = $in[0];
+    my $optid        = $in[0];
+    my $file_type_id = (isInt($optid) && $optid >= 0 &&
+			$optid <= $#{$usage_array} &&
+			($usage_array->[$optid]->{OPTTYPE} eq 'infile' ||
+			 $usage_array->[$optid]->{OPTTYPE} eq 'outfile') ?
+			$usage_array->[$optid]->{FILEID} : undef);
 
-    unless($processCommandLine_called)
+    unless($command_line_stage)
       {processCommandLine()}
+
+    if(defined($optid) && !defined($file_type_id))
+      {
+	error("Invalid infile option ID: [$optid].");
+	return(undef);
+      }
 
     #Allow file_type_id to be optional when there's only 1 infile type
     #OR allow file_type_id to be optional when called in list context
@@ -7864,10 +12050,21 @@ sub resetFileGroupIterator
 sub getAllFileGroups
   {
     my @in = getSubParams([qw(FILETYPEID)],[],[@_]);
-    my $file_type_id = $in[0];
+    my $optid        = $in[0];
+    my $file_type_id = (isInt($optid) && $optid >= 0 &&
+			$optid <= $#{$usage_array} &&
+			($usage_array->[$optid]->{OPTTYPE} eq 'infile' ||
+			 $usage_array->[$optid]->{OPTTYPE} eq 'outfile') ?
+			$usage_array->[$optid]->{FILEID} : undef);
 
-    unless($processCommandLine_called)
+    unless($command_line_stage)
       {processCommandLine()}
+
+    if(defined($optid) && !defined($file_type_id))
+      {
+	error("Invalid infile option ID: [$optid].");
+	return(undef);
+      }
 
     #Allow file_type_id to be optional when there's only 1 infile type
     #OR allow file_type_id to be optional when called in list context
@@ -7887,6 +12084,9 @@ sub getAllFileGroups
 	  }
       }
 
+    #Do not warn about unprocessed file sets if this method is called
+    $unproc_file_warn = 0;
+
     if(wantarray)
       {return(map {[@$_]} @{$input_files_array->[$file_type_id]})}
 
@@ -7897,10 +12097,21 @@ sub getNumFileGroups
   {
     debug({LEVEL => -10},"getNumFileGroups called.");
     my @in = getSubParams([qw(FILETYPEID)],[],[@_]);
-    my $file_type_id = $in[0];
+    my $optid        = $in[0];
+    my $file_type_id = (isInt($optid) && $optid >= 0 &&
+			$optid <= $#{$usage_array} &&
+			($usage_array->[$optid]->{OPTTYPE} eq 'infile' ||
+			 $usage_array->[$optid]->{OPTTYPE} eq 'outfile') ?
+			$usage_array->[$optid]->{FILEID} : undef);
 
-    unless($processCommandLine_called)
+    unless($command_line_stage)
       {processCommandLine()}
+
+    if(defined($optid) && !defined($file_type_id))
+      {
+	error("Invalid infile option ID: [$optid].");
+	return(undef);
+      }
 
     #Allow file_type_id to be optional when there's only 1 infile type
     #OR allow file_type_id to be optional when called in list context
@@ -7933,10 +12144,21 @@ sub getNumFileGroups
 sub getFileGroupSizes
   {
     my @in = getSubParams([qw(FILETYPEID)],[],[@_]);
-    my $file_type_id = $in[0];
+    my $optid        = $in[0];
+    my $file_type_id = (isInt($optid) && $optid >= 0 &&
+			$optid <= $#{$usage_array} &&
+			($usage_array->[$optid]->{OPTTYPE} eq 'infile' ||
+			 $usage_array->[$optid]->{OPTTYPE} eq 'outfile') ?
+			$usage_array->[$optid]->{FILEID} : undef);
 
-    unless($processCommandLine_called)
+    unless($command_line_stage)
       {processCommandLine()}
+
+    if(defined($optid) && !defined($file_type_id))
+      {
+	error("Invalid infile option ID: [$optid].");
+	return(undef);
+      }
 
     #Allow file_type_id to be optional when there's only 1 infile type
     #OR allow file_type_id to be optional when called in list context
@@ -7962,10 +12184,6 @@ sub getFileGroupSizes
 
     return([map {scalar(@$_)} @{$input_files_array->[$file_type_id]}]);
   }
-
-##
-## ORIGINAL TEMPLATE CODE MODIFIED TO BE A MODULE
-##
 
 #Copies all hash arguments' contents from the parameter array into 1 hash.
 #All other arguments must be scalars - otherwise generates an error.  This sub
@@ -8028,18 +12246,22 @@ sub getStrSubParams
 #of required paraeters is used as a minimum number of parameters.
 sub getSubParams
   {
-    if(scalar(@_) != 3 && scalar(@_) != 4)
+    if(scalar(@_) < 3 || scalar(@_) > 5)
       {
 	error("Three parameters are required: all keys, required keys, and ",
-	      "the parameters submitted to the method.  An boolean ",
-	      "'strict' parameter is an optional fourth parameter.");
+	      "the parameters submitted to the method.  A boolean ",
+	      "'strict' parameter is an optional fourth parameter.  A scalar ",
+              "reference to a boolean indicating whether no valid keys were ",
+              "detected is an optional fifth parameter.");
 	return(undef);
       }
 
-    my $keys   = shift(@_);
-    my $reqd   = shift(@_);
-    my $unproc = shift(@_);
-    my $strict = (scalar(@_) ? shift(@_) : 0);
+    my $keys       = shift(@_);
+    my $reqd       = shift(@_);
+    my $unproc     = shift(@_);
+    my $strict     = (scalar(@_) ? shift(@_) : 0);
+    my $nokeys_ref = (scalar(@_) ? shift(@_) : \my $tmp);
+    $$nokeys_ref = 0;
     my $sub;
     my $stack = 0;
     while(my @info = caller($stack))
@@ -8143,6 +12365,7 @@ sub getSubParams
 
 	if(!$a_match)
 	  {
+            $$nokeys_ref = 1;
 	    debug({LEVEL => -1},"No matching keys passed to $sub: [",
 		  join(',',@$keys),"], so returning all params [",
 		  join(',',map {defined($_) ? $_ : 'undef'} @$unproc),
@@ -8158,7 +12381,7 @@ sub getSubParams
 
 	    if($strict)
 	      {
-		error("No matching matching keys passed to $sub: [",
+		error("No matching keys passed to $sub: [",
 		      join(',',@$keys),"] found.");
 		return(undef);
 	      }
@@ -8167,9 +12390,9 @@ sub getSubParams
 			 grep {$_ % 2 == 0} (0..$#{$unproc})) ==
 		  scalar(grep {$_ % 2 == 0} (0..$#{$unproc})))
 	      {
-		warning("No matching matching keys passed to $sub: [",
-			join(',',@$keys),"] found.  Assuming they are valid ",
-			"parameters not in hash format.");
+		warning("No matching keys passed to $sub: [",join(',',@$keys),
+			"] found.  Assuming they are valid parameters not in ",
+			"hash format.");
 	      }
 
 	    return(@$unproc);
@@ -8218,12 +12441,12 @@ sub getSubParams
       {
 	if(scalar(@missing))
 	  {error("$sub: Required parameters missing: [",join(',',@missing),
-		 "].",($processCommandLine_called ?
+		 "].",($command_line_stage ?
 		       '  Use --force to get past this error.' : ''))}
 	if(scalar(@dupes))
 	  {error("$sub: Duplicate parameter aliases encountered: [",
 		 join(',',@missing),"].",
-		 ($processCommandLine_called ?
+		 ($command_line_stage ?
 		  '  Use --force to get past this error.  Note, the value ' .
 		  'of the aliases will be randomly selected.' : ''))}
 	quit(-26);
@@ -8258,14 +12481,19 @@ sub getSubParams
 ##
 sub verbose
   {
-    if(defined($verbose) && !$verbose)
+    #Flush the stderr buffer if it's populated and basic options have been set
+    flushStderrBuffer() if($command_line_stage >= DONE);
+    #Return if we know verbose mode is off
+    my($verbose);
+    if($command_line_stage >= DONE)
       {
-	flushStderrBuffer() if(defined($stderr_buffer));
-	return(0);
+	$verbose = getVarref('verbose',1);
+	return(0) if(defined($verbose) && !$verbose);
       }
 
     #Grab the options from the parameter array
-    my($opts,@params) = getStrSubParams(['OVERME','LEVEL','FREQUENCY'],@_);
+    my($opts,@params) =
+      getStrSubParams([qw(OVERME LEVEL FREQUENCY COMMENT LOG)],@_);
     my $overme_flag   = (exists($opts->{OVERME}) && defined($opts->{OVERME}) ?
 			 $opts->{OVERME} : 0);
     my $message_level = (exists($opts->{LEVEL}) && defined($opts->{LEVEL}) ?
@@ -8273,6 +12501,16 @@ sub verbose
     my $frequency     = (exists($opts->{FREQUENCY}) &&
 			 defined($opts->{FREQUENCY}) &&
 			 $opts->{FREQUENCY} > 0 ? $opts->{FREQUENCY} : 1);
+    my $local_log_verbose = (exists($opts->{LOG}) && defined($opts->{LOG}) &&
+			     $opts->{LOG} ? 1 : $log_verbose);
+    my $local_log_only    = (exists($opts->{LOG}) && defined($opts->{LOG}) &&
+			     $opts->{LOG} ? 1 : !$log_mirror);
+    #If comment is a non-zero int, use '#', 0 use '', anything else - use it
+    my $comment_char  =
+      (exists($opts->{COMMENT}) && defined($opts->{COMMENT}) &&
+       $opts->{COMMENT} ne '' ? (isInt($opts->{COMMENT}) ?
+				 ($opts->{COMMENT} ? '#' : '') :
+				 $opts->{COMMENT}) : '');
 
     if($frequency =~ /\./)
       {
@@ -8309,12 +12547,18 @@ sub verbose
     #Return if $verbose is greater than a negative level at which this message
     #is printed or if $verbose is less than a positive level at which this
     #message is printed.  Negative levels are for template diagnostics.
-    return(0) if(defined($verbose) &&
+    return(0) if($command_line_stage >= DONE && defined($verbose) &&
 		 (($message_level < 0 && $verbose > $message_level) ||
 		  ($message_level > 0 && $verbose < $message_level)));
 
     #Grab the message from the parameter array
-    my $verbose_message = join('',map {defined($_) ? $_ : 'undef'} @params);
+    my $verbose_message =
+      $comment_char . join('',map {defined($_) ? $_ : 'undef'} @params);
+    if($comment_char ne '')
+      {
+	$verbose_message =~ s/(?<!\A)\n(?!\z)/\n$comment_char/g;
+	$verbose_message =~ s/$comment_char$//g;
+      }
 
     #Turn on the overwrite flag automatically if carriage returns are found
     $overme_flag = 1 if(!$overme_flag && $verbose_message =~ /\r/);
@@ -8329,7 +12573,8 @@ sub verbose
     if($overme_flag)
       {
 	$verbose_message =~ s/\r$//;
-	if(!$verbose_warning && $verbose_message =~ /\n|\t/)
+	if(defined($verbose) && $verbose && !$verbose_warning &&
+	   $verbose_message =~ /\n|\t/)
 	  {
 	    warning('Hard returns and tabs cause overme mode to not work ',
 		    'properly.');
@@ -8406,24 +12651,45 @@ sub verbose
     #hard return.  This tells verbose() to not write over the last line
     #printed in overme mode.
 
-    if(defined($verbose))
+    $verbose_message .= ($overme_flag ? "\r" : "\n");
+
+    #If the command line has been sufficiently processed...  (Note, even if
+    #verbose is defined, it could get changed by the user after the command line
+    #is processed.  We check that command_line_stage is >= 6 because it means
+    #that the verbose value has been validated.)
+    if($command_line_stage >= DONE)
       {
 	#Flush the buffer if it is defined
 	flushStderrBuffer() if(defined($stderr_buffer));
 
-	#Print the current message to standard error
-	print STDERR ($verbose_message,
-		      ($overme_flag ? "\r" : "\n"));
+	if($verbose &&
+	   (($message_level < 0 && $verbose <= $message_level) ||
+	    ($message_level > 0 && $verbose >= $message_level)))
+	  {
+	    #Print the current message to standard error
+	    print STDERR ($verbose_message)
+	      if(!(exists($opts->{LOG}) && defined($opts->{LOG}) &&
+                   $opts->{LOG}) && (!$logging || !$local_log_only ||
+                                     !$local_log_verbose));
+
+	    #Only logs if in logging mode
+	    logger($verbose_message) if(!$overme_flag && $local_log_verbose ||
+					#Allow overme to be logged if local
+				        (exists($opts->{LOG}) &&
+					 defined($opts->{LOG}) &&
+					 $opts->{LOG}));
+	  }
       }
     else
       {
 	#Store the message in the stderr buffer until $verbose has been defined
-	#by the command line options (using Getopts::Long)
+	#by the command line options (using Getopt::Long)
 	push(@{$stderr_buffer},
 	     ['verbose',
 	      $message_level,
-	      join('',($verbose_message,
-		       ($overme_flag ? "\r" : "\n")))]);
+	      $verbose_message,
+              undef,undef,undef,undef,undef,
+              $opts,getTrace()]);
       }
 
     #Record the state
@@ -8437,27 +12703,55 @@ sub verbose
 sub verboseOverMe
   {verbose({OVERME=>1},@_)}
 
+#Logs messages that do not contain carriage returns (which are assumed to be
+#from calls to verboseOverMe()
+#Globals used: $logging, $log_handle
+sub logger
+  {
+    my $message = $_[0];
+    if(defined($logging) && $logging)
+      {
+	$message =~ s/ +\n/\n/g;
+	print $log_handle ($message);
+      }
+  }
+
 ##
 ## Method that prints errors with a leading program identifier containing a
 ## trace route back to main to see where all the method calls were from,
 ## the line number of each call, an error number, and the name of the script
 ## which generated the error (in case scripts are called via a system call).
-## Globals used: $error_limit, $quiet, $verbose, $pipeline_mode, $extended
 ##
 sub error
   {
-    if(defined($quiet) && $quiet)
+    #Flush the stderr buffer if it's populated and basic options have been set
+    flushStderrBuffer() if($command_line_stage >= DONE);
+
+    #Determine behaviors from command line options, if CL has been processed
+    my($quiet,$verbose,$DEBUG,$pipeline,$extended,$error_limit);
+    my $clear_vom = 0;
+    my $debug_ldr = 1;
+    if($command_line_stage >= COMMITTED)
       {
-	#This will empty the buffer if there's something in it based on $quiet
-	flushStderrBuffer() if(defined($stderr_buffer));
-	return(0);
+	#Return if we know quiet mode is on
+	$quiet = getVarref('quiet',1,0,1);
+	return(0) if(defined($quiet) && $quiet);
+
+	$verbose       = getVarref('verbose',  1,0,1);
+	$DEBUG         = getVarref('debug',    1,0,1);
+	$extended      = getVarref('extended', 1,1,1);
+	$error_limit   = getVarref('error_lim',1,1,1);
+	$pipeline      = getVarref('pipeline', 1,1,1);
+
+	$clear_vom     = defined($verbose) && $verbose;
+	$debug_ldr     = defined($DEBUG) && $DEBUG;
+
+	if(!defined($pipeline))
+	  {$pipeline = inPipeline()}
       }
 
-    if(!defined($pipeline_mode))
-      {$pipeline_mode = inPipeline()}
-
     #Extract any possible parameters
-    my($opts,@params) = getStrSubParams(['DETAIL'],@_);
+    my($opts,@params) = getStrSubParams([qw(DETAIL)],@_);
     my $detail        = $opts->{DETAIL};
     my $detail_alert  = "Supply --extended for additional details.";
 
@@ -8467,30 +12761,32 @@ sub error
     pop(@error_message) if(scalar(@error_message) > 1 &&
 			   $error_message[-1] !~ /\S/);
 
-    #If DETAIL was supplied/defined and $quiet is defined (implying that the
-    #command line has been processed), append a detailed message based on the
-    #value of $extended
-    if(defined($detail) && defined($quiet))
+    #If DETAIL was supplied/defined and the command line has been processed),
+    #append a detailed message based on the value of $extended
+    if(defined($detail) && $command_line_stage >= DONE)
       {
 	if($extended)
-	  {push(@error_message,$detail)}
+	  {push(@error_message,split(/(?<=\n)/,$detail))}
 	else
 	  {push(@error_message,$detail_alert)}
       }
 
     $error_number++;
-    my $leader_string = "ERROR$error_number:";
-    my $simple_leader = $leader_string;
+    my $leader_string      = "ERROR$error_number:";
+    my $simple_leader      = $leader_string;
     my $leader_string_pipe = $leader_string;
     my $simple_leader_pipe = $leader_string;
 
     my $caller_string = getTrace();
-    my $script = $0;
-    $script =~ s/^.*\/([^\/]+)$/$1/;
+    my $script        = getScriptName();
 
-    #If $DEBUG hasn't been defined or is true, or we're in a pipeline,
+    if($caller_string =~ /CommandLineInterface\.pm/)
+      {$cli_error_num++}
+
+    #If the command line has been parsed and we're in a pipeline,
     #prepend a call-trace
-    if(defined($pipeline_mode) && $pipeline_mode)
+    if($command_line_stage >= ARGSREAD &&
+       defined($pipeline) && $pipeline)
       {
 	$leader_string .= "$script:";
 	$simple_leader .= "$script:";
@@ -8498,28 +12794,28 @@ sub error
     $leader_string_pipe .= "$script:";
     $simple_leader_pipe .= "$script:";
 
-    if(!defined($DEBUG) || $DEBUG)
+    if($debug_ldr)
       {$leader_string .= $caller_string}
 
-    $leader_string   .= ' ';
-    $simple_leader   .= ' ';
+    $leader_string      .= ' ';
+    $simple_leader      .= ' ';
     $leader_string_pipe .= ' ';
     $simple_leader_pipe .= ' ';
-    my $leader_length = length($leader_string);
-    my $simple_length = length($simple_leader);
+    my $leader_length      = length($leader_string);
+    my $simple_length      = length($simple_leader);
     my $leader_length_pipe = length($leader_string_pipe);
     my $simple_length_pipe = length($simple_leader_pipe);
 
     #Figure out the length of the first line of the error
-    my $error_length = length(($error_message[0] =~ /\S/ ?
-			       $leader_string : '') .
-			      $error_message[0]);
-    my $simple_err_len = length(($error_message[0] =~ /\S/ ?
-				 $simple_leader : '') .
-				$error_message[0]);
-    my $error_length_pipe = length(($error_message[0] =~ /\S/ ?
-				    $leader_string_pipe : '') .
-				   $error_message[0]);
+    my $error_length        = length(($error_message[0] =~ /\S/ ?
+                                      $leader_string : '') .
+                                     $error_message[0]);
+    my $simple_err_len      = length(($error_message[0] =~ /\S/ ?
+                                      $simple_leader : '') .
+                                     $error_message[0]);
+    my $error_length_pipe   = length(($error_message[0] =~ /\S/ ?
+                                      $leader_string_pipe : '') .
+                                     $error_message[0]);
     my $simple_err_len_pipe = length(($error_message[0] =~ /\S/ ?
 				      $simple_leader_pipe : '') .
 				     $error_message[0]);
@@ -8530,20 +12826,16 @@ sub error
     #of the leader string
     my $tmp_msg_ln = shift(@error_message);
     my $error_string = $leader_string . $tmp_msg_ln .
-      (defined($verbose) && $verbose && defined($last_verbose_state) &&
-       $last_verbose_state ?
+      ($clear_vom && defined($last_verbose_state) && $last_verbose_state ?
        ' ' x ($last_verbose_size - $error_length) : '') . "\n";
     my $simple_string = $simple_leader . $tmp_msg_ln .
-      (defined($verbose) && $verbose && defined($last_verbose_state) &&
-       $last_verbose_state ?
+      ($clear_vom && defined($last_verbose_state) && $last_verbose_state ?
        ' ' x ($last_verbose_size - $simple_err_len) : '') . "\n";
     my $error_string_pipe = $leader_string_pipe . $tmp_msg_ln .
-      (defined($verbose) && $verbose && defined($last_verbose_state) &&
-       $last_verbose_state ?
+      ($clear_vom && defined($last_verbose_state) && $last_verbose_state ?
        ' ' x ($last_verbose_size - $error_length_pipe) : '') . "\n";
     my $simple_string_pipe = $simple_leader_pipe . $tmp_msg_ln .
-      (defined($verbose) && $verbose && defined($last_verbose_state) &&
-       $last_verbose_state ?
+      ($clear_vom && defined($last_verbose_state) && $last_verbose_state ?
        ' ' x ($last_verbose_size - $simple_err_len_pipe) : '') . "\n";
     foreach my $line (@error_message)
       {
@@ -8567,7 +12859,7 @@ sub error
 
 	#If debug is not defined or is non-zero, the example will default to
 	#debug-style leaders, otherwise.
-	if(!defined($DEBUG) || $DEBUG)
+	if($debug_ldr)
 	  {
 	    $error_hash->{$caller_string}->{EXAMPLEDEBUG} = $error_string;
 	    $error_hash->{$caller_string}->{EXAMPLEDEBUG} =~ s/\n */ /g;
@@ -8594,11 +12886,12 @@ sub error
     #Increment the count for this error type
     $error_hash->{$caller_string}->{NUM}++;
 
-    #Flush the buffer if it is defined and either quiet is defined and true or
-    #defined, false, and error_limit is defined
-    flushStderrBuffer() if((defined($quiet) &&
-			    ($quiet || defined($error_limit))) &&
-			   defined($stderr_buffer));
+    #Flush the buffer if there is something in it and there is enough info to
+    #flush it (i.e. quiet is defined and true or both quiet and error_limit are
+    #defined)
+    if($command_line_stage >= DONE)
+      {flushStderrBuffer() if(defined($quiet) &&
+			      ($quiet || defined($error_limit)))}
 
     #Print the error unless it is over the limit for its type
     if(!defined($error_limit) || $error_limit == 0 ||
@@ -8609,6 +12902,8 @@ sub error
 	if(defined($error_limit) && $error_limit &&
 	   $error_hash->{$caller_string}->{NUM} == $error_limit)
 	  {
+            $error_limit_met = 1;
+
 	    $error_string .=
 	      join('',
 		   ($leader_string,"NOTE: Further errors of this type will ",
@@ -8621,10 +12916,22 @@ sub error
 		    "Set --error-limit to 0 to turn off error suppression\n"));
 	  }
 
-	if(defined($quiet))
+	#If the command line has been sufficiently processed...  (Note, even if
+	#verbose is defined, it could get changed by the user after the command
+	#line is processed.  We check that command_line_stage is >= 6 because
+	#it means that the verbose value has been validated.)
+	if($command_line_stage >= DONE)
 	  {
+	    #If there's already been a fatal error, do not print warnings unless
+	    #in debug mode.  This assumes a fatal error has already been printed
+	    if($cleanup_mode == 2 && defined($DEBUG) && !$DEBUG)
+	      {return(0)}
+
 	    #The following assumes we'd not have gotten here if quiet was true
-	    print STDERR ($error_string);
+	    print STDERR ($error_string)
+	      if(!$quiet && (!$logging || $log_mirror || !$log_errors));
+
+	    logger($error_string) if($log_errors);
 	  }
 	else
 	  {
@@ -8638,12 +12945,14 @@ sub error
 		  $simple_string,
 		  $simple_leader,
 		  $detail,
-		  $detail_alert]);
+		  $detail_alert,
+                  $opts,
+                  getTrace()]);
 	  }
       }
 
-    #Reset the verbose states if verbose is true
-    if(defined($verbose) && $verbose)
+    #Reset the verbose states
+    if($clear_vom)
       {
 	$last_verbose_size  = 0;
 	$last_verbose_state = 0;
@@ -8657,24 +12966,38 @@ sub error
 ## Method that prints warnings with a leader string containing a warning
 ## number
 ##
-## Globals used: $error_limit, $quiet, $verbose, $pipeline_mode, $extended
-##
 sub warning
   {
-    if(defined($quiet) && $quiet)
-      {
-	#This will empty the buffer if there's something in it based on $quiet
-	flushStderrBuffer() if(defined($stderr_buffer));
-	return(0);
-      }
+    #Flush the stderr buffer if it's populated and basic options have been set
+    flushStderrBuffer() if($command_line_stage >= DONE);
 
-    if(!defined($pipeline_mode))
-      {$pipeline_mode = inPipeline()}
+    #Determine behaviors from command line options, if CL has been processed
+    my($quiet,$verbose,$DEBUG,$pipeline,$extended,$error_limit);
+    my $clear_vom = 0;
+    my $debug_ldr = 1;
+    if($command_line_stage >= COMMITTED)
+      {
+	#Return if we know quiet mode is on
+	$quiet = getVarref('quiet',1);
+	return(0) if(defined($quiet) && $quiet);
+
+	$verbose       = getVarref('verbose',  1);
+	$DEBUG         = getVarref('debug',    1);
+	$extended      = getVarref('extended', 1,1);
+	$error_limit   = getVarref('error_lim',1,1);
+	$pipeline      = getVarref('pipeline', 1,1);
+
+	$clear_vom     = defined($verbose) && $verbose;
+	$debug_ldr     = defined($DEBUG) && $DEBUG;
+
+	if(!defined($pipeline))
+	  {$pipeline = inPipeline()}
+      }
 
     $warning_number++;
 
     #Extract any possible parameters
-    my($opts,@params) = getStrSubParams(['DETAIL'],@_);
+    my($opts,@params) = getStrSubParams([qw(DETAIL)],@_);
     my $detail        = $opts->{DETAIL};
     my $detail_alert  = "Supply --extended for additional details.";
 
@@ -8687,10 +13010,10 @@ sub warning
     #If DETAIL was supplied/defined and $quiet is defined (implying that the
     #command line has been processed), append a detailed message based on the
     #value of $extended
-    if(defined($detail) && defined($quiet))
+    if(defined($detail) && $command_line_stage >= DONE)
       {
 	if($extended)
-	  {push(@warning_message,$detail)}
+	  {push(@warning_message,split(/(?<=\n)/,$detail))}
 	else
 	  {push(@warning_message,$detail_alert)}
       }
@@ -8701,26 +13024,25 @@ sub warning
        $warning_message[0] =~ /^Runtime warning: \[/)
       {$warning_message[-2] .= pop(@warning_message)}
 
-    my $leader_string = "WARNING$warning_number:";
-    my $simple_leader = $leader_string;
+    my $leader_string      = "WARNING$warning_number:";
+    my $simple_leader      = $leader_string;
     my $leader_string_pipe = $leader_string;
     my $simple_leader_pipe = $leader_string;
 
-    my $caller_string = getTrace();
-    my $script = $0;
-    $script =~ s/^.*\/([^\/]+)$/$1/;
+    my $caller_string      = getTrace();
+    my $script             = getScriptName();
 
-    #If $DEBUG hasn't been defined or is true, or we're in a pipeline,
+    #If the command line has been processed and we're in a pipeline,
     #prepend a call-trace
-    if(defined($pipeline_mode) && $pipeline_mode)
+    if($command_line_stage >= ARGSREAD && defined($pipeline) && $pipeline)
       {
-	$leader_string .= "$script:";
-	$simple_leader .= "$script:";
+	$leader_string  .= "$script:";
+	$simple_leader  .= "$script:";
       }
     $leader_string_pipe .= "$script:";
     $simple_leader_pipe .= "$script:";
-    if(!defined($DEBUG) || $DEBUG)
-      {$leader_string .= $caller_string}
+    if($debug_ldr)
+      {$leader_string   .= $caller_string}
 
     $leader_string      .= ' ';
     $simple_leader      .= ' ';
@@ -8732,15 +13054,15 @@ sub warning
     my $simple_length_pipe = length($simple_leader_pipe);
 
     #Figure out the length of the first line of the error
-    my $warning_length = length(($warning_message[0] =~ /\S/ ?
-				 $leader_string : '') .
-				$warning_message[0]);
-    my $simple_warn_len = length(($warning_message[0] =~ /\S/ ?
-				  $simple_leader : '') .
-				 $warning_message[0]);
-    my $warning_length_pipe = length(($warning_message[0] =~ /\S/ ?
-				      $leader_string_pipe : '') .
-				     $warning_message[0]);
+    my $warning_length       = length(($warning_message[0] =~ /\S/ ?
+				       $leader_string : '') .
+				      $warning_message[0]);
+    my $simple_warn_len      = length(($warning_message[0] =~ /\S/ ?
+				       $simple_leader : '') .
+				      $warning_message[0]);
+    my $warning_length_pipe  = length(($warning_message[0] =~ /\S/ ?
+				       $leader_string_pipe : '') .
+				      $warning_message[0]);
     my $simple_warn_len_pipe = length(($warning_message[0] =~ /\S/ ?
 				       $simple_leader_pipe : '') .
 				      $warning_message[0]);
@@ -8754,29 +13076,25 @@ sub warning
       $warning_length;
     $spacelen = 0 if($spacelen < 0);
     my $warning_string = $leader_string . $tmp_msg_ln .
-      (defined($verbose) && $verbose && defined($last_verbose_state) &&
-       $last_verbose_state ?
+      ($clear_vom && defined($last_verbose_state) && $last_verbose_state ?
        ' ' x $spacelen : '') . "\n";
     $spacelen = (defined($last_verbose_size) ? $last_verbose_size : 0) -
       $simple_warn_len;
     $spacelen = 0 if($spacelen < 0);
     my $simple_string = $simple_leader . $tmp_msg_ln .
-      (defined($verbose) && $verbose && defined($last_verbose_state) &&
-       $last_verbose_state ?
+      ($clear_vom && defined($last_verbose_state) && $last_verbose_state ?
        ' ' x $spacelen : '') . "\n";
     $spacelen = (defined($last_verbose_size) ? $last_verbose_size : 0) -
       $warning_length_pipe;
     $spacelen = 0 if($spacelen < 0);
     my $warning_string_pipe = $leader_string_pipe . $tmp_msg_ln .
-      (defined($verbose) && $verbose && defined($last_verbose_state) &&
-       $last_verbose_state ?
+      ($clear_vom && defined($last_verbose_state) && $last_verbose_state ?
        ' ' x $spacelen : '') . "\n";
     $spacelen = (defined($last_verbose_size) ? $last_verbose_size : 0) -
       $simple_warn_len_pipe;
     $spacelen = 0 if($spacelen < 0);
     my $simple_string_pipe = $simple_leader_pipe . $tmp_msg_ln .
-      (defined($verbose) && $verbose && defined($last_verbose_state) &&
-       $last_verbose_state ?
+      ($clear_vom && defined($last_verbose_state) && $last_verbose_state ?
        ' ' x $spacelen : '') . "\n";
     foreach my $line (@warning_message)
       {
@@ -8800,7 +13118,7 @@ sub warning
 
 	#If debug is not defined or is non-zero, the example will default to
 	#debug-style leaders, otherwise.
-	if(!defined($DEBUG) || $DEBUG)
+	if($debug_ldr)
 	  {
 	    $warning_hash->{$caller_string}->{EXAMPLEDEBUG} = $warning_string;
 	    $warning_hash->{$caller_string}->{EXAMPLEDEBUG} =~ s/\n */ /g;
@@ -8827,11 +13145,12 @@ sub warning
     #Increment the count for this warning type
     $warning_hash->{$caller_string}->{NUM}++;
 
-    #Flush the buffer if it is defined and either quiet is defined and true or
-    #defined, false, and error_limit is defined
-    flushStderrBuffer() if((defined($quiet) &&
-			    ($quiet || defined($error_limit))) &&
-			   defined($stderr_buffer));
+    #Flush the buffer if there is something in it and there is enough info to
+    #flush it (i.e. quiet is defined and either quiet is true or error_limit is
+    #also defined)
+    flushStderrBuffer()
+      if($command_line_stage >= DONE &&
+	 (defined($quiet) && ($quiet || (defined($error_limit)))));
 
     #Print the warning unless it is over the limit for its type
     if(!defined($error_limit) || $error_limit == 0 ||
@@ -8842,27 +13161,43 @@ sub warning
 	if(defined($error_limit) && $error_limit &&
 	   $warning_hash->{$caller_string}->{NUM} == $error_limit)
 	  {
+            $error_limit_met = 1;
+
 	    $warning_string .=
 	      join('',
-		   ($leader_string,"NOTE: Further warnings of this type will ",
-		    "be suppressed.\n$leader_string",
+		   ((' ' x $leader_length),
+                    "NOTE: Further warnings of this type will ",
+		    "be suppressed.\n",(' ' x $leader_length),
 		    "Set --error-limit to 0 to turn off error suppression\n"));
 	    $simple_string .=
 	      join('',
-		   ($simple_leader,"NOTE: Further warnings of this type will ",
-		    "be suppressed.\n$simple_leader",
+		   ((' ' x $simple_length),
+                    "NOTE: Further warnings of this type will ",
+		    "be suppressed.\n",(' ' x $simple_length),
 		    "Set --error-limit to 0 to turn off error suppression\n"));
 	  }
 
-	if(defined($quiet))
+	#If the command line has been sufficiently processed...  (Note, even if
+	#verbose is defined, it could get changed by the user after the command
+	#line is processed.  We check that command_line_stage is >= 6 because
+	#it means that the verbose value has been validated.)
+	if($command_line_stage >= DONE)
 	  {
+	    #If there's already been a fatal error, do not print warnings unless
+	    #in debug mode.  This assumes a fatal error has already been printed
+	    if($cleanup_mode == 2 && defined($DEBUG) && !$DEBUG)
+	      {return(0)}
+
 	    #The following assumes we'd not have gotten here if quiet was true
-	    print STDERR ($warning_string);
+	    print STDERR ($warning_string)
+	      if(!$quiet && (!$logging || $log_mirror || !$log_warnings));
+
+	    logger($warning_string) if($log_warnings);
 	  }
 	else
 	  {
 	    #Store the message in the stderr buffer until $quiet has been
-	    #defined by the command line options (using Getopts::Long)
+	    #defined by the command line options (using Getopt::Long)
 	    push(@{$stderr_buffer},
 		 ['warning',
 		  $warning_hash->{$caller_string}->{NUM},
@@ -8871,12 +13206,14 @@ sub warning
 		  $simple_string,
 		  $simple_leader,
 		  $detail,
-		  $detail_alert]);
+		  $detail_alert,
+                  $opts,
+                  getTrace()]);
 	  }
       }
 
-    #Reset the verbose states if verbose is true
-    if(defined($verbose) && $verbose)
+    #Reset the verbose states
+    if($clear_vom)
       {
 	$last_verbose_size  = 0;
 	$last_verbose_state = 0;
@@ -9013,14 +13350,19 @@ sub getLine
 ##
 sub debug
   {
-    if(defined($DEBUG) && !$DEBUG)
+    #Flush the stderr buffer if it's populated and basic options have been set
+    flushStderrBuffer() if($command_line_stage >= DONE);
+    #Return if we know debug mode is off
+    my($DEBUG,$verbose);
+    if($command_line_stage >= LOGGING)
       {
-	flushStderrBuffer() if(defined($stderr_buffer));
-	return(0);
+	$DEBUG   = getVarref('debug',1);
+	$verbose = getVarref('verbose',1);
+	return(0) if(defined($DEBUG) && !$DEBUG);
       }
 
     #Grab the options from the parameter array
-    my($opts,@params)  = getStrSubParams(['LEVEL','DETAIL'],@_);
+    my($opts,@params)  = getStrSubParams([qw(LEVEL DETAIL)],@_);
     my $message_level  = (exists($opts->{LEVEL}) && defined($opts->{LEVEL}) ?
 			  $opts->{LEVEL} : 1);
     my $detail         = $opts->{DETAIL};
@@ -9030,9 +13372,16 @@ sub debug
     #this message is printed or if $DEBUG level is less than a positive message
     #level at which this message is printed.  Negative levels are for template
     #diagnostics.
-    return(0) if(defined($DEBUG) &&
+    return(0) if($command_line_stage >= DONE && defined($DEBUG) &&
 		 (($message_level < 0 && $DEBUG > $message_level) ||
 		  ($message_level > 0 && $DEBUG < $message_level)));
+
+    my($extended,$pipeline);
+    if($command_line_stage >= ARGSREAD)
+      {
+	$extended = getVarref('extended',1,1);
+	$pipeline = getVarref('pipeline',1,1);
+      }
 
     $debug_number++;
 
@@ -9046,10 +13395,10 @@ sub debug
     #If DETAIL was supplied/defined and $quiet is defined (implying that the
     #command line has been processed), append a detailed message based on the
     #value of $extended
-    if(defined($detail) && defined($quiet))
+    if(defined($detail) && $command_line_stage >= DONE)
       {
 	if($extended)
-	  {push(@debug_message,$detail)}
+	  {push(@debug_message,split(/(?<=\n)/,$detail))}
 	else
 	  {push(@debug_message,$detail_alert)}
       }
@@ -9058,12 +13407,12 @@ sub debug
     my $simple_leader = $leader_string;
 
     my $caller_string = getTrace();
-    my $script = $0;
-    $script =~ s/^.*\/([^\/]+)$/$1/;
+    my $script        = getScriptName();
 
     ##TODO: Add pipeline mode string later in flushStderrBuffer if true.  See
     ##      requirement 184
-    if(defined($pipeline_mode) && $pipeline_mode)
+    if($command_line_stage >= ARGSREAD &&
+       defined($pipeline) && $pipeline)
       {
 	$leader_string .= "$script:";
 	$simple_leader .= "$script:";
@@ -9093,8 +13442,7 @@ sub debug
 	       (defined($verbose) && $verbose &&
 		defined($last_verbose_state) &&
 		$last_verbose_state ?
-		' ' x (($last_verbose_size - $debug_length) < 0 ? 0 :
-		       ($last_verbose_size - $debug_length)) : ''),
+		' ' x ($last_verbose_size - $debug_length) : ''),
 	       "\n"));
     my $simple_string =
       join('',($simple_leader,
@@ -9113,11 +13461,25 @@ sub debug
 	$simple_string  .= (' ' x $simple_length) . $line . "\n";
       }
 
-    if(defined($DEBUG))
+    #If the command line has been sufficiently processed...  (Note, even if
+    #DEBUG is defined, it could get changed by the user after the command line
+    #is processed.  We check that command_line_stage is >= 6 because it means
+    #that the DEBUG value has been validated.)
+    if($command_line_stage >= DONE)
       {
-	flushStderrBuffer() if(defined($stderr_buffer));
+	flushStderrBuffer();
 
-	print STDERR ($debug_str);
+	#Print to stderr only when we are in debug mode... and the debug level
+	#is satisfied
+	if($DEBUG && (($message_level < 0 && $DEBUG <= $message_level) ||
+		      ($message_level > 0 && $DEBUG >= $message_level)))
+	  {
+	    print STDERR ($debug_str)
+	      if(!$logging || $log_mirror || !$log_debug);
+
+	    #Log the debug messages if debug is on
+	    logger($debug_str) if($log_debug);
+	  }
       }
     else
       {
@@ -9131,7 +13493,9 @@ sub debug
 	      $simple_string,
 	      $simple_leader,
 	      $detail,
-	      $detail_alert]);
+	      $detail_alert,
+              $opts,
+              getTrace()]);
       }
 
     #Reset the verbose states if verbose is true
@@ -9205,23 +13569,11 @@ sub getCommand
     my @return_args = ();
 
     #Determine the script name
-    my $script = $0;
-    $script =~ s/^.*\/([^\/]+)$/$1/;
+    my $script = getScriptName();
 
     #Put quotes around any parameters containing un-escaped spaces, asterisks,
     #or quotes
-    my $arguments = defined($preserve_args) ? [@$preserve_args] : [];
-    foreach my $arg (@$arguments)
-      {
-	if($arg =~ /(?<!\\)[\s\*"']/ || $arg =~ /^<|>|\|(?!\|)/ ||
-	   $arg eq '' || $arg =~ /[\{\}\[\]\(\)]/)
-	  {
-	    if($arg =~ /(?<!\\)["]/)
-	      {$arg = "'" . $arg . "'"}
-	    else
-	      {$arg = '"' . $arg . '"'}
-	  }
-      }
+    my $arguments = quoteArgs([@$preserve_args]);
 
     #Determine the perl path used (dependent on the `which` unix built-in)
     if($perl_path_flag)
@@ -9287,6 +13639,8 @@ sub sglob
   {
     #Convert possible 'Getopt::Long::CallBack' to SCALAR by wrapping in quotes:
     my $command_line_string = "$_[0]";
+    my $notfromshell        = defined($_[1]) ? $_[1] : 0; #Internal-for handling
+                                                          #  displayed quotes
     if(!defined($command_line_string))
       {
 	warning("Undefined command line string encountered.");
@@ -9333,7 +13687,26 @@ sub sglob
 
     #If the command line string is short or doesn't contain curly braces
     if($command_line_string !~ /\S{1025}/ || $command_line_string !~ /\{.*\}/)
-      {@partials = split(/(?<!\\)\s+/,$command_line_string)}
+      {
+        #Split on spaces
+
+        #If this is not from a shell, it may have (or have had) quotes
+        #containing unescaped spaces - because defaults are saved that way, so
+        #remove the quotes and escape unescaped spaces
+        #This assumes the presence of quotes means its a single argument string
+        #from the user defaults
+        if($notfromshell)
+          {
+            my $argwquotes = $command_line_string;
+            #arg is quoted, remove the quotes and escape the spaces
+            $argwquotes =~ s/(?<!\\)(\s)/\\$1/g;
+            $argwquotes =~ s/^['"]//;
+            $argwquotes =~ s/["']$//;
+            @partials = $argwquotes;
+          }
+        else
+          {@partials = split(/(?<!\\)\s+/,$command_line_string)}
+      }
     #Else if there are curly braces anywhere, do the trick to expand them in
     #perl to avoid the glob limit issue
     else
@@ -9341,7 +13714,9 @@ sub sglob
 	 split(/(?<!\\)\s+/,$command_line_string)}
 
     debug({LEVEL => -5},"Partials being sent to bsd_glob: [",
-	  join(',',@partials),"].");
+	  join(',',@partials),"] - ",
+          ($notfromshell ? 'not from the shell' : 'as from the shell'),
+          ": $command_line_string.");
 
     #Note, when bsd_glob gets a string with a glob character it can't expand,
     #it drops the string entirely.  Those strings are returned with the glob
@@ -9491,16 +13866,16 @@ sub globCurlyBraces
     return(wantarray ? @expanded : [@expanded]);
   }
 
-#Globals used: $script_version_number, $created_on_date, $extended
+#Globals used: $script_version_number, $created_on_date
 sub getVersion
   {
     my @in             = getSubParams([qw(COMMENT EXTENDED)],[],[@_]);
     my $comment        = defined($in[0]) ? $in[0] : 0;
+    my $extended       = getVarref('extended',1,1);
     my $local_extended = defined($_[1]) ? $_[1] : $extended;
 
     my $version_message = '';
-    my $script          = $0;
-    $script             =~ s/^.*\/([^\/]+)$/$1/;
+    my $script          = getScriptName();
     my $lmd             = (-e $script ?
 			   localtime((stat($script))[9]) :
 			   localtime(time()));
@@ -9514,8 +13889,10 @@ sub getVersion
     if((!defined($created_on_date) || $created_on_date eq 'DATE HERE') &&
        $0 !~ /perl_script_template$/)
       {
+        #TODO: Change to use a DEBUG parameter
 	warning('This script\'s $created_on_date variable unset/missing.  ',
-		'Please edit the script to add a script creation date.');
+		'Please edit the script to add a script creation date.')
+	  if(isDebug());
 	$created_on_date = 'unknown';
       }
 
@@ -9595,21 +13972,32 @@ sub isStandardOutputToTerminal
 #error number to supply to exit().
 sub quit
   {
-    my @in = getSubParams([qw(ERRNO REPORT)],[],[@_]);
-    my $errno  = $in[0];
-    my $report = $in[1];
+    my @in              = getSubParams([qw(ERRNO REPORT)],[],[@_]);
+    my $errno           = $in[0];
+    my $explicit_report = $in[1];
+    my $report = (defined($explicit_report) ? $explicit_report : $runreport);
 
     my $forced_past = 0;
+
+    #Only flush up to the errors/warnings that happened before a fatal quit (not
+    #during cleanup)
+    if(!defined($last_flush_error) && defined($errno) && $errno &&
+       (!defined($command_line_stage) || $command_line_stage <= ARGSREAD))
+      {
+	$last_flush_error   = defined($error_number)   ? $error_number   : 0;
+	$last_flush_warning = defined($warning_number) ? $warning_number : 0;
+      }
 
     #If not in cleanup mode, explicit_quit is true, and force is not defined or
     #not true, it means quit has already been called and that subsequent calls
     #to quit are coming from printRunReport, flushStderrBuffer, or some deep
     #sub that they called, so just return so that the first call to quit can
     #finish.
+    my $force = getVarref('force',1,1,1);
     if(!$cleanup_mode && $explicit_quit && (!defined($force) || !$force))
       {return($forced_past)}
 
-    #If no exit code was provided, quit even if force is indicated. We're over-
+    #If no exit code was provided, quit even if force is indicated.  We're over-
     #riding '-1' here, which is a special case for not quitting in an overwrite
     #situation
     if(!defined($errno))
@@ -9633,6 +14021,8 @@ sub quit
 				 'block if you do not call it ',
 				 'explicitly).'))})}
 
+    my $fatal_error_during_pcl = $command_line_stage < ARGSREAD && $errno;
+
     #If there were no errors, we are not in force mode, (we are in force
     #mode and the error is -1 (meaning an overwrite situation)), or we're in
     #cleanup mode (i.e. we've been here before), allow quit to happen
@@ -9647,13 +14037,20 @@ sub quit
 	#Record whether or not we were in cleanup mode when we got here
 	my $prior_cleanup_mode = $cleanup_mode;
 
+	#The ultimate goal here is: don't print a run report if the programmer's
+	#code has not executed.  It may have executed if we were called via the
+	#END block, but we will assume at first that it did not and later see if
+	#usage, help, or version was printed
+	if($command_line_stage < ARGSREAD)
+	  {$report = 0}
+
 	#During quitting upon successful completion of the script, we need to
 	#know whether to flush the buffer, print the run report, etc, so if the
 	#command line options have not been processed (possibly because the
 	#programmer didn't write any code to process files), and there was no
 	#error, fully process the command line and allow the report to be
 	#generated (if deemed necessary later)
-	if(!$cleanup_mode && $errno == 0 && !$processCommandLine_called)
+	if(!$cleanup_mode && $errno == 0 && !$command_line_stage)
 	  {
 	    debug({LEVEL => -1},
 		  "Calling processCommandLine during successful quit.");
@@ -9672,34 +14069,55 @@ sub quit
 	#Fail-safe to determine whether to flush the buffer - It is inferred
 	#that something went wrong in processing the default options or before
 	#all the options were setup if we've gotten here and processCommandLine
-	#was called yet the command line wasn't processed.
-	elsif(!$cleanup_mode && !$command_line_processed)
+	#was called, yet the command line wasn't processed.
+	elsif(!$cleanup_mode && $command_line_stage < ARGSREAD)
 	  {
 	    #Set cleanup mode so that if a fatal error happens from here, it
 	    #will cause an exit even if in force mode
 	    $cleanup_mode = ($errno ? 2 : 1);
 
-	    if(!$processCommandLine_called)
+	    if(!$command_line_stage)
 	      {
-		debug({LEVEL => -1},
-		      "Calling processCommandLine during successful quit.");
 		if(!$errno)
-		  {$errno = processCommandLine()}
+		  {
+		    debug({LEVEL => -1},
+			  "Calling processCommandLine during quit($errno) and ",
+			  "keeping track of possible fatal errors.");
+		    $errno = processCommandLine();
+		  }
 		else
-		  {processCommandLine()}
+		  {
+		    debug({LEVEL => -1},
+			  "Calling processCommandLine during quit($errno) and ",
+			  "keeping the current fatal error.");
+		    processCommandLine();
+		  }
 	      }
-
-	    if(!$command_line_processed)
-	      {
-		debug({LEVEL => -1},
-		      "Calling getOptions during successful quit.");
-		getOptions();
-	      }
-
-	    #In this instance, we have not run the programmer's code, so
-	    #there's really no need for a run report
-	    $report = 0;
 	  }
+
+	#Process the basic options unless we've already done that
+	if($command_line_stage < ARGSREAD)
+	  {
+            if($command_line_stage < DEFAULTED)
+              {
+                #We need to set command_line_stage to DEFAULTED so it
+                #doesn't just fill the defaults
+                #$command_line_stage = DEFAULTED;
+              }
+
+            getOptions(0);
+            processDefaultOptions(1) if(!$errno);
+	  }
+
+	my $use_as_default = getVarref('save_args',1,1,1);
+	my $version        = getVarref('version',  1,1,1);
+	my $help           = getVarref('help',     1,1,1);
+	#If the user's code did execute (i.e. we weren't running in usage, help,
+	#save-args, etc modes and there wasn't a fatal error during command line
+	#processing), revert to the initial default behavior
+	if(!$help && !$usage && !$version && !$use_as_default &&
+	   !$fatal_error_during_pcl)
+	  {$report = defined($explicit_report) ? $explicit_report : $runreport}
 
 	#If there was no error, files were supplied by the user, but the file
 	#sets were not all iterated over, issue a warning
@@ -9738,10 +14156,44 @@ sub quit
 	    debug({LEVEL => -1},"Exit status: [$errno].  Report: [",
 		  (defined($report) ? $report : 'undef'),"].");
 
-	    printRunReport($errno) if(!defined($report) || $report);
-
 	    #Force-flush the buffers before quitting
 	    flushStderrBuffer(1);
+
+            if(defined($compile_err) && scalar(@$compile_err))
+              {
+                print STDERR (join("\n",
+                                   map {my $ce = $compile_err->[$_];
+                                        my $cen = $_ + 1;
+                                        my $jn =
+                                          ##TODO: change this to set & check
+                                          ##      $pipeline
+                                          (!defined($DEBUG) || $DEBUG ?
+                                           $ce->[0] : '') .
+
+                                          (!defined($DEBUG)    || $DEBUG    ?
+                                           $ce->[1] : '') .
+
+                                          ' ';
+                                        my $pfx = "INTERNAL ERROR[$cen]:";
+                                        my $js = ' ' x length("$pfx$jn");
+
+                                        "$pfx$jn" .
+                                        join("\n$js",(split("\n",$ce->[2])))}
+
+                                        (0..$#{$compile_err})),"\n",
+
+                              "ERROR0: CommandLineInterface: Unable to ",
+                              "complete set up.\n");
+              }
+
+	    printRunReport($errno) if((!defined($report) || $report) &&
+				      ((!$usage && !$help && !$version) ||
+                                       $error_limit_met) &&
+                                      (!$num_setup_errors || $force) &&
+                                      $command_line_stage == DONE);
+
+	    #Doesn't hurt to be called in any case
+	    stopLogging();
 
 	    #Exit if there were no errors or we are not in force mode or (we
 	    #are in force mode and the error is -1 (meaning an overwrite
@@ -9766,48 +14218,94 @@ sub quit
 #report will be generated, nor is the report buffered (since this message can
 #be considered a part of the warning/error output or verbose output).  If
 #$quiet is not defined in main, it will be assumed to be false.
-#Globals used: $quiet, $verbose, $DEBUG
+#Globals used: $log_report, $runreport
 sub printRunReport
   {
-    my @in = getSubParams([qw(ERRNO)],[],[@_]);
+    my @in             = getSubParams([qw(ERRNO)],[],[@_]);
     my $errno          = $in[0];
+    my $verbose        = getVarref('verbose',1,0,1);
     my $global_verbose = defined($verbose) ? $verbose : 0;
+    my $quiet          = getVarref('quiet',1,0,1);
     my $global_quiet   = defined($quiet)   ? $quiet   : 0;
+    my $DEBUG          = getVarref('debug',1,0,1);
     my $global_debug   = defined($DEBUG)   ? $DEBUG   : 0;
+
+    my $run = getVarref('run',1,0,1);
 
     #Return if quiet or there's nothing to report (or there's something to
     #report, but the programmer's code never ran, so all the user sees is the
-    #error (i.e. $command_line_processed == 1))
-    return(0) if($global_quiet || (!$global_verbose &&
-				   !$global_debug &&
-				   (!defined($error_number) ||
-				    $command_line_processed == 1) &&
-				   !defined($warning_number) &&
-				   #We are exiting with success status
-				   (!defined($errno) || $errno == 0 ||
-				    $command_line_processed == 1)));
+    #error (i.e. $command_line_stage < 6))
+    my $print_report = !($global_quiet || (!$global_verbose &&
+					   !$global_debug &&
+					   $runreport != 2 &&
+					   (!defined($error_number) ||
+					    $command_line_stage < DONE) &&
+					   !defined($warning_number) &&
+					   #We are exiting with success status
+					   (!defined($errno) || $errno == 0 ||
+					    $command_line_stage < DONE)));
+
+    my $local_log_report = (defined($log_report) && defined($logging) &&
+			    $log_report && $logging &&
+			    #Log report if setup failed or run mode was true
+			    (!defined($run) || $run));
+
+    return(0) if(!$print_report && !$local_log_report);
 
     #Before printing a message saying to scroll up for error details, force-
     #flush the stderr buffer
-    flushStderrBuffer(1);
+    flushStderrBuffer(1) if($print_report);
+
+    #If pipeline mode is not defined here, we can now define it without
+    #potentially changing its default shown in the usage
+    my $pipeline = getVarref('pipeline',1,1);
+    if(!defined($pipeline))
+      {$pipeline = inPipeline()}
 
     #Report the number of errors, warnings, and debugs on STDERR
-    print STDERR ("\n",'Done.  STATUS: [',
-		  (defined($errno) ? "EXIT-CODE: $errno " : ''),
-		  'ERRORS: ',
-		  ($error_number ? $error_number : 0),' ',
-		  'WARNINGS: ',
-		  ($warning_number ? $warning_number : 0),
-		  ($global_debug ?
-		   ' DEBUGS: ' .
-		   ($debug_number ? $debug_number : 0) : ''),' ',
-		  'TIME: ',markTime(0),"s]");
+    my $rpt     = join('',("\n",'Done.  STATUS: [',
+                           (defined($errno) ? "EXIT-CODE: $errno " : ''),
+                           'ERRORS: ',
+                           ($error_number ? $error_number : 0),' ',
+                           'WARNINGS: ',
+                           ($warning_number ? $warning_number : 0),
+                           ($global_debug ?
+                            ' DEBUGS: ' .
+                            ($debug_number ? $debug_number : 0) : ''),' ',
+                           'TIME: ',markTime(0),"s]"));
+    my $log_rpt = $rpt;
 
     #Print an extended report if requested or there was an error or warning
-    if((defined($error_number)   && $error_number) ||
-       (defined($warning_number) && $warning_number))
+    $rpt     .= getErrorSummary((!$logging || $log_mirror || !$log_errors),
+                                (!$logging || $log_mirror || !$log_warnings),
+                                $pipeline,$global_verbose,$global_quiet,
+                                $global_debug);
+    $log_rpt .= getErrorSummary($log_errors,$log_warnings,$pipeline,
+                                $global_verbose,$global_quiet,$global_debug);
+
+    print STDERR ($rpt)
+      if($print_report && ($log_mirror || !$local_log_report));
+
+    logger($log_rpt) if($local_log_report);
+
+    return(0);
+  }
+
+sub getErrorSummary
+  {
+    my $errors         = $_[0];
+    my $warnings       = $_[1];
+    my $pipeline       = $_[2];
+    my $global_verbose = defined($_[3]) ? $_[3] : 0;
+    my $global_quiet   = defined($_[4]) ? $_[4] : 0;
+    my $global_debug   = defined($_[5]) ? $_[5] : 0;
+
+    my $sum = '';
+
+    if(($errors   && defined($error_number)   && $error_number) ||
+       ($warnings && defined($warning_number) && $warning_number))
       {
-	print STDERR " SUMMARY:\n";
+	$sum .= " SUMMARY:\n";
 
 	#If there were errors
 	if(defined($error_number) && $error_number)
@@ -9816,18 +14314,18 @@ sub printRunReport
 	      (sort {$error_hash->{$a}->{EXAMPLENUM} <=>
 		       $error_hash->{$b}->{EXAMPLENUM}}
 	       keys(%$error_hash))
-	      {print STDERR ("\t",$error_hash->{$err_type}->{NUM},
-			     " ERROR",
-			     ($error_hash->{$err_type}->{NUM} > 1 ?
-			      'S' : '')," LIKE: [",
-			     (defined($DEBUG) && !$DEBUG ?
-			      (defined($pipeline_mode) && !$pipeline_mode ?
-			       $error_hash->{$err_type}->{EXAMPLE} :
-			       $error_hash->{$err_type}->{EXAMPLEPIPE}) :
-			      (defined($pipeline_mode) && !$pipeline_mode ?
-			       $error_hash->{$err_type}->{EXAMPLEDEBUG} :
-			       $error_hash->{$err_type}->{EXAMPLEDEBUGPIPE})),
-			     "]\n")}
+	      {$sum .= join('',("\t",$error_hash->{$err_type}->{NUM},
+				" ERROR",
+				($error_hash->{$err_type}->{NUM} > 1 ?
+				 'S' : '')," LIKE: [",
+				(defined($DEBUG) && !$DEBUG ?
+				 (defined($pipeline) && !$pipeline ?
+				  $error_hash->{$err_type}->{EXAMPLE} :
+				  $error_hash->{$err_type}->{EXAMPLEPIPE}) :
+				 (defined($pipeline) && !$pipeline ?
+				  $error_hash->{$err_type}->{EXAMPLEDEBUG} :
+				  $error_hash->{$err_type}
+				  ->{EXAMPLEDEBUGPIPE})),"]\n"))}
 	  }
 
 	#If there were warnings
@@ -9837,25 +14335,27 @@ sub printRunReport
 	      (sort {$warning_hash->{$a}->{EXAMPLENUM} <=>
 		       $warning_hash->{$b}->{EXAMPLENUM}}
 	       keys(%$warning_hash))
-	      {print STDERR ("\t",$warning_hash->{$warn_type}->{NUM},
-			     " WARNING",
-			     ($warning_hash->{$warn_type}->{NUM} > 1 ?
-			      'S' : '')," LIKE: [",
-			     (defined($DEBUG) && !$DEBUG ?
-			      (defined($pipeline_mode) && !$pipeline_mode ?
-			       $warning_hash->{$warn_type}->{EXAMPLE} :
-			       $warning_hash->{$warn_type}->{EXAMPLEPIPE}) :
-			      (defined($pipeline_mode) && !$pipeline_mode ?
-			       $warning_hash->{$warn_type}->{EXAMPLEDEBUG} :
-			       $warning_hash->{$warn_type}->{EXAMPLEDEBUGPIPE})
-			     ),"]\n")}
+	      {$sum .= join('',("\t",$warning_hash->{$warn_type}->{NUM},
+				" WARNING",
+				($warning_hash->{$warn_type}->{NUM} > 1 ?
+				 'S' : '')," LIKE: [",
+				(defined($DEBUG) && !$DEBUG ?
+				 (defined($pipeline) && !$pipeline ?
+				  $warning_hash->{$warn_type}->{EXAMPLE} :
+				  $warning_hash->{$warn_type}->{EXAMPLEPIPE}) :
+				 (defined($pipeline) && !$pipeline ?
+				  $warning_hash->{$warn_type}->{EXAMPLEDEBUG} :
+				  $warning_hash->{$warn_type}
+				  ->{EXAMPLEDEBUGPIPE})),"]\n"))}
 	  }
 
-        print STDERR ("\tScroll up to inspect full errors/warnings in-",
-		      "place.\n");
+        $sum .= join('',("\tScroll up to inspect full errors/warnings in-",
+			 "place.\n"));
       }
     else
-      {print STDERR "\n"}
+      {$sum .= "\n"}
+
+    return($sum);
   }
 
 #This method takes multiple "types" of "sets of input files" in a 3D array
@@ -9949,8 +14449,6 @@ sub printRunReport
 #as an input of the same type as the first array in the file types array passed
 #in.  If there is only one input file in that array, it will be considered to
 #be a file name "stub" to be used to append outfile suffixes.
-
-#Globals used: $skip_existing, $collid_modes_array
 sub getFileSets
   {
     my $file_types_array = $_[0]; #A 3D array where the outer array specifies
@@ -9993,29 +14491,8 @@ sub getFileSets
                                   #provided, the returned outfile array will
                                   #contain outfile stubs to which you must
                                   #append your own suffix.
-    my $loc_collid_mode = $_[3];  #The user can over-ride individual settings.
-                                  #If user_collide_mode has a value, use it,
-                                  #otherwise, if individual collision modes for
-                                  #each outfile type were provided, use it/
-                                  #them.  Lastly, without any other explicit
-                                  #setting, determine a default collision mode
-                                  #from getCollisionMode (guaranteed to provide
-                                  #a value).  This may change when requirement
-                                  #114 is implemented.
-                                  #OPTIONAL [error]{merge,rename,error} Output
-                                  #conflicts mode determines what to try to do
-                                  #when multiple input file combinations output
-                                  #to the same output file.  This can be a 2D
-                                  #array corresponding to the dimensions of the
-                                  #outfile_suffixes array, filled with modes
-                                  #for each outfile type (implied by the
-                                  #suffixes) or it can be a 1D array (assuming
-                                  #there's only one inner outfile suffixes
-                                  #array, or it can be a single scalar value
-                                  #that is applied to all outfile suffixes.)
-    my $outfile_stub = defined($default_stub) ? $default_stub : 'STDIN';
-
-    #eval('use Data::Dumper;1') if($DEBUG < 0);
+    my $outfile_stub  = defined($default_stub) ? $default_stub : 'STDIN';
+    my $skip_existing = getVarref('skip',1);
 
     debug({LEVEL => -1},"Collision mode sent in: [",
 	  (defined($_[3]) ?
@@ -10161,10 +14638,10 @@ sub getFileSets
 		     @$outfile_suffixes))
 	  {
 	    #Reset the errors because I'm not looking for SCALARs anymore
-	    my @errors = map {my @x=@$_;map {ref($_)} @x}
+	    my @errors = map {my @x=@$_;map {ref($_) . ' REF'} @x}
 	      grep {my @x=@$_;scalar(grep {ref($_) ne 'ARRAY'} @x)}
 		@$outfile_suffixes;
-	    error("Expected an array of arrays of scalars for the second ",
+	    error("Expected an array of arrays of raw scalars for the second ",
 		  "argument, but got an array of arrays of [",
 		  join(',',@errors),"].");
 	    quit(-33);
@@ -10243,128 +14720,52 @@ sub getFileSets
 	  }
       }
 
-    #debug({LEVEL => -99},"First output collide mode: ",
-    #	  Dumper($user_collide_mode));
+    ##
+    ## Confirm the collision modes set, in case the user changed it on the
+    ## command line
+    ##
 
-    ##
-    ## Error-check/fix the loc_collid_mode (a 2D array of strings)
-    ##
-    #First, we will try to retrieve the defaults
-    if(!defined($loc_collid_mode))
+    debug({LEVEL => -1},"Filling in missing collision modes with default ",
+	  "values.");
+    foreach my $fti (0..$#{$outfile_suffixes})
       {
-	$loc_collid_mode = $collid_modes_array;
-	debug({LEVEL => -1},"Collision mode was defined as a [",
-	      (ref($loc_collid_mode) eq '' ?
-	       'SCALAR' : "Reference to a " . ref($loc_collid_mode)),"].");
-      }
-    elsif(defined($loc_collid_mode) && ref($loc_collid_mode) eq '')
-      {$loc_collid_mode = getCollisionMode(undef,undef,$loc_collid_mode)}
-    #If the array is the right structure, confirm the collision modes set, in
-    #case the user changed it on the command line
-    if(defined($loc_collid_mode) && ref($loc_collid_mode) eq 'ARRAY' &&
-       scalar(grep {defined($_) && ref($_) eq 'ARRAY'} @$loc_collid_mode))
-      {
-	debug({LEVEL => -1},"Filling in missing collision modes with default ",
-	      "values.");
-	foreach my $fti (0..$#{$outfile_suffixes})
+	foreach my $sti (0..$#{$outfile_suffixes->[$fti]})
 	  {
-	    my $sub_array = $outfile_suffixes->[$fti];
-	    foreach my $sti (0..$#{$outfile_suffixes->[$fti]})
-	      {
-		my $suffix_id = getSuffixID($fti,$sti);
-		my $urec = getOutfileUsageHash($suffix_id);
-		if(!defined($urec))
-		  {error("Unable to determine default collision mode for ",
-			 "output file type [$fti,$sti].")}
-		#If the user supplied --collision-mode, the supplied mode might
-		#end up changed
-		else
-		  {$loc_collid_mode->[$fti]->[$sti] =
-		      getCollisionMode(undef,
-				       $urec->{OPTTYPE},
-				       $loc_collid_mode->[$fti]->[$sti])}
-	      }
+	    my $suffuhash =
+	      $usage_array->[$file_indexes_to_usage->{$fti}->{$sti}];
+
+	    my $sf_or_of_uhash = $suffuhash;
+	    if($usage_array->[$suffuhash->{PAIRID}]->{OPTTYPE} eq 'outfile')
+	      {$sf_or_of_uhash = $usage_array->[$suffuhash->{PAIRID}]}
+
+	    my $tmp_collide_mode = getCollisionMode(undef,
+						    $sf_or_of_uhash->{OPTTYPE},
+						    $suffuhash->{COLLIDE_MODE});
+
+	    $sf_or_of_uhash->{COLLIDE_MODE} = $tmp_collide_mode;
+	    $suffuhash->{COLLIDE_MODE}      = $tmp_collide_mode;
 	  }
-      }
-    #Now let's check that everything is properly set with the collision modes
-    if(ref($loc_collid_mode) ne 'ARRAY')
-      {
-	#Allow the programmer to submit scalars of everything
-	if(ref(\$loc_collid_mode) eq 'SCALAR')
-	  {
-	    #Copy this value to all places corresponding to outfile_suffixes
-	    my $tmp_collid_mode  = $loc_collid_mode;
-	    $loc_collid_mode = [];
-	    foreach my $sub_array (@$outfile_suffixes)
-	      {
-		push(@$loc_collid_mode,[]);
-		foreach my $suff (@$sub_array)
-		  {push(@{$loc_collid_mode->[-1]},
-			(defined($suff) ? $tmp_collid_mode : undef))}
-	      }
-	  }
-	else
-	  {
-	    error("Expected an array or scalar for the fourth argument, but ",
-		  "got a [",ref($loc_collid_mode),"].");
-	    quit(-38);
-	  }
-      }
-    elsif(scalar(grep {!defined($_) || ref($_) ne 'ARRAY'} @$loc_collid_mode))
-      {
-	my @errors = map {defined($_) ? ref(\$_) : $_}
-	  grep {!defined($_) || ref($_) ne 'ARRAY'} @$loc_collid_mode;
-	#Allow them to have submitted an array of scalars
-	if(scalar(@errors) == scalar(@$loc_collid_mode) &&
-	   scalar(@errors) == scalar(grep {!defined($_) || $_ eq 'SCALAR'}
-				     @errors))
-	  {$loc_collid_mode = [$loc_collid_mode]}
-	else
-	  {
-	    @errors = map {ref($_)} grep {ref($_) ne 'ARRAY'}
-	      @$loc_collid_mode;
-	    error("Expected an array of arrays for the fourth argument, ",
-		  "but got an array of [",join(',',@errors),"].");
-	    quit(-39);
-	  }
-      }
-    elsif(scalar(grep {my @x=@$_;scalar(grep {defined($_) &&
-						ref(\$_) ne 'SCALAR'} @x)}
-		 @$loc_collid_mode))
-      {
-	#Reset the errors because I'm not looking for SCALARs anymore
-	my @errors = map {my @x=@$_;map {ref($_)} @x}
-	  grep {my @x=@$_;scalar(grep {ref($_) ne 'ARRAY'} @x)}
-	    @$loc_collid_mode;
-	error("Expected an array of arrays of scalars for the fourth ",
-	      "argument, but got an array of arrays of [",
-	      join(',',@errors),"].");
-	quit(-40);
       }
 
-    #Error-check the values of the loc_collid_mode 2D array
-    my $conf_errs = [];
-    foreach my $conf_array (@$loc_collid_mode)
+    #If collision mode was not set during the creation of the option, set it now
+    #that the command line has been processed.  If it was set, it could be over-
+    #ridden by the user on the command line, so reset it.
+    foreach my $ftkey (keys(%$file_indexes_to_usage))
       {
-	foreach my $conf_mode (@$conf_array)
+	my $suff_hash = $file_indexes_to_usage->{$ftkey};
+	foreach my $stkey (keys(%$suff_hash))
 	  {
-	    if(!defined($conf_mode) || $conf_mode eq '')
-	      {$conf_mode = getCollisionMode()}
-	    elsif($conf_mode =~ /^e/i)
-	      {$conf_mode = 'error'}
-	    elsif($conf_mode =~ /^m/i)
-	      {$conf_mode = 'merge'}
-	    elsif($conf_mode =~ /^r/i)
-	      {$conf_mode = 'rename'}
+	    my $usg_index = $suff_hash->{$stkey};
+	    my $uhash = $usage_array->[$usg_index];
+
+	    if(!defined($uhash->{COLLIDE_MODE}))
+	      {$uhash->{COLLIDE_MODE} = getCollisionMode()}
 	    else
-	      {push(@$conf_errs,$conf_mode)}
+	      {$uhash->{COLLIDE_MODE} =
+		 getCollisionMode(undef,
+				  $uhash->{OPTTYPE},
+				  $uhash->{COLLIDE_MODE})}
 	  }
-      }
-    if(scalar(@$conf_errs))
-      {
-	error("Invalid collision modes detected: [",join(',',@$conf_errs),
-	      "].  Valid values are: [merge,error,rename].");
-	quit(-41);
       }
 
     debug({LEVEL => -99},
@@ -10373,15 +14774,13 @@ sub getFileSets
 			   join('}{',map {my $e=$_;'[' . join('][',@$e) . ']'}
 				@$t) . '}'} @$file_types_array),")].");
 
-    #debug({LEVEL => -99},"Output conf mode after manipulation: ",
-    #	  Dumper($loc_collid_mode));
-
     ##
     ## If standard input is present, ensure it's in the file_types_array
     ##
     if(isThereInputOnSTDIN())
       {
-	my $primary = (defined($primary_infile_type) ? $primary_infile_type :
+	my $primary = (defined($primary_infile_optid) ?
+		       $usage_array->[$primary_infile_optid]->{FILEID} :
 		       (grep {!exists($outfile_types_hash->{$_})}
 			(0..$#{$file_types_array}))[0]);
 
@@ -10438,11 +14837,10 @@ sub getFileSets
 		ref(\$outdir_array) eq 'SCALAR'))
 	      {
 		error("You cannot use an output directory [",
-		      (ref(\$outdir_array) eq 'SCALAR' ? $outdir_array :
-		       join(' ',map {getOutdirFlag() . ' ' .
-				       (ref($_) eq 'ARRAY' ?
-					join(',',@$_) : $_)}
-			    @$outdir_array)),"] and embed a ",
+		      " ",(ref(\$outdir_array) eq 'SCALAR' ? $outdir_array :
+			   join(' ',map {getOutdirFlag() . (ref($_) eq 'ARRAY' ?
+							    join(',',@$_) : $_)}
+					   @$outdir_array)),"] and embed a ",
 		      "directory path in the file stub [$outfile_stub] at the ",
 		      "same time.  Please use one or the other.",
 		      {DETAIL =>
@@ -10514,57 +14912,6 @@ sub getFileSets
     elsif(scalar(@$file_types_array) > scalar(@$outfile_suffixes))
       {while(scalar(@$file_types_array) > scalar(@$outfile_suffixes))
 	 {push(@$outfile_suffixes,undef)}}
-
-    ##
-    ## Error-check/fix loc_collid_mode array with the outfile_suffixes array
-    ##
-    #Make sure that the loc_collid_mode 2D array has the same dimensions as
-    #the outfile_suffixes array - assuming any missing values that are defined
-    #in the suffixes array default to 'error'.
-    #If a subarray is missing and the original first subarray was size 1,
-    #default to its value, otherwise default to undef.  E.g. a suffix array
-    #such as [[a,b,c][d,e][undef]] and loc_collid_mode of [[error]] will
-    #generate a new loc_collid_mode array of:
-    #[[error,error,error][error,error][undef]].
-    if(scalar(@$loc_collid_mode) > scalar(@$outfile_suffixes))
-      {
-	error("Collision mode array is out of bounds.  Must have as ",
-	      "many or fewer members as the outfile suffixes array.");
-	quit(-44);
-      }
-    my $global_conf_mode = (scalar(@$loc_collid_mode) == 1 &&
-			    scalar(@{$loc_collid_mode->[0]}) == 1) ?
-			      $loc_collid_mode->[0] : getCollisionMode();
-    #Create sub-arrays as needed, but don't make them inadvertently bigger
-    while(scalar(@$loc_collid_mode) < scalar(@$outfile_suffixes))
-      {
-	#Determine what the next index will be
-	my $suff_array_index = scalar(@$loc_collid_mode);
-	push(@$loc_collid_mode,
-	     (defined($outfile_suffixes->[$suff_array_index]) ?
-	      (scalar(@{$outfile_suffixes->[$suff_array_index]}) ?
-	       [$global_conf_mode] : []) : undef));
-      }
-    foreach my $suff_array_index (0..$#{$outfile_suffixes})
-      {
-	next unless(defined($outfile_suffixes->[$suff_array_index]));
-	#Make sure it's not bigger than the suffixes subarray
-	if(scalar(@{$loc_collid_mode->[$suff_array_index]}) >
-	   scalar(@{$outfile_suffixes->[$suff_array_index]}))
-	  {
-	    error("Collision mode sub-array at index [$suff_array_index] is ",
-		  "out of bounds.  Must have as many or fewer members as the ",
-		  "outfile suffixes array.");
-	    quit(-45);
-	  }
-	while(scalar(@{$loc_collid_mode->[$suff_array_index]}) <
-	      scalar(@{$outfile_suffixes->[$suff_array_index]}))
-	  {
-	    push(@{$loc_collid_mode->[$suff_array_index]},
-		 (scalar(@{$loc_collid_mode->[$suff_array_index]}) ?
-		  $loc_collid_mode->[0] : $global_conf_mode));
-	  }
-      }
 
     ##
     ## Special case (probably unnecessary now with upgrades in 6/2014)
@@ -10837,17 +15184,14 @@ sub getFileSets
 	#Replace any dashes with the outfile stub
 	foreach my $stub_set (@$stub_sets_array)
 	  {
-	    foreach my $stub (@$stub_set)
+	    foreach my $stub (grep {defined($_)} @$stub_set)
 	      {
 		$stub = $outfile_stub if(defined($stub) && $stub eq '-');
 
-		$source_hash->{$outfile_stub}->{$outfile_stub}++;
+		$source_hash->{$stub}->{$stub}++;
 	      }
 	  }
       }
-
-    #debug({LEVEL => -1},"Stubs before making them unique: ",
-    #	  Dumper($stub_sets_array));
 
     #makeCheckOutputs returns an outfiles_sets_array and stub_sets_array that
     #have been confirmed to not overwrite each other or existing files.  It
@@ -10860,7 +15204,6 @@ sub getFileSets
      $stub_sets_array,
      $skip_sets) = makeCheckOutputs($stub_sets_array,
 				    $outfile_suffixes,
-				    $loc_collid_mode,
 				    $source_hash);
 
     if($skip_existing && scalar(grep {$_} @$skip_sets))
@@ -10875,11 +15218,6 @@ sub getFileSets
 			     grep {!$skip_sets->[$_]}
 			     (0..$#{$stub_sets_array}));
       }
-
-    #debug({LEVEL => -1},"Stubs after making them unique: ",
-    #	  Dumper($stub_sets_array));
-    #debug({LEVEL => -1},"Outfiles from the stubs: ",
-    #	  Dumper($outfiles_sets_array));
 
     debug({LEVEL => -1},"Processing input file sets: [(",
 	  join('),(',(map {my $a = $_;join(',',map {defined($_) ? $_ : 'undef'}
@@ -10898,33 +15236,37 @@ sub getFileSets
 								']' : 'undef'}
 		@$a)} @$outfiles_sets_array)),")].");
 
-    recordOutfileModes($outfiles_sets_array,$loc_collid_mode);
+    recordOutfileModes($outfiles_sets_array);
 
     return($infile_sets_array,$outfiles_sets_array,$stub_sets_array);
   }
 
-#Globals used: collid_modes_array
+#This saves the collision mode for each individual file, so the programmer can
+#call openOut using only a file name and we will know how to open it
+#Globals used: $usage_array, $file_indexes_to_usage, $outfile_mode_lookup,
+#              $output_file_sets
 sub recordOutfileModes
   {
     my $outfiles_sets_array = (defined($_[0]) ? $_[0] : $output_file_sets);
-    my $modes_array = (defined($_[1]) ? $_[1] : $collid_modes_array);
 
-    foreach my $set (@$outfiles_sets_array)
+    foreach my $set (grep {scalar(@$_)} @$outfiles_sets_array)
       {
-	next if(scalar(@$set) == 0);
-	foreach my $type_index (grep {defined($set->[$_])} (0..$#{$set}))
+	foreach my $type_index (grep {defined($set->[$_]) &&
+					scalar(@{$set->[$_]})} (0..$#{$set}))
 	  {
-	    next if(scalar(@{$set->[$type_index]}) == 0);
 	    foreach my $suff_index (grep {defined($set->[$type_index]->[$_])}
 				    (0..$#{$set->[$type_index]}))
 	      {
-		my $outfile = $set->[$type_index]->[$suff_index];
-		$outfile_mode_lookup->{$outfile} =
-		  (defined($modes_array) &&
-		   defined($modes_array->[$type_index]) &&
-		   defined($modes_array->[$type_index]->[$suff_index]) ?
-		   $modes_array->[$type_index]->[$suff_index] :
-		   getCollisionMode());
+		my $outfile   = $set->[$type_index]->[$suff_index];
+		my $usg_index = fileIndexesToOptionID($type_index,$suff_index);
+
+		if(defined($usg_index))
+		  {
+		    my $uhash = $usage_array->[$usg_index];
+		    $outfile_mode_lookup->{$outfile} = $uhash->{COLLISION_MODE};
+		  }
+		else
+		  {$outfile_mode_lookup->{$outfile} = getCollisionMode()}
 	      }
 	  }
       }
@@ -10934,17 +15276,17 @@ sub recordOutfileModes
 sub getCollisionMode
   {
     my $outfile       = $_[0];
-    my $outfile_type  = $_[1]; #'outfile' or 'suffix', i.e. called from
-                               #addOutfile[Suffix]Option
+    my $outfile_type  = $_[1]; #outfile, suffix, logfile, or logsuff i.e. called
+                               #from add{Out,Log}file[Suffix]Option
     my $supplied_mode = $_[2];
 
     if(defined($supplied_mode) && ref($supplied_mode) ne '')
       {error("getCollisionMode - Third option must be a scalar.")}
 
-    #Return the default collision mode is no file name supplied
+    #Return the default collision mode if no file name supplied
     if(!defined($outfile))
       {
-	if($command_line_processed)
+	if($command_line_stage >= ARGSREAD)
 	  {
 	    #If the user set the collision mode using --collision-mode
 	    if(defined($user_collide_mode))
@@ -10963,6 +15305,8 @@ sub getCollisionMode
 		  {return($def_collide_mode_suff)}
 		elsif($outfile_type eq 'outfile')
 		  {return($def_collide_mode_outf)}
+		elsif($outfile_type eq 'logfile' || $outfile_type eq 'logsuff')
+		  {return($def_collide_mode_logf)}
 		else
 		  {
 		    error("Invalid output file type: [$outfile_type].  ",
@@ -10987,7 +15331,8 @@ sub getCollisionMode
 	    elsif(defined($outfile_type))
 	      {
 		#Return undef, meaning determine later via command line setting
-		if($outfile_type eq 'suffix' || $outfile_type eq 'outfile')
+		if($outfile_type eq 'suffix'  || $outfile_type eq 'outfile' ||
+		   $outfile_type eq 'logfile' || $outfile_type eq 'logsuff')
 		  {return(undef)}
 		else
 		  {
@@ -11013,7 +15358,7 @@ sub getCollisionMode
 	elsif(defined($user_collide_mode))
 	  {return($user_collide_mode)}
 	#Else if the command line has been processed
-	elsif($command_line_processed)
+	elsif($command_line_stage >= ARGSREAD)
 	  {
 	    #If this is a tracked file
 	    if(exists($outfile_mode_lookup->{$outfile}) &&
@@ -11025,6 +15370,8 @@ sub getCollisionMode
 		  {return($def_collide_mode_suff)}
 		elsif($outfile_type eq 'outfile')
 		  {return($def_collide_mode_outf)}
+		elsif($outfile_type eq 'logfile' || $outfile_type eq 'logsuff')
+		  {return($def_collide_mode_logf)}
 		else
 		  {
 		    error("Invalid output file type: [$outfile_type].  ",
@@ -11066,34 +15413,8 @@ sub transpose
     return(wantarray ? @$transposition : $transposition);
   }
 
-#This method takes an array of file names and an outfile suffix and returns
-#any file names that already exist in the file system
-sub getExistingOutfiles
-  {
-    my $outfile_stubs_for_input_files = $_[0];
-    my $outfile_suffix                = scalar(@_) >= 2 ? $_[1] : ''; #OPTIONAL
-                                        #undef means there won't be outfiles
-                                        #Empty string means that the files in
-                                        #$_[0] are already outfile names
-    my $existing_outfiles             = [];
-
-    #Check to make sure previously generated output files won't be over-written
-    #Note, this does not account for output redirected on the command line.
-    #Also, outfile stubs are checked for future overwrite conflicts in
-    #getFileSets (i.e. separate files slated for output with the same name)
-
-    #For each output file *stub*, see if the expected outfile exists
-    foreach my $outfile_stub (grep {defined($_)}
-			      @$outfile_stubs_for_input_files)
-      {if(-e "$outfile_stub$outfile_suffix")
-	 {push(@$existing_outfiles,"$outfile_stub$outfile_suffix")}}
-
-    return(wantarray ? @$existing_outfiles : $existing_outfiles);
-  }
-
 #This method takes a 1D or 2D array of output directories and creates them
 #(Only works on the last directory in a path.)  Returns non-zero if successful
-#Globals used: $overwrite, $dry_run, $use_as_default
 sub mkdirs
   {
     my @dirs            = @_;
@@ -11101,9 +15422,13 @@ sub mkdirs
     my @unwritable      = ();
     my @errored         = ();
     my @undeleted       = ();
+    my $overwrite       = getVarref('overwrite',1);
     my $local_overwrite = defined($overwrite) ? $overwrite : 0;
+    my $dry_run         = getVarref('dry_run',1);
     my $local_dry_run   = defined($dry_run)   ? $dry_run   : 0;
     my $seen            = {};
+
+    my $use_as_default  = getVarref('save_args',1);
 
     #If --save-args was supplied, do not create any directories unless it is
     #just the defaults directory, because otherwise the script is only going to
@@ -11217,8 +15542,9 @@ sub mkdirs
 #Globals used: $overwrite
 sub deletePrevRunDir
   {
-    my $dir    = $_[0];
-    my $status = 1;      #SUCCESS = 1, FAILURE = 0
+    my $dir       = $_[0];
+    my $status    = 1;      #SUCCESS = 1, FAILURE = 0
+    my $overwrite = getVarref('overwrite',1);
 
     if($overwrite < 2)
       {
@@ -11291,8 +15617,7 @@ sub iMadeThisBefore
 	return($imadethisbefore);
       }
 
-    my $script     = $0;
-    $script        =~ s/^.*\/([^\/]+)$/$1/;
+    my $script     = getScriptName();
     my $script_pat = quotemeta($script);
     my $match_name = 0;
     my $match_pid  = 0;
@@ -11328,7 +15653,9 @@ sub checkFile
     my $local_quiet         = scalar(@_) > 2 && defined($_[2]) ? $_[2] : 0;
     my $quit                = scalar(@_) > 3 && defined($_[3]) ? $_[3] : 1;
     my $status              = 1;
+    my $overwrite           = getVarref('overwrite',1);
     my $local_overwrite     = defined($overwrite) ? $overwrite : 0;
+    my $skip_existing       = getVarref('skip',1);
     my $local_skip_existing = defined($skip_existing) ? $skip_existing : 0;
 
     if(-e $output_file && $output_file ne '/dev/null')
@@ -11376,12 +15703,10 @@ sub checkFile
     return($status);
   }
 
-#Uses globals: $dry_run, $force
 sub openOut
   {
-    unless($processCommandLine_called)
+    unless($command_line_stage)
       {processCommandLine()}
-
     my @in = getSubParams([qw(HANDLE FILE SELECT QUIET HEADER APPEND MERGE)],
 			  [qw(HANDLE FILE)],
 			  [@_]);
@@ -11389,6 +15714,8 @@ sub openOut
     my $output_file     = $in[1];
     my $local_select    = (scalar(@in) >= 3 ? $in[2] : undef);
     my $local_quiet     = (scalar(@in) >= 4 && defined($in[3]) ? $in[3] : 0);
+    my $local_verbose   = getVarref('verbose',1,0);
+    my $header          = getVarref('header',1,0);
     my $local_header    = (scalar(@in) >= 5 && defined($in[4]) ? $in[4] :
 			   $header);
     my $explicit_append = $in[5];  #May be undefined
@@ -11396,6 +15723,7 @@ sub openOut
 			   getCollisionMode($output_file) =~ /^m/i ? 1 : 0);
                           #0 = never append
                           #1 = append after initial open, based on collide_mode
+    my $dry_run         = getVarref('dry_run',1);
     my $local_dry_run   = defined($dry_run) ? $dry_run : 0;
     my $status          = 1;
     my($select);
@@ -11404,18 +15732,28 @@ sub openOut
 	  "] for file: [",(defined($output_file) ? $output_file : 'undef'),
 	  "] Resulting merge mode: [$merge_mode].");
 
+    #If local_quiet is negative, treat it as verbose=0, not quiet
+    if($local_quiet < 0)
+      {
+        $local_quiet   = 0;
+        $local_verbose = 0;
+      }
+    elsif($local_quiet)
+      {$local_verbose = 0}
+
     if(!defined($output_file))
       {
 	#Quietly open /dev/null if not defined so that the programmer doesn't
 	#have to check if the user supplied an optional non-primary file type
-	$output_file = '/dev/null';
-	$status      = 0;
-	$local_quiet = 1;
+	$output_file   = '/dev/null';
+	$status        = 0;
+	$local_quiet   = 1;
+        $local_verbose = 0;
       }
 
     debug({LEVEL=>-1},"openOut collision mode: [",
-	  getCollisionMode($output_file),"] Global append mode: [$append] ",
-	  "Append mode: [",
+	  getCollisionMode($output_file),"] Global append mode: [",
+	  getVarref('append',1),"] Append mode: [",
 	  (defined($explicit_append) ? $explicit_append : 'undef'),
 	  "] Merge mode: [$merge_mode] Original: [",
 	  (defined($explicit_append) ? $explicit_append : 'undef'),"].");
@@ -11591,7 +15929,7 @@ sub openOut
 	    open($file_handle,'>>/dev/stdout');
 	    #open(STDOUT,'>>/dev/stdout');
 	    $rejected_out_handles->{$file_handle}->{CURFILE} = 'STDOUT';
-	    $rejected_out_handles->{$file_handle}->{QUIET} = $local_quiet;
+	    $rejected_out_handles->{$file_handle}->{QUIET}   = !$local_verbose;
 	    $rejected_out_handles->{$file_handle}->{FILES}->{STDOUT} = 0;
 	  }
 
@@ -11599,7 +15937,7 @@ sub openOut
         if(!defined($open_out_handles) ||
            !exists($open_out_handles->{*STDOUT}))
           {
-            verbose('[STDOUT] Opened for all output.') unless($local_quiet);
+            verbose('[STDOUT] Opened for all output.') if($local_verbose);
 
             #Store info. about the run as a comment at the top of the output
             #file if STDOUT has been redirected to a file and it wasn't already
@@ -11617,7 +15955,7 @@ sub openOut
 	$file_handle = *STDOUT;
 
 	$open_out_handles->{$file_handle}->{CURFILE} = 'STDOUT';
-	$open_out_handles->{$file_handle}->{QUIET}   = $local_quiet;
+	$open_out_handles->{$file_handle}->{QUIET}   = !$local_verbose;
 	$open_out_handles->{$file_handle}->{SELECT}  = $select;
 	$open_out_handles->{$file_handle}->{FILES}->{STDOUT} = 0;
       }
@@ -11631,7 +15969,7 @@ sub openOut
 	      "[$file_handle].");
 	$status = 0;
 	$rejected_out_handles->{$file_handle}->{CURFILE} = $output_file;
-	$rejected_out_handles->{$file_handle}->{QUIET}   = $local_quiet;
+	$rejected_out_handles->{$file_handle}->{QUIET}   = !$local_verbose;
 	$rejected_out_handles->{$file_handle}->{FILES}->{$output_file} = 0;
       }
     #Else if this isn't a dry run and opening the output file fails
@@ -11648,7 +15986,7 @@ sub openOut
           unless($local_quiet);
 	$status = 0;
 	$rejected_out_handles->{$file_handle}->{CURFILE} = $output_file;
-	$rejected_out_handles->{$file_handle}->{QUIET}   = $local_quiet;
+	$rejected_out_handles->{$file_handle}->{QUIET}   = !$local_verbose;
 	$rejected_out_handles->{$file_handle}->{FILES}->{$output_file} = 0;
       }
     else
@@ -11656,7 +15994,7 @@ sub openOut
 	debug({LEVEL => -2},"Accepting output file handle(2): ",
 	      "[$file_handle].");
 	$open_out_handles->{$file_handle}->{CURFILE} = $output_file;
-	$open_out_handles->{$file_handle}->{QUIET}   = $local_quiet;
+	$open_out_handles->{$file_handle}->{QUIET}   = !$local_verbose;
 	$open_out_handles->{$file_handle}->{SELECT}  = $select;
 	$open_out_handles->{$file_handle}->{FILES}->{$output_file} = 0;
 
@@ -11679,19 +16017,19 @@ sub openOut
                  unless($local_quiet)}
 	    else
 	      {verbose("[$output_file] Opened output file.")
-                 if(!$local_quiet && $status)}
+                 if($local_verbose && $status)}
 
 	    return($status);
 	  }
 
 	verbose("[$output_file] Opened output file.")
-	  if(!$local_quiet && $status);
+	  if($local_verbose && $status);
 
 	#Select the output file handle
 	select($file_handle) if($select);
 
 	#Store info about the run as a comment at the top of the output
-	print $file_handle (getHeader()) if($local_header);
+	print $file_handle (getHeader($local_header)) if($local_header);
       }
 
     #If we succeeded and there was a selection made, clean up other selection
@@ -11707,7 +16045,7 @@ sub openOut
     return($status);
   }
 
-#Globals: $closed_out_handles, $append
+#Globals: $closed_out_handles
 sub isAppendMode
   {
     #>0 = append, 0 = no append, <0 = no append first, append subsequently
@@ -11715,6 +16053,14 @@ sub isAppendMode
     my $merge_mode      = $_[1]; #Whether collision mode is 'merge' or not
     my $file_handle     = $_[2];
     my $output_file     = $_[3];
+
+    #If the command line has not been processed and this wasn't an explicit one-
+    #off append
+    if(!$command_line_stage && !defined($explicit_append))
+      {
+	warning("isAppendMode called before command line has been processed.");
+	processCommandLine();
+      }
 
     if(!defined($merge_mode) || !defined($file_handle) ||
        !defined($output_file))
@@ -11745,12 +16091,12 @@ sub isAppendMode
     return($append_mode);
   }
 
-#Globals used: $dry_run
 sub closeOut
   {
     my @in = getSubParams([qw(HANDLE)],[qw(HANDLE)],[@_]);
     my $file_handle   = $in[0];
     my $status        = 1;
+    my $dry_run       = getVarref('dry_run',1);
     my $local_dry_run = defined($dry_run) ? $dry_run : 0;
 
     debug({LEVEL => -1},"closeOut called with ",
@@ -11886,10 +16232,10 @@ sub closeOut
     return($status);
   }
 
-#Globals used: $force, $default_stub, $dry_run
+#Globals used: $default_stub
 sub openIn
   {
-    unless($processCommandLine_called)
+    unless($command_line_stage)
       {processCommandLine()}
 
     my @in = getSubParams([qw(HANDLE FILE QUIET)],
@@ -11899,7 +16245,9 @@ sub openIn
     my $input_file    = $in[1];
     my $local_quiet   = (scalar(@in) >= 3 && defined($in[2]) ? $in[2] : 0);
     my $status        = 1;     #Returns true if successful or $force > 1
+    my $dry_run       = getVarref('dry_run',1);
     my $local_dry_run = defined($dry_run) ? $dry_run : 0;
+    my $force         = getVarref('force',1);
 
     if(!defined($input_file))
       {
@@ -11983,6 +16331,10 @@ sub closeIn
     delete($open_in_handles->{$file_handle});
   }
 
+#Copies an N-dimensional array of scalars.  DO NOT USE THIS SUB.  IT HAS A BUG
+#THAT CANNOT BE FIXED.  SEE COMMENT FROM 6/28/2019 IN ISSUE 341.  OTHER CODE
+#THAT HAS USED THIS SUB HAS WORKED AROUND THE ISSUE. IT IS ONLY RELIABLE WHEN
+#CALLED IN SCALAR CONTEXT WITH AN ARRAY REFERENCE AS AN ARGUMENT
 #Note: Creates a surrounding reference to the submitted array if called in
 #scalar context and there are more than 1 elements in the parameter array
 sub copyArray
@@ -12001,21 +16353,27 @@ sub copyArray
     return(wantarray ? @copy : (scalar(@copy) > 1 ? [@copy] : $copy[0]));
   }
 
+#Note, getUserDefaults is called from inside init() when initializing the
+#--save-args option, which means that setDefaults() has not yet been called and
+#$defaults_dir cannot have been updated, thus the defaults checked/returned will
+#not be correct.  Thus this method needs to be called again, sometime between
+#the command line being processed and the usage being printed.  After that, the
+#applyOptionAddendums must be called.
 #Globals used: $defaults_dir
 sub getUserDefaults
   {
     my @in = getSubParams([qw(REMOVE_QUOTES)],[],[@_]);
     my $remove_quotes = defined($in[0]) ? $in[0] : 0;
-    my $script        = $0;
-    $script           =~ s/^.*\/([^\/]+)$/$1/;
+    my $script        = getScriptName();
     my $defaults_file = (defined($defaults_dir) ?
-			 $defaults_dir : (sglob('~/.rpst'))[0]) . "/$script";
+			 $defaults_dir : (sglob('~/.rpst',1))[0]) . "/$script";
     my $return_array  = [];
 
     if(open(DFLTS,$defaults_file))
       {
+        # Each line is either a flag or arguments to that flag
 	@$return_array = map {chomp;if($remove_quotes){s/^['"]//;s/["']$//}
-			      join(' ',sglob($_))} <DFLTS>;
+			      join(' ',grep {defined($_)} sglob($_,1))} <DFLTS>;
 	close(DFLTS);
       }
     elsif(-e $defaults_file)
@@ -12031,42 +16389,13 @@ sub getUserDefaults
 #Globals used: $defaults_dir
 sub saveUserDefaults
   {
-    my @in = getSubParams([qw(ARGV)],[],[@_]);
+    my @in     = getSubParams([qw(ARGV)],[],[@_]);
     my $argv   = $in[0]; #OPTIONAL
     my $status = 1;
 
+    my $use_as_default = getVarref('save_args',1);
+
     return($status) if(!defined($use_as_default) || !$use_as_default);
-
-    if($version)
-      {
-	error('--version cannot be saved as a user default flag.  Consider ',
-	      'using --header instead, which saves the version number in a ',
-	      'header added to each output file.');
-	quit(-51,0);
-      }
-
-    #Determine if the combo of defaults is valid to be saved
-    #Error-check for mutually exclusive flags supplied together
-    my $defrunmode =
-      scalar(grep {defined($_) && $_} ($explicit_help,$explicit_usage,
-				       $explicit_run,$explicit_dry_run));
-    if($defrunmode > 1)
-      {
-	my @culprits = ();
-	push(@culprits,'--help')    if(defined($explicit_help) &&
-				       $explicit_help);
-	push(@culprits,'--usage')   if(defined($explicit_usage) &&
-				       $explicit_usage);
-	push(@culprits,'--run')     if(defined($explicit_run) &&
-				       $explicit_run);
-	push(@culprits,'--dry-run') if(defined($explicit_dry_run) &&
-				       $explicit_dry_run);
-	error('These options are mutually exclusive: [',join(',',@culprits),
-	      '] and thus cannot be saved together as defaults.');
-	quit(-52);
-      }
-
-    my $orig_defaults = getUserDefaults();
 
     #Grab defaults from getCommand, because it re-adds quotes & other niceties
     if(!defined($argv))
@@ -12076,12 +16405,33 @@ sub saveUserDefaults
 	shift(@$argv);
       }
 
-    my $script        = $0;
-    $script           =~ s/^.*\/([^\/]+)$/$1/;
-    my $defaults_file = (defined($defaults_dir) ?
-			 $defaults_dir : (sglob('~/.rpst'))[0]) . "/$script";
+    my $orig_defaults = getUserDefaults();
 
-    my $save_argv = [grep {$_ ne '--save-args'} @$argv];
+    #Determine original and new default run mode
+########## I should add a 'flag used' key to the mutual_params for each DEFAULT_PRG, DEFAULT_USR, and SUPPLIED values.  I can then use the default logic below to set orig_mode
+    my $orig_mode = getDefaultRunMode();
+########## 'flag used' for SUPPLIED can be used to set new_mode
+    my $new_mode  = ($usage_lookup->{help}->{SUPPLIED} ? 'help' :
+		     ($usage_lookup->{usage}->{SUPPLIED} ? 'usage' :
+		      ($usage_lookup->{run}->{SUPPLIED} ? 'run' :
+		       ($usage_lookup->{dry_run}->{SUPPLIED} ? 'dry_run' :
+		        $orig_mode))));
+
+    #The current actual ready status is what the new default ready status will
+    #be, but the current default ready status is what the old default ready
+    #status was untill now
+    my $ready         = getRunStatus(0);
+    my $orig_ready    = getRunStatus(1);
+
+    my $script        = getScriptName();
+    my $defaults_file = (defined($defaults_dir) ?
+			 $defaults_dir : (sglob('~/.rpst',1))[0]) . "/$script";
+
+    #Remove disallowed options (assumes bool).  Run mode and save-args.
+    my $remove_flags =
+      {map {my $n=$_;map {$_ => 1} @{$usage_lookup->{$n}->{OPTFLAGS}}}
+       qw(save_args)};
+    my $save_argv = [grep {!exists($remove_flags->{$_})} @$argv];
 
     debug({LEVEL => -99},"Defaults dir: [",
 	  (defined($defaults_dir) ? $defaults_dir : 'undef'),"].");
@@ -12111,37 +16461,36 @@ sub saveUserDefaults
 	print("Old user defaults: [",join(' ',@$orig_defaults),"].\n",
 	      "New user defaults: [",join(' ',getUserDefaults()),"].\n");
 
-	if($defrunmode)
+	my $changing_mode = defined($new_mode) && $orig_mode ne $new_mode;
+
+	my $msg = "will be added-to/remain-in the usage output.\n";
+
+	if($changing_mode)
+	  {print("Changing default run mode from [$orig_mode] to [$new_mode].",
+		 "\n")}
+
+	if($changing_mode || $orig_ready != $ready)
 	  {
-	    my $msg = "will be added-to/remain-in the usage output.\n";
-
-	    my $ready = getRunModeStatus();
-
-	    print("Changing default run mode to ");
 	    if($ready == 1) #Required opts without defaults exist
 	      {
-		if(defined($explicit_help) && $explicit_help)
+		if($new_mode eq 'help')
 		  {
-		    print("'help'\n");
 		    print("  --dry-run $msg");
 		    print("  --usage   $msg");
 		  }
-		elsif(defined($explicit_usage) && $explicit_usage)
+		elsif($new_mode eq 'usage')
 		   {
-		     print("'usage'\n");
 		     print("  --dry-run $msg");
 		     print("  --help    $msg");
 		   }
-		elsif(defined($explicit_run) && $explicit_run)
+		elsif($new_mode eq 'run')
 		  {
-		    print("'run'\n");
 		    print("  --dry-run $msg");
 		    print("  --usage   $msg");
 		    print("  --help    $msg");
 		  }
-		elsif(defined($explicit_dry_run) && $explicit_dry_run)
+		elsif($new_mode eq 'dry-run')
 		  {
-		    print("'dry-run'\n");
 		    print("  --run   $msg");
 		    print("  --usage $msg");
 		    print("  --help  $msg");
@@ -12149,9 +16498,8 @@ sub saveUserDefaults
 	      }
 	    else #No ready = 0  - required opts or all have defaults
 	      {  #Or ready = -1 - required opts exist, but cannot determine def
-		if(defined($explicit_help) && $explicit_help)
+		if($new_mode eq 'help')
 		  {
-		    print("'help'\n");
 		    print("  --run     $msg");
 		    print("  --usage   $msg");
 		    print("  --dry-run $msg");
@@ -12159,11 +16507,10 @@ sub saveUserDefaults
 			  "defaults, given that there are either no required ",
 			  "options or all required options have default ",
 			  "values, you must supply (at least) --run or ",
-			  "--dry-run.");
+			  "--dry-run.\n");
 		  }
-		elsif(defined($explicit_usage) && $explicit_usage)
+		elsif($new_mode eq 'usage')
 		  {
-		    print("'usage'\n");
 		    print("  --run     $msg");
 		    print("  --help    $msg");
 		    print("  --dry-run $msg");
@@ -12171,18 +16518,16 @@ sub saveUserDefaults
 			  "defaults, given that there are either no required ",
 			  "options or all required options have default ",
 			  "values, you must supply (at least) --run or ",
-			  "--dry-run.");
+			  "--dry-run.\n");
 		  }
-		elsif(defined($explicit_run) && $explicit_run)
+		elsif($new_mode eq 'run')
 		  {
-		    print("'run'\n");
 		    print("  --dry-run $msg");
 		    print("  --usage   $msg");
 		    print("  --help    $msg");
 		  }
-		elsif(defined($explicit_dry_run) && $explicit_dry_run)
+		elsif($new_mode eq 'dry-run')
 		  {
-		    print("'dry-run'\n");
 		    print("  --run     $msg");
 		    print("  --usage   $msg");
 		    print("  --help    $msg");
@@ -12199,14 +16544,60 @@ sub saveUserDefaults
 			"to have a value.");
 	      }
 	  }
+
+	#Report if the new user default implicitly over-rides a programmer
+	#default and report it
+	my $overrides = {};
+	foreach my $opth (grep {$_->{SUPPLIED} &&
+				  exists($exclusive_lookup->{$_->{OPTION_ID}})}
+			  @$usage_array)
+	  {
+	    #For each mutex set that this optin belongs to
+	    foreach my $mutexset (map {$exclusive_options->[$_]}
+				  keys(%{$exclusive_lookup
+					   ->{$opth->{OPTION_ID}}}))
+	      {
+		#For each option (hash) that's mutex with an option being set as
+		#a user default which was not supplied, is not this option, and
+		#has a programmer default mark it as an over-ride
+		foreach my $mtxoh (map {$usage_array->[$_]}
+				   grep {my $h = $usage_array->[$_];
+					 $_ != $opth->{OPTION_ID} &&
+					   !$h->{SUPPLIED} &&
+					     hasValue($h->{OPTTYPE},
+						      $h->{DEFAULT_PRG})}
+				   @$mutexset)
+		  {push(@{$overrides->{$mtxoh->{OPTION_ID}}},
+			$opth->{OPTION_ID})}
+	      }
+	  }
+
+	#If any programmer defaults have been implicitly over-ridden
+	if(scalar(keys(%$overrides)))
+	  {
+	    print("Note, the following options' hard-coded default values ",
+		  'have been over-ridden by the mutually exclusive options ',
+		  "supplied:\n");
+
+	    foreach my $oroid (keys(%$overrides))
+	      {
+		print("  $usage_array->[$oroid]->{OPTFLAG_DEF} (overridden by ",
+		      (scalar(@{$overrides->{$oroid}}) > 1 ?
+		       '[' . join(',',map {$usage_array->[$_]->{OPTFLAG_DEF}}
+				  @{$overrides->{$oroid}}) . ']' :
+		       $usage_array->[$overrides->{$oroid}->[0]]
+		       ->{OPTFLAG_DEF}),")\n");
+	      }
+	  }
       }
 
     return($status);
   }
 
-#Globals used: $header
 sub getHeader
   {
+    my $header = defined($_[0]) ? $_[0] : getVarref('header',1,0);
+
     return('') if(!defined($header) || !$header);
 
     debug({LEVEL => -99},"getHeader called.");
@@ -12248,20 +16639,16 @@ sub GetNextIndepCombo
     my $pool_sizes = $_[1];  #An Array of numbers indicating the range for each
                              #position in $combo
 
-    if(ref($combo) ne 'ARRAY' ||
-       scalar(grep {/\D/} @$combo))
+    if(ref($combo) ne 'ARRAY' || scalar(grep {/\D/} @$combo))
       {
-	print STDERR ("ERROR:ordered_digit_increment.pl:GetNextIndepCombo:",
-		      "The first argument must be an array reference to an ",
-		      "array of integers.\n");
+	error("The first argument must be an array reference to an array of ",
+	      "integers.");
 	return(0);
       }
-    elsif(ref($pool_sizes) ne 'ARRAY' ||
-	  scalar(grep {/\D/} @$pool_sizes))
+    elsif(ref($pool_sizes) ne 'ARRAY' || scalar(grep {/\D/} @$pool_sizes))
       {
-	print STDERR ("ERROR:ordered_digit_increment.pl:GetNextIndepCombo:",
-		      "The second argument must be an array reference to an ",
-		      "array of integers.\n");
+	error("The second argument must be an array reference to an array of ",
+	      "integers.");
 	return(0);
       }
 
@@ -12326,8 +16713,8 @@ sub GetNextIndepCombo
 #own), and a skips array denoting which sets should be skipped because the
 #output file already exists.  It checks all the future output files for
 #possible overwrite conflicts and checks for existing output files.  It quits
-#if it finds a conflict.  It uses the user_collide_modes array to determine whether
-#a conflict is actually a conflict or just should be appended to when
+#if it finds a conflict.  It uses the user_collide_modes array to determine
+#whether a conflict is actually a conflict or just should be appended to when
 #encountered.  If the collision mode is rename, it tries to avoid conflicting
 #non-merging output files by joining the input file names with delimiting dots
 #(in the order supplied in the stubs array).  It smartly compounds with a
@@ -12338,8 +16725,10 @@ sub makeCheckOutputs
   {
     my $stub_sets           = copyArray($_[0]);#REQUIRD 2D array of stub combos
     my $suffixes            = $_[1]; #OPTIONAL (Requires $_[2])
-    my $collide_modes       = $_[2];
-    my $stub_source_hash    = $_[3];
+    my $stub_source_hash    = $_[2];
+    my $skip_existing       = getVarref('skip',1);
+    my $append              = getVarref('append',1);
+    my $DEBUG               = getVarref('debug',1);
 
     my $outfile_source_hash = {};
     my $index_uniq          = [map {{}} @{$stub_sets->[0]}]; #Array of hashes
@@ -12355,7 +16744,6 @@ sub makeCheckOutputs
 	my $cd = '';
 	eval('use Data::Dumper;$sd = Dumper($suffixes);1');
 	eval('use Data::Dumper;$td = Dumper($stub_sets);1');
-	eval('use Data::Dumper;$cd = Dumper($collide_modes);1');
 	debug({LEVEL=>-99},"Stub sets:\n$td\nSuffixes:\n",
 	      "$sd\nCollide modes:\n$cd\n");
       }
@@ -12422,13 +16810,16 @@ sub makeCheckOutputs
 	    my $name          = $stub_set->[$type_index];
 	    my $compound_name = $stub_set->[$type_index];
 
-	    #If collide modes is defined, a collide mode is set for this type
-	    #index, there exists a rename collide mode, the stubs @ this index
-	    #are not unique, AND this stub is defined, compound the name
-	    if(defined($collide_modes) &&
-	       defined($collide_modes->[$type_index]) &&
+	    #If a collide mode is set for this infile type, there exists a
+	    #rename collide mode for a suffix under this input file type, the
+	    #stubs @ this index are not unique, AND this stub is defined,
+	    #compound the name
+	    if(defined($file_indexes_to_usage) &&
+	       exists($file_indexes_to_usage->{$type_index}) &&
+	       defined($file_indexes_to_usage->{$type_index}) &&
 	       scalar(grep {defined($_) && $_ eq 'rename'}
-		      @{$collide_modes->[$type_index]}) &&
+		      map {$usage_array->[$_]->{COLLIDE_MODE}}
+		      values(%{$file_indexes_to_usage->{$type_index}})) &&
 	       !$is_index_unique->[$type_index] &&
 	       defined($stub_set->[$type_index]))
 	      {
@@ -12448,7 +16839,7 @@ sub makeCheckOutputs
 		    #Compound the stub with the unique one in index order
 
 		    #For backward compatibility, change stub in-place
-		    if(!defined($collide_modes))
+		    if(!defined($file_indexes_to_usage))
 		      {$stub_set->[$type_index] = $dir .
 			 ($type_index < $first_unique_index ?
 			  $stub . $delim . $unique_name :
@@ -12468,7 +16859,7 @@ sub makeCheckOutputs
 		    $tmp_stub =~ s/(.*\/).*/$1/;
 
 		    #For backward compatibility, change stub in-place
-		    if(!defined($collide_modes))
+		    if(!defined($file_indexes_to_usage))
 		      {$stub_set->[$type_index] =
 			 $tmp_stub . join($delim,
 					  map {s/.*\///;$_} grep {defined($_)}
@@ -12498,14 +16889,17 @@ sub makeCheckOutputs
 		    foreach my $suff_index (0..$#{$suffixes->[$type_index]})
 		      {
 			my $suffix = $suffixes->[$type_index]->[$suff_index];
+			my $uindex =
+			  $file_indexes_to_usage->{$type_index}->{$suff_index};
+			my $usg_hash = $usage_array->[$uindex];
 			my $partner_defined =
-			  isTagteamPartnerDefined($type_index,$suff_index);
+			  isTagteamPartnerDefined($usg_hash);
+
 			#Don't add standard out if a suffix has been defined
 			#for either this outfile type or of a possible tagteam
 			#partner outfile type
 			if(!isSuffixDefined($type_index,$suff_index) &&
-			   ($partner_defined ||
-			    !isTypeSuffixPrimary($type_index,$suff_index)))
+			   ($partner_defined || !$usg_hash->{PRIMARY}))
 			  {
 			    debug({LEVEL => -99},"Suffix is not defined.");
 			    push(@{$outfiles_sets->[-1]->[$type_index]},
@@ -12514,8 +16908,7 @@ sub makeCheckOutputs
 			    next;
 			  }
 			elsif(!isSuffixDefined($type_index,$suff_index) &&
-			      !$partner_defined &&
-			      isTypeSuffixPrimary($type_index,$suff_index))
+			      !$partner_defined && $usg_hash->{PRIMARY})
 			  {
 			    #When no suffix is supplied, yet the output type is
 			    #a primary type, set the output file name to dash
@@ -12529,20 +16922,23 @@ sub makeCheckOutputs
 			  {
 			    error('Internal error 44: Should not have gotten ',
 				  'here.');
-			    quit(-54);
+			    quit(-5);
 			  }
+
+			my $usg_index    = $file_indexes_to_usage->{$type_index}
+			  ->{$cnt};
+			my $uhash        = $usage_array->[$usg_index];
+			my $collide_mode = $uhash->{COLLIDE_MODE};
 
 			#Concatenate the possibly compounded stub and suffix to
 			#the new stub set
 			push(@{$outfiles_sets->[-1]->[$type_index]},
-			     ($collide_modes->[$type_index]->[$cnt] eq
-			      'rename' ?
+			     ($collide_mode eq 'rename' ?
 			      $compound_name . $suffix : $name . $suffix));
 
 			$unique_hash
 			  ->{$outfiles_sets->[-1]->[$type_index]->[-1]}
-			    ->{$type_index}
-			      ->{$collide_modes->[$type_index]->[$cnt]}++;
+			    ->{$type_index}->{$collide_mode}++;
 
 			$outfile_source_hash
 			  ->{$outfiles_sets->[-1]->[$type_index]->[-1]} =
@@ -12564,6 +16960,9 @@ sub makeCheckOutputs
 			debug({LEVEL => -99},"Suffix is not defined 2.  ",
 			      "Suffix: [",(defined($suffix) ?
 					   $suffix : 'undef'),"].");
+			my $usg_index =
+			  $file_indexes_to_usage->{$type_index}->{$suff_index};
+			my $usg_hash = $usage_array->[$usg_index];
 			#If the suffix is not defined, but it is primary, add
 			#STDOUT to the outfile stubs.  Otherwise, the stub set
 			#is not even defined, so add undef, just so we have a
@@ -12572,8 +16971,7 @@ sub makeCheckOutputs
 			#the programmer)
 			push(@{$outfiles_sets->[-1]->[$type_index]},
 			     (!isSuffixDefined($type_index,$suff_index) &&
-			      isTypeSuffixPrimary($type_index,$suff_index) ?
-			      '-' : undef));
+			      $usg_hash->{PRIMARY} ? '-' : undef));
 		      }
 		  }
 	      }
@@ -12610,7 +17008,7 @@ sub makeCheckOutputs
 		  "surpassed by providing unique suffixes for each file type ",
 		  "or by using --force combined with either --overwrite or ",
 		  "--skip.");
-	    quit(-55);
+	    quit(-47);
 	  }
       }
 
@@ -12635,7 +17033,7 @@ sub makeCheckOutputs
 	      "files output to different directories.  This error may be ",
 	      "circumvented by --force and either --overwrite or ",
 	      "--skip, but it is heavily discouraged - only use for testing.");
-	quit(-56);
+	quit(-45);
       }
     #Quit if $unique_hash->{$outfile}->{$type}->{error} > 1 or
     #$unique_hash->{$outfile}->{$type}->{rename} (i.e. compounded names are
@@ -12643,13 +17041,21 @@ sub makeCheckOutputs
     elsif(#The unique hash is populated
 	  scalar(keys(%$unique_hash)) &&
 	  #There exist error or rename modes
-	  scalar(grep {$_ eq 'error' || $_ eq 'rename'} map {@$_}
-		 grep {defined($_)} @$collide_modes) &&
+	  scalar(grep {defined($_) && ($_ eq 'error' || $_ eq 'rename')}
+		 map {my $ai = $_;map {$usage_array->[$_]->{COLLIDE_MODE}}
+			values(%$ai)}
+		 grep {defined($_)} values(%$file_indexes_to_usage)) &&
 	  #There exists an output filename duplicate for an error mode outfile
 	  scalar(grep {$_ > 1} map {values(%$_)}
 		 grep {exists($_->{error}) || exists($_->{rename})}
 		 map {values(%$_)} values(%$unique_hash)))
       {
+	my $all_collide_modes_str = '(' .
+	  join('),(',
+	       map {my $ai = $_;defined($ai) ?
+		      join(',',map {$usage_array->[$_]->{COLLIDE_MODE}}
+			   values(%$ai)) :
+			     'undef'} values(%$file_indexes_to_usage)) . ')';
 	my @report_errs =
 	  grep {my $k = $_;scalar(grep {(exists($_->{error}) &&
 					 $_->{error} > 1) ||
@@ -12682,9 +17088,8 @@ sub makeCheckOutputs
 			"mode set when the output file type was created (see ",
 			"addOutfileOption, addOutfileSuffixOption, and ",
 			"addOutfileTagteamOption).  At least one of the ",
-			"collision modes for the affected files: [(",
-			join('),(',map {defined($_) ? join(',',@$_) : 'undef'}
-			     @{$collide_modes}),"})] is set to cause an ",
+			"collision modes for the affected files: [",
+			"$all_collide_modes_str] is set to cause an ",
 			"error if multiple input files output to the same ",
 			"output file.  This error may be circumvented by ",
 			"setting the COLLISIONMODE to either 'merge' or ",
@@ -12747,14 +17152,10 @@ sub makeCheckOutputs
 	      {
 		error("Output files exist: [",join(',',@$report_exist),
 		      "].  Use --overwrite, --append, or --skip to continue.");
-		quit(-58);
+		quit(-10);
 	      }
 	  }
       }
-
-    #debug("Unique hash: ",Dumper($unique_hash),"\Collide modes: ",
-    #	  Dumper($collide_modes),{LEVEL => -1});
-    #debug({LEVEL => -99},"Returning outfiles: ",Dumper($outfiles_sets));
 
     #If no suffixes were provided, the outfile_sets will essentially be the
     #same as the stubs, only with subarrays inserted.
@@ -12764,6 +17165,7 @@ sub makeCheckOutputs
 sub getMatchedSets
   {
     my $array = $_[0]; #3D array
+    my $force = getVarref('force',1);
 
     debug({LEVEL => -99},"getMatchedSets called");
 
@@ -12867,12 +17269,6 @@ sub getMatchedSets
 			                                   #in the type_
 			                                   #container array
 			 }];
-
-    #eval('use Data::Dumper;1') if($DEBUG < 0);
-
-    #debug("Initial group with default candidate: ",
-    #	  Dumper($synced_groups->[-1]->{GROUP}),"There are [",
-    #	  scalar(@$type_container),"] types total.",{LEVEL => -99});
 
     #For every type_hash_index in the type container except the first one
     foreach my $type_hash_index (1..$#{$type_container})
@@ -13012,7 +17408,7 @@ sub getMatchedSets
 		      {
 			error("Critical internal error: Transpose not ",
 			      "possible.  This should not be possible.");
-			quit(-59);
+			quit(-39);
 		      }
 		  }
 
@@ -13141,9 +17537,6 @@ sub getMatchedSets
 		#Put this candidate in the synced group
 		push(@{$group_hash->{GROUP}},$type_hash);
 
-		#debug({LEVEL => -99},"Group after adding candidate: ",
-		#      Dumper($group_hash->{GROUP}));
-
 		#We stop when we find a match so that we don't put this
 		#candidate in multiple synced groups
 		last;
@@ -13158,14 +17551,8 @@ sub getMatchedSets
 				  AF    => $candidate_af,
 				  AS    => $candidate_as,
 				  GROUP => [$type_hash]});
-
-	    #debug({LEVEL => -99},"New group after adding candidate: ",
-	    #	  Dumper($synced_groups->[-1]->{GROUP}));
 	  }
       }
-
-    #debug({LEVEL => -99},"Synced groups contains [",Dumper($synced_groups),
-    #	  "].");
 
     #Now I have a set of synced groups, meaning every hash in the group has the
     #same dimensions described by the group's metadata.  However, I don't need
@@ -13206,9 +17593,6 @@ sub getMatchedSets
 	      }
 	  }
       }
-
-    #debug({LEVEL => -99},"Flattened groups contains: [",
-    #	  Dumper($flattened_groups),"].");
 
     my $combos = [];
     my $combo  = [];
@@ -13298,9 +17682,6 @@ sub getMatchedSets
 	      sort {$a->{TYPE} <=> $b->{TYPE}} @$finished_combo]);
       }
 
-    #debug({LEVEL => -99},"getMatchedSets returning combos: [",
-    #	  Dumper($combos),"].");
-
     return(wantarray ? @$combos : $combos);
   }
 
@@ -13319,7 +17700,7 @@ sub checkFileOpt
 	if($strict)
 	  {
 	    error("Unknown option: [$alleged_file].");
-	    quit(-60);
+	    quit(-52);
 	  }
 	else
 	  {warning("Potentially unknown option assumed to be a file name: ",
@@ -13334,6 +17715,56 @@ sub processDefaultOptions
     #If there's anything in the stderr buffer, it will get emptied from
     #verbose calls below.
 
+    debug({LEVEL => -1},"Processing default options.");
+
+    my $use_as_default = getVarref('save_args',1);
+    my $version        = getVarref('version',1);
+    my $help           = getVarref('help',1);
+    my $run            = getVarref('run',1);
+    my $dry_run        = getVarref('dry_run',1);
+    my $verbose        = getVarref('verbose',1);
+    my $DEBUG          = getVarref('debug',1);
+    my $header         = getVarref('header',1);
+    my $quiet_ref      = getVarref('quiet');
+
+    my $quiet_warning = '';
+
+    #Do not allow a default quiet to affect non-run modes
+    if((!($run || $dry_run) || $version || $use_as_default) &&
+       hasDefault($usage_lookup->{quiet}) &&
+       !$usage_lookup->{quiet}->{SUPPLIED})
+      {
+        #This is the only explicit change of a committed varref allowed.
+	$$quiet_ref = 0;
+
+        $quiet_warning =
+          join('',("$usage_lookup->{quiet}->{OPTFLAG_DEF} cannot be ",
+                   "defaulted to true in a non-run mode (e.g. usage, help, ",
+                   "etc).  Quiet has been turned off."));
+
+	#If an error or warning has occurred and debug is non-zero
+        #OR abs(debug) > 1.  Note, an error or warning may occur after this and
+        #this won't be printed
+	if(#!$usage_lookup->{usage}->{SUPPLIED} &&
+	   #!$usage_lookup->{help}->{SUPPLIED}  &&
+	   #!$usage_lookup->{version}->{SUPPLIED} &&
+	   #!$usage_lookup->{save_args}->{SUPPLIED} &&
+           (($error_number || $warning_number) && $DEBUG) || abs($DEBUG) > 1)
+	  {
+            ##TODO: Add hash param to only warn in debug mode and remove $DEBUG
+            ##      from the surrounding conditional
+            warning("$usage_lookup->{quiet}->{OPTFLAG_DEF} cannot be ",
+                    "defaulted to true in a non-run mode (e.g. usage, help, ",
+                    "etc).  Quiet has been turned off.");
+            $quiet_warning = '';
+          }
+      }
+
+    #If there has been a compile error, catch it here and do not proceed
+    #Do not return if force has been supplied
+    if(defined($compile_err) && scalar(@$compile_err))
+      {quit(-54)}
+
     #If the user has asked to save the options, save them & quit.  Saving of
     #--help, --dry-run, --usage, or --run are allowed, so this must be
     #processed before help or usage is printed.
@@ -13341,10 +17772,10 @@ sub processDefaultOptions
       {
 	saveUserDefaults() && quit(0);
 
-	#Really done with command line processing
-	$command_line_processed = 2;
+        warning($quiet_warning) if($quiet_warning ne '' &&
+                                   ($error_number || $warning_number));
 
-	quit(-61);
+        return(-8); #QUIT(-8)
       }
 
     #Print the usage if there are no non-user-default arguments (or it's just
@@ -13356,39 +17787,10 @@ sub processDefaultOptions
 	usage(0);
 	debug({LEVEL => -1},"Quitting with usage.");
 
-	#Really done with command line processing
-	$command_line_processed = 2;
+        warning($quiet_warning) if($quiet_warning ne '' &&
+                                   ($error_number || $warning_number));
 
-	#Return if quit was not forced, which means we were probably called
-	#from the END block
-	quit(0) || return();
-      }
-
-    #Error-check for mutually exclusive flags supplied together
-    if(scalar(grep {$_} ($version,$explicit_help,$explicit_usage,$explicit_run,
-			 $explicit_dry_run)) > 1)
-      {
-	my @culprits = ();
-	push(@culprits,'--help')    if($explicit_help);
-	push(@culprits,'--version') if($version);
-	push(@culprits,'--usage')   if($explicit_usage);
-	push(@culprits,'--run')     if($explicit_run);
-	push(@culprits,'--dry-run') if($explicit_dry_run);
-	error('These options are mutually exclusive: [',join(',',@culprits),
-	      '].');
-	quit(-62);
-      }
-    elsif(scalar(grep {$_} ($help,$usage,$run,$dry_run)) > 1)
-      {
-	my @culprits = ();
-	push(@culprits,'--help')    if($help);
-	push(@culprits,'--usage')   if($usage);
-	push(@culprits,'--run')     if($run);
-	push(@culprits,'--dry-run') if($dry_run);
-	error('Error determining run mode.  These mutually exclusive modes ',
-	      'are concurrently set: [',join(',',@culprits),
-	      '].');
-	quit(-62);
+        return($cli_error_num ? -3 : 1); #QUIT(-3)
       }
 
     #If the user has asked for the script version, print it & quit
@@ -13396,39 +17798,23 @@ sub processDefaultOptions
       {
 	print(getVersion(),"\n");
 
-	#Really done with command line processing
-	$command_line_processed = 2;
+        warning($quiet_warning) if($quiet_warning ne '' &&
+                                   ($error_number || $warning_number));
 
-	quit(0);
+        return($cli_error_num ? -6 : 1); #QUIT(-6)
       }
 
     #If the user has asked for help, call the help method & quit
     if($help)
       {
+	my $extended = getVarref('extended',1,1);
+
 	help($extended);
 
-	#Really done with command line processing
-	$command_line_processed = 2;
+        warning($quiet_warning) if($quiet_warning ne '' &&
+                                   ($error_number || $warning_number));
 
-	quit(0);
-      }
-
-    #Check validity of verbosity options
-    if($quiet && ($verbose || $DEBUG))
-      {
-	$quiet = 0;
-	error('--quiet is mutually exclusive with both --verbose & --debug.');
-	quit(-63);
-      }
-
-    #Check validity of existing outfile options
-    my $outmode_check = 0;
-    foreach($skip_existing,$overwrite,$append)
-      {$outmode_check++ if($_)}
-    if($outmode_check > 1)
-      {
-	error('--overwrite, --skip, and --append are mutually exclusive.');
-	quit(-64);
+        return($cli_error_num ? -51 : 1); #QUIT(-51)
       }
 
     if(defined($user_collide_mode) && $user_collide_mode !~ /^[mer]/i)
@@ -13436,7 +17822,7 @@ sub processDefaultOptions
 	error("Invalid --collision-mode: [$user_collide_mode].  Acceptable ",
 	      "values are: [merge, rename, or error].  Check usage for an ",
 	      "explanation of what these modes do.");
-	quit(-65);
+	quit(-21);
       }
 
     #Warn users when they turn on verbose and output is to the terminal
@@ -13465,54 +17851,116 @@ sub processDefaultOptions
       if(defined($user_collide_mode));
     verbose({LEVEL => 2},"Error level:    [$error_limit].")
       if($error_limit != $error_limit_default);
+
+    return(0);
   }
 
 sub argsOrPipeSupplied
   {
     my $got_input = isThereInputOnSTDIN();
-    my $run_num = scalar(grep {$_ eq '--usage' || $_ eq 'help' ||
-				 $_ eq '--run' || $_ eq '--dry-run'}
-			 @$preserve_args);
-    my $extended_num =
-      scalar(grep {$preserve_args->[$_] eq '--extended' ||
-		     ($_ > 0 && isInt($preserve_args->[$_]) &&
-		      $preserve_args->[$_ - 1] eq '--extended')}
-	     (0..$#{$preserve_args}));
-    my $debug_num = scalar(grep {$preserve_args->[$_] eq '--debug' ||
-				   ($_ > 0 && isInt($preserve_args->[$_]) &&
-				    $preserve_args->[$_ - 1] eq '--debug')}
-			   (0..$#{$preserve_args}));
 
-    debug({LEVEL => -1},"Pipe: ",($got_input ? '1' : '0'),
-	  " || [(",scalar(@$preserve_args),
-	  " > ($extended_num + $debug_num + $run_num))].");
+    my $ignore_opts = [qw(extended debug run dry_run usage help)];
+    #ignore_flags_hash = {flag => option type}
+    my $ignore_flags_hash =
+      {map {my $name = $_;
+            map {$_ => {TYPE    => $def_option_hash->{$name}->{PARAMS}->{TYPE},
+                        ACCEPTS => ($def_option_hash->{$name}->{PARAMS}
+                                    ->{ACCEPTS})}}
+              getOptStrFlags($def_option_hash->{$name}->{PARAMS}->{FLAG})}
+       @$ignore_opts};
+
+    #Filter out the ignored option flags and their arguments
+    my $filtered_opts =
+      [grep {my $i = $_;my $arg = $active_args->[$_];
+             my $parg = ($i > 0 ? $active_args->[$_ - 1] : undef);
+             (exists($ignore_flags_hash->{$arg}) ||
+              (defined($parg) && exists($ignore_flags_hash->{$parg}) &&
+               argMatchesType($arg,$ignore_flags_hash->{$parg}->{TYPE})) ?
+              0 : 1)}
+       (0..$#{$active_args})];
 
     #Should print if run mode is usage and any option other than extended &
     #debug are supplied
-    return($got_input ||
-	   scalar(@$preserve_args) > ($extended_num + $debug_num + $run_num));
+    return($got_input || scalar(@$filtered_opts));
+  }
+
+#Only works with scalar args (i.e. parsed from the command line)
+sub argMatchesType
+  {
+    my $arg     = $_[0];
+    my $type    = $_[1];
+    my $accepts = $_[2];
+    if(ref($arg) ne '')
+      {
+        error('Non-scalar argument supplied.');
+        return(0);
+      }
+    if($type eq 'count' || $type eq 'integer')
+      {return(isInt($arg))}
+    elsif($type eq 'float')
+      {return(isFloat($arg))}
+    elsif($type eq 'bool')
+      {return(0)}
+    else
+      {error("Type [$type] not supported yet.")}
+    return(0);
+  }
+
+sub isExtendedFlag
+  {
+    my $flag = $_[0];
+
+    foreach my $eflag (@{$usage_lookup->{extended}->{OPTFLAGS}})
+      {return(1) if($eflag eq $flag)}
+
+    return(0);
   }
 
 sub isInt
   {
-    my $flt = $_[0];
-    if($flt =~ /[+\-]?\d+([eE][+\-]?(\d+))?/)
+    my $val = $_[0];
+    if(defined($val) && ref($val) eq '' &&
+       $val =~ /^[+\-]?\d+([eE][+\-]?(\d+))?$/)
       {return(1)}
     return(0);
   }
 
 sub isFloat
   {
-    my $flt = $_[0];
+    my $val = $_[0];
     my $np = '\d+|\d+\.|\d+\.\d+|\.\d+';
-    if($flt =~ /[+\-]?($np)([eE][+\-]?($np))?/)
+    if(defined($val) && ref($val) eq '' &&
+       $val =~ /^[+\-]?($np)([eE][+\-]?($np))?$/)
       {return(1)}
     return(0);
   }
 
-#Globals used: $pipeline_mode
+#We're going to literally treat any undefined value or defined scalar as a valid
+#boolean
+sub isBool
+  {
+    my $val = $_[0];
+    if(!defined($val) || ref($val) eq '')
+      {return(1)}
+    return(0);
+  }
+
+#We're going to treat defined scalars that are an int or an empty string as a
+#valid count
+sub isCount
+  {
+    my $val = $_[0];
+    if(defined($val) && ref($val) eq '' && ($val eq '' || isInt($val)))
+      {return(1)}
+    return(0);
+  }
+
+#Globals used: $flushing, $debug_number
 sub flushStderrBuffer
   {
+    #Return if there is nothing in the buffer
+    return(0) if(!defined($stderr_buffer));
+
     my %in = scalar(@_) % 2 == 0 ? @_ : ();
 
     #Use the local_force parameter to flush even if the required flags are not
@@ -13521,98 +17969,223 @@ sub flushStderrBuffer
 		       (scalar(@_) == 1 && defined($_[0]) && $_[0] ne 'FORCE' ?
 			$_[0] : 0));
 
-    #Return if there is nothing in the buffer
-    return(0) if(!defined($stderr_buffer));
+    my $forced          = 0;
+    my $cli_errors_only = ($local_force && $command_line_stage != DONE ? 1 : 0);
+    my $miscompile      = defined($compile_err) && scalar(@$compile_err);
+    my($extended,$error_limit,$quiet,$verbose,$DEBUG);
+    if($command_line_stage >= DEFAULTED)
+      {
+	$extended    = getVarref('extended',1,1);
+	$error_limit = getVarref('error_lim',1,1);
+      }
+    if($command_line_stage == VALIDATED && !$miscompile)
+      {
+	$quiet       = getVarref('quiet',1,1);
+	$verbose     = getVarref('verbose',1,1);
+	$DEBUG       = getVarref('debug',1,1);
+      }
+    elsif($command_line_stage >= COMMITTED && !$miscompile)
+      {
+	$quiet       = getVarref('quiet',1);
+	$verbose     = getVarref('verbose',1);
+	$DEBUG       = getVarref('debug',1);
+      }
+    elsif($local_force)
+      {
+        my $fallbacks    = getBuiltinFallbacks();
+        $quiet           = $fallbacks->{quiet};
+	$verbose         = $fallbacks->{verbose};
+	$DEBUG           = $fallbacks->{debug};
+	$extended        = $fallbacks->{extended};
+	$error_limit     = $fallbacks->{error_lim};
+        $forced          = (defined($quiet) && defined($verbose) &&
+                            defined($DEBUG) && defined($error_limit) ? 0 : 1);
+        $cli_errors_only = ($DEBUG < 2); #processCommandLine in trace implies
+      }
 
+    #This checks the error/warning number in case the buffer has to be flushed
+    #more than once
     my $prints_exist =
       scalar(grep {((#There is a defined error limit
-		     defined($error_limit) &&
+		     (($local_force && !defined($error_limit)) ||
+		      defined($error_limit)) &&
 		     #There are error or warning messages in the buffer
 		     ($_->[0] eq 'error' || $_->[0] eq 'warning') &&
-		     #The error/warning number is =|under the error limit
-		     ($error_limit == 0 || $_->[1] <= $error_limit)) ||
+		     #The error/warning number is =to|under the error limit
+		     (!defined($error_limit) ||
+		      $error_limit == 0 || $_->[1] <= $error_limit)) ||
 
 		    (#There is a defined verbose level
 		     defined($verbose) &&
 		     #There are verbose messages in the buffer
 		     $_->[0] eq 'verbose' &&
 		      #The message level is =|under the verbose level
-		     (($_->[1] > 0 && $_->[1] >= $verbose) ||
-		      ($_->[1] < 0 && $_->[1] <= $verbose))) ||
+		     (($verbose > 0 && $_->[1] <= $verbose) ||
+		      ($verbose < 0 && $_->[1] >= $verbose))) ||
 
 		    (#There is a defined debug level
 		     defined($DEBUG) &&
 		     #There are debug messages in the buffer
 		     $_->[0] eq 'debug' &&
-		      #The message level is =|under the debug level
-		     (($_->[1] > 0 && $_->[1] >= $DEBUG) ||
-		      ($_->[1] < 0 && $_->[1] <= $DEBUG))))}
+		      #The message level is under the debug level
+		     (($DEBUG > 0 && $_->[1] <= $DEBUG) ||
+		      ($DEBUG < 0 && $_->[1] >= $DEBUG))))}
 
 	     @{$stderr_buffer});
 
-    if($local_force && scalar(@{$stderr_buffer}) &&
-       (!defined($verbose) || !defined($quiet) || !defined($DEBUG) ||
-	!defined($error_limit)))
+    my $semsg = '';
+
+    my $printing =
+      ($command_line_stage >= LOGGING || $local_force) && $prints_exist &&
+	(!defined($logging) ||
+	 (defined($logging) && (!$logging || $log_mirror || !$log_errors ||
+                                !$log_warnings || !$log_verbose ||
+                                !$log_debug))) ? 1 : 0;
+    my $lognow =
+      ($command_line_stage >= LOGGING || $local_force) && $prints_exist;
+
+    if($local_force && $prints_exist && $forced && !$miscompile)
       {
-	print STDERR ("\nForce-flushing the STDERR buffer because the ",
-		      'command line options [verbose: ',
-		      (defined($verbose) ? $verbose : 'undef'),' quiet: ',
-		      (defined($quiet) ? $quiet : 'undef'),' debug: ',
-		      (defined($DEBUG) ? $DEBUG : 'undef'),' error_limit: ',
-		      (defined($error_limit) ? $error_limit : 'undef'),
-		      '] (which control the STDERR output, e.g. --debug) ',
-		      'were not processed in time to catch some output.  If ',
-		      'you get this flush every time, you can likely prevent ',
-		      'it by adding a call to one or more of the following ',
-		      'methods earlier in your code: [nextFileCombo(), ',
-		      'getInfile(), getOutfile(), getNextFileGroup(), ',
-		      'getAllFileGroups(), or optionally (if your script ',
-		      "does not process files): processCommandLine()].\n\n");
+        my $unprocs = [grep {!defined(getVarref($_,1,0,1))}
+                       qw(verbose quiet debug error_lim)];
+        if(!scalar(@$unprocs))
+          {$unprocs = [qw(verbose quiet debug error_lim)]}
+	$semsg = join('',
+		      ("\nForce-flushing the STDERR buffer because the ",
+		       'following command line options [',join(' ',@$unprocs),
+		       '] were not fully processed/validated in time to be ',
+		       "applied to some standard error output.\n"));
+	if(!defined($extended) || $extended)
+	  {$semsg .=
+	     join('',('If you get this flush every time, you can likely ',
+		      'prevent it by adding a call to one or more of the ',
+		      'following methods earlier in your code: [',
+		      'nextFileCombo(), getInfile(), getOutfile(), ',
+		      'getNextFileGroup(), getAllFileGroups(), or optionally ',
+		      '(if your script does not process files): ',
+		      "processCommandLine()].\n\n"))}
+	elsif(defined($extended))
+	  {$semsg .= "Supply --extended for additional details.\n\n"}
+	else
+	  {$semsg .= "\n"}
+
+	print STDERR ($semsg) if($printing);
+	logger($semsg) if($log_warnings);
 
 	#For debugging purposes...
 	if(!defined($DEBUG) || $DEBUG < 0)
-	  {print STDERR ("DEBUG-FLUSH-TRACE:",getTrace(),"\n\n")}
+	  {
+	    $semsg = "DEBUG-FLUSH-TRACE1:" . getTrace() . "\n\n";
+
+	    print STDERR ($semsg) if($printing &&
+                                     (!$logging || $log_mirror || !$log_debug));
+
+	    logger($semsg) if($lognow && $log_debug);
+	  }
       }
-    elsif(defined($DEBUG) && $DEBUG < 0 && scalar(@{$stderr_buffer}))
-      {print STDERR ("DEBUG-FLUSH-TRACE:",getTrace(),"\n\n")}
 
-    #Return if we're not in force mode, there's nothing in the buffer to print,
-    #and none of the stderr variables are defined
-    return(0) if(!$local_force &&
-		 (!$prints_exist ||
-		  !defined($verbose) || !defined($quiet) ||
-		  !defined($DEBUG)   || !defined($error_limit)));
+    #Return if we're not in force mode and either there's nothing in the buffer
+    #to print or none of the stderr variables are set/validated
+    if(!$local_force &&
+       (!$prints_exist ||
+        $command_line_stage < LOGGING))
+      {
+        #If no debugs were flushed, no prints exist, and stage is past LOGGING
+        if(!$prints_exist && $command_line_stage >= LOGGING &&
+           $command_line_stage < DONE && !$flushing)
+          {$debug_number = 0}
+        return(0);
+      }
 
-    my $script = $0;
-    $script =~ s/^.*\/([^\/]+)$/$1/;
+    if($cli_errors_only && !$miscompile && $DEBUG < 2 && $DEBUG > -2)
+      {
+        #Only issue the "only fatal errors" message if something else would be
+        #printed otherwise
+        if(scalar(grep {($_->[0] eq 'error' &&
+                         $_->[9] !~ /CommandLineInterface\.pm/) ||
+                           ($_->[0] eq 'warning' &&
+                            $_->[9] !~ /Long\.pm|Runtime warning/) ||
+                              ($DEBUG && $_->[0] eq 'debug' &&
+                               (($_->[1] < 0 && $DEBUG <= $_->[1]) ||
+                                ($_->[1] > 0 && $DEBUG >= $_->[1]))) ||
+                                  ($verbose && $_->[0] eq 'verbose' &&
+                                   (($_->[1] < 0 && $verbose <= $_->[1]) ||
+                                    ($_->[1] > 0 && $verbose >= $_->[1])))}
+                  @$stderr_buffer))
+          {
+            my $feomsg = "Only printing fatal errors. Set debug to greater " .
+              "than 1 to see all possible standard error output.\n\n";
+
+            print STDERR ($feomsg)
+              if($printing && (!$logging || $log_mirror || !$log_debug));
+
+            logger($feomsg) if($lognow && $log_debug);
+          }
+      }
+
+    my $script = getScriptName();
 
     #Don't initialize pipeline_mode if printing usage so the default printed is
     #accurate
-    if(!defined($pipeline_mode) && !$usage)
-      {$pipeline_mode = inPipeline()}
+    my $pipeline = getVarref('pipeline',1,1);
+    my $local_pipeline_mode = $pipeline;
+    if(!defined($local_pipeline_mode))
+      {
+	$local_pipeline_mode = inPipeline();
+	if(!$usage)
+	  {$pipeline = $local_pipeline_mode}
+      }
 
-    my $debug_num         = 0;
-    my $replace_debug_num = 0;
+    my $debug_num         = $flushing ? $flushing : 0;
+    my $replace_debug_num = $flushing ? 1 : 0;
+    my $first_error       =
+      defined($last_flush_error) && !$last_flush_error ? 1 : 0;
+    my $first_warn        =
+      defined($last_flush_warning) && !$last_flush_warning ? 1 : 0;
     foreach my $message_array (@{$stderr_buffer})
       {
 	if(ref($message_array) ne 'ARRAY' || scalar(@$message_array) < 3)
-	  {print STDERR ("ERROR: Invalid message found in standard error ",
-			 "buffer.  Must be an array with at least 3 ",
-			 "elements, but ",
-			 (ref($message_array) eq 'ARRAY' ?
-			  "only [" . scalar(@$message_array) .
-			  "] elements were present." :
-			  "a [" . ref($message_array) .
-			  "] was sent in instead."))}
+	  {
+	    $semsg = join('',"ERROR: Invalid message found in standard error ",
+			  "buffer.  Must be an array with at least 3 ",
+			  "elements, but ",
+			  (ref($message_array) eq 'ARRAY' ?
+			   "only [" . scalar(@$message_array) .
+			   "] elements were present." :
+			   "a [" . ref($message_array) .
+			   "] was sent in instead."));
+
+	    print STDERR ($semsg) if($printing &&
+                                     (!$logging || $log_mirror ||
+                                      !$log_errors));
+
+	    logger($semsg) if($lognow && $log_errors);
+	  }
 
 	my($type,$level,$message,$leader,$smpl_msg,$smpl_ldr,$detail,
-	   $detail_alert) = @$message_array;
+	   $detail_alert,$opts_hash,$trace) = @$message_array;
+
+	if($type ne 'verbose' &&
+	   (!defined($local_pipeline_mode) || $local_pipeline_mode))
+	  {
+	    my $pat = quotemeta($script);
+	    if($message !~ /(?:DEBUG|WARNING|ERROR)\d+:$pat:/)
+	      {$message  =~ s/^((DEBUG|WARNING|ERROR)\d+:)/$1$script:/g}
+	    if($smpl_msg !~ /(?:DEBUG|WARNING|ERROR)\d+:$pat:/)
+	      {$smpl_msg =~ s/^((DEBUG|WARNING|ERROR)\d+:)/$1$script:/g}
+	    if($leader !~ /(?:DEBUG|WARNING|ERROR)\d+:$pat:/)
+	      {$leader  =~ s/^((DEBUG|WARNING|ERROR)\d+:)/$1$script:/g}
+	    if($smpl_ldr !~ /(?:DEBUG|WARNING|ERROR)\d+:$pat:/)
+	      {$smpl_ldr =~ s/^((DEBUG|WARNING|ERROR)\d+:)/$1$script:/g}
+	  }
 
 	if(defined($detail) && $detail ne '' &&
 	   defined($extended) && $extended)
 	  {
-	    $smpl_msg .= (' ' x length($smpl_ldr)) . $detail . "\n";
-	    $message  .= (' ' x length($leader))   . $detail . "\n";
+	    $smpl_msg .= (' ' x length($smpl_ldr)) .
+              join("\n" . (' ' x length($smpl_ldr)),split(/\n/,$detail)) . "\n";
+	    $message  .= (' ' x length($leader))   .
+              join("\n" . (' ' x length($leader)),split(/\n/,$detail)) . "\n";
 	  }
 	elsif(defined($detail) && $detail ne '')
 	  {
@@ -13620,103 +18193,456 @@ sub flushStderrBuffer
 	    $message  .= (' ' x length($leader))   . $detail_alert . "\n";
 	  }
 
-	if(!defined($pipeline_mode) || $pipeline_mode)
-	  {
-	    my $pat = quotemeta($script);
-	    if($message !~ /(?:DEBUG|WARNING|ERROR)\d+:$pat:/)
-	      {$message  =~ s/^((DEBUG|WARNING|ERROR)\d+:)/$1$script:/g}
-	    if($smpl_msg !~ /(?:DEBUG|WARNING|ERROR)\d+:$pat:/)
-	      {$smpl_msg =~ s/^((DEBUG|WARNING|ERROR)\d+:)/$1$script:/g}
-	  }
-
 	if($type eq 'verbose')
-	  {print STDERR ($message) if(!defined($verbose) || $level == 0 ||
-				      ($level < 0 && $verbose <= $level) ||
-				      ($level > 0 && $verbose >= $level))}
+	  {
+	    if(!$cli_errors_only &&
+               (!defined($verbose) || $level == 0 ||
+                ($level < 0 && $verbose <= $level) ||
+                ($level > 0 && $verbose >= $level)))
+	      {
+                my $log_only = 0;
+                if(defined($opts_hash) && exists($opts_hash->{LOG}))
+                  {$log_only = $opts_hash->{LOG}}
+
+		print STDERR ($message) if($printing && !$log_only &&
+                                           (!$logging || $log_mirror ||
+                                            !$log_verbose));
+
+		logger($message) if($lognow && ($log_verbose || $log_only));
+	      }
+	  }
 	elsif($type eq 'debug')
 	  {
-	    my $tmp_msg = $message;
-	    if(defined($DEBUG) && abs($DEBUG) < 2)
-	      {
-		if(defined($smpl_msg) && defined($smpl_ldr))
-		  {$tmp_msg = $smpl_msg}
-	      }
+            if(!$cli_errors_only)
+              {
+                my $tmp_msg = $message;
+                if(defined($DEBUG) && abs($DEBUG) < 2)
+                  {
+                    if(defined($smpl_msg) && defined($smpl_ldr))
+                      {$tmp_msg = $smpl_msg}
+                  }
 
-	    if(!defined($DEBUG) || $level == 0  ||
-	       ($level < 0 && $DEBUG <= $level) ||
-	       ($level > 0 && $DEBUG >= $level))
-	      {
-		if($replace_debug_num)
-		  {$tmp_msg =~ s/^DEBUG\d+/DEBUG$debug_num/}
-		if($debug_num == 0 && $tmp_msg =~ /^DEBUG(\d+)/)
-		  {$debug_num = $1}
-		print STDERR ($tmp_msg);
-		$debug_num++;
-	      }
-	    elsif($debug_num == 0 && $tmp_msg =~ /^DEBUG(\d+)/)
-	      {
-		my $tnum = $1;
-		if($tnum == 1)
-		  {$debug_num = 1}
-		$replace_debug_num = 1;
-	      }
-	    else
-	      {$replace_debug_num = 1}
+                if(!defined($DEBUG) || $level == 0  ||
+                   ($level < 0 && $DEBUG <= $level) ||
+                   ($level > 0 && $DEBUG >= $level))
+                  {
+                    if($replace_debug_num)
+                      {$tmp_msg =~ s/^DEBUG\d+/DEBUG$debug_num/}
+                    if($debug_num == 0 && $tmp_msg =~ /^DEBUG(\d+)/)
+                      {$debug_num = $1}
+
+                    print STDERR ($tmp_msg) if($printing &&
+                                               (!$logging || $log_mirror ||
+                                                !$log_debug));
+
+                    logger($tmp_msg) if($lognow && $log_debug);
+
+                    $debug_num++ if($printing &&
+                                    (!$logging || $log_mirror || !$log_debug));
+                  }
+                elsif($debug_num == 0 && $tmp_msg =~ /^DEBUG(\d+)/)
+                  {
+                    my $tnum = $1;
+                    if($tnum == 1)
+                      {$debug_num = 1}
+                    $replace_debug_num = 1;
+                  }
+                else
+                  {$replace_debug_num = 1}
+              }
 	  }
 	elsif($type eq 'error' || $type eq 'warning')
 	  {
-	    if(scalar(@$message_array) < 4)
-	      {
-		#Print the error without using the error function so as to
-		#avoid a potential infinite loop.
-		print STDERR ("ERROR: Parameter array too small.  Must ",
-			      "contain at least 4 elements, but it has [",
-			      scalar(@$message_array),"].\n");
-		$leader = '';
-	      }
+            if(!$cli_errors_only ||
+               ($type eq 'error' && $trace =~ /CommandLineInterface\.pm/) ||
+               #Getopt::Long warning is the 1 exception bec I treat it as fatal
+               #Not sure why, but it sometimes presents generically as a
+               #"runtime error" without a trace including CLI
+               ($type eq 'warning' &&
+                "$trace$message" =~ /Long\.pm|Runtime warning/))
+              {
+                if(scalar(@$message_array) < 4)
+                  {
+                    #Print the error without using the error function so as to
+                    #avoid a potential infinite loop.
+                    $semsg = join('',
+                                  ("ERROR: Parameter array too small.  Must ",
+                                   "contain at least 4 elements, but it has [",
+                                   scalar(@$message_array),"].\n"));
+                    print STDERR ($semsg)
+                      if($printing &&
+                         (!$logging ||
+                          ($type eq 'warning' &&
+                           ($log_mirror || !$log_warnings)) ||
+                          ($type eq 'error' && ($log_mirror || !$log_errors))));
 
-	    #Skip this one if it is above the error_limit
-	    next if(defined($error_limit) && $error_limit != 0 &&
-		    $level > $error_limit);
+                    logger($semsg) if($lognow &&
+                                      (($type eq 'warning' && $log_warnings) ||
+                                       ($type eq 'error' && $log_errors)));
+                    $leader = '';
+                  }
 
-	    my $tmp_msg = $message;
-	    my $tmp_ldr = $leader;
-	    if(defined($DEBUG) && !$DEBUG)
-	      {
-		if(defined($smpl_msg) && defined($smpl_ldr))
-		  {
-		    $tmp_msg = $smpl_msg;
-		    $tmp_ldr = $smpl_ldr;
-		  }
-	      }
+                #Skip this one if it is above the error_limit
+                next if(defined($error_limit) && $error_limit != 0 &&
+                        $level > $error_limit);
 
-	    #Notify when going above the error limit
-	    $message .=
-	      join('',($tmp_ldr,"NOTE: Further ",
-		       ($type eq 'error' ? 'error': "warning"),"s of this ",
-		       "type will be suppressed.\n$tmp_ldr",
-		       "Set --error-limit to 0 to turn off error ",
-		       "suppression\n"))
-		if(defined($error_limit) && $level == $error_limit);
+                my $tmp_msg     = $message;
+                my $tmp_ldr     = $leader;
+                my $tmp_ldr_spc = ' ' x length($leader);
+                if(defined($DEBUG) && !$DEBUG)
+                  {
+                    if(defined($smpl_msg) && defined($smpl_ldr))
+                      {
+                        $tmp_msg     = $smpl_msg;
+                        $tmp_ldr     = $smpl_ldr;
+                        $tmp_ldr_spc = ' ' x length($smpl_ldr);
+                      }
+                  }
 
-	    print STDERR ($tmp_msg) if(!defined($quiet) || !$quiet);
+                #Notify when going above the error limit
+                if(defined($error_limit) && $level == $error_limit)
+                  {
+                    $tmp_msg .=
+                      join('',($tmp_ldr_spc,"NOTE: Further ",
+                               ($type eq 'error' ? 'error': "warning"),"s of ",
+                               "this type will be suppressed.\n$tmp_ldr_spc",
+                               "Set --error-limit to 0 to turn off error ",
+                               "suppression\n"));
+                    $error_limit_met = 1;
+                  }
+
+                #If there's already been a fatal error, only print the first
+                #error and any warnings leading up to it unless in debug mode.
+                #This assumes the first error was a fatal error and that all
+                #subsequent
+                #errors were during the cleanup
+                ##TODO: Save the cleanup_mode state with each error and warning
+                ##      so I don't have to assume the first error is the fatal
+                ##      error.
+                ##      See requirement #339
+                if(!defined($cleanup_mode) || $cleanup_mode != 2 ||
+                   !defined($DEBUG) || $DEBUG ||
+                   ($cleanup_mode == 2 && (!$first_error || !$first_warn)))
+                  {
+                    if($tmp_msg =~ /^ERROR(\d+):/)
+                      {
+                        my $eno = $1;
+                        if(defined($last_flush_error) &&
+                           $eno >= $last_flush_error)
+                          {$first_error = 1}
+                      }
+                    elsif($tmp_msg =~ /^WARNING(\d+):/)
+                      {
+                        my $wno = $1;
+                        if(defined($last_flush_warning) &&
+                           $wno >= $last_flush_warning)
+                          {$first_warn = 1}
+                      }
+                    if(!defined($quiet) || !$quiet)
+                      {
+                        print STDERR ($tmp_msg)
+                          if($printing &&
+                             (!$logging ||
+                              ($type eq 'warning' &&
+                               ($log_mirror || !$log_warnings)) ||
+                              ($type eq 'error' &&
+                               ($log_mirror || !$log_errors))));
+
+                        logger($tmp_msg) if($lognow && $log_errors);
+                      }
+                  }
+              }
 	  }
 	else
 	  {
 	    #Print the error without using the error function so as to avoid a
 	    #potential infinite loop if error() ever sends an invalid type.
-	    print STDERR ("ERROR: Invalid type found in standard error ",
-			  "buffer: [$type].\n");
+	    $semsg =
+	      "ERROR: Invalid type found in standard error buffer: [$type].\n";
+
+	    print STDERR ($semsg) if($printing &&
+                                     (!$logging || $log_mirror ||
+                                      !$log_errors));
+
+	    logger($semsg) if($lognow && $log_errors);
 	  }
       }
 
     if($replace_debug_num)
-      {$debug_number = $debug_num - 1}
+      {
+	$debug_number = $debug_num - 1;
+	$flushing     = $debug_number + 1;
+      }
+    else
+      {$debug_number = 0}
 
     if(defined($DEBUG) && $DEBUG < 0)
-      {print STDERR ("\nDONE-DEBUG-FLUSH-TRACE:",getTrace(),"\n\n")}
+      {
+	$semsg = "\nDONE-DEBUG-FLUSH-TRACE3:" . getTrace() . "\n\n";
 
-    undef($stderr_buffer);
+	print STDERR ($semsg) if($printing &&
+                                 (!$logging || $log_mirror || !$log_debug));
+
+	logger($semsg) if($lognow && $log_debug);
+      }
+
+    undef($stderr_buffer) if($printing || $lognow);
+  }
+
+#Call this sub when a fatal error has occurred during setup in order to set
+#builtin options' values.  It will return a hash of those values.  These options
+#may or may not have even been added to the script's options yet and their flags
+#may not even be set correctly since the programmer may have encountered an
+#error before their edits to the builtins have happened.
+#This will stage and commit all builtin options with non-problematic user-
+#supplied options or fallback defaults.  Run mode option problems are always
+#resolved.  Logging is also turned on if not on already.
+sub getBuiltinFallbacks
+  {
+    #Option names that have a conflict or need a fallback. Default: all.  Use
+    #this only if you're sure of all but the supplied values.  You can supply
+    #options this doesn't control, but unless you supply at least 1 of verbose,
+    #quiet, debug, extended, error_lim, or force, it will default to all.
+    #Supplying any values will also cause the command_line_stage to not change
+    #because it is assumed that you are fine-tuning option values for a recovery
+    #and continuation of a valid mode (e.g. usage)
+    my $problems = [@_];
+
+    my $fallbacks =
+      {verbose   => $def_option_hash->{verbose}  ->{DEFAULT},
+       quiet     => $def_option_hash->{quiet}    ->{DEFAULT},
+       debug     => $def_option_hash->{debug}    ->{DEFAULT},
+       extended  => $def_option_hash->{extended} ->{DEFAULT},
+       error_lim => $def_option_hash->{error_lim}->{DEFAULT},
+       force     => $def_option_hash->{force}    ->{DEFAULT},
+       run       => $def_option_hash->{run}      ->{DEFAULT},
+       dry_run   => $def_option_hash->{dry_run}  ->{DEFAULT},
+       usage     => $def_option_hash->{usage}    ->{DEFAULT},
+       help      => $def_option_hash->{help}     ->{DEFAULT}};
+
+    my $problem_hash =
+      {map {$_ => 1} grep {exists($fallbacks->{$_})} @$problems};
+    if(scalar(keys(%$problem_hash)) == 0)
+      {$problem_hash = {map {$_ => 1} keys(%$fallbacks)}}
+
+    if((defined($compile_err) && scalar(@$compile_err)) ||
+       $command_line_stage < DONE)
+      {
+        my $dflags =
+          [getOptStrFlags($def_option_hash->{debug}->{PARAMS}->{FLAG})];
+        my @debug_nums =
+          map {isInt($active_args->[$_]) ? $active_args->[$_] - 1 : 1}
+            grep {my $i = $_;
+                  scalar(grep {$active_args->[$i] eq $_} @$dflags) ||
+                    ($i > 0 && isInt($active_args->[$i]) &&
+                     scalar(grep {$active_args->[$i - 1] eq $_} @$dflags))}
+              (0..$#{$active_args});
+
+        if(scalar(@debug_nums) < 2 &&
+           defined($compile_err) && scalar(@$compile_err))
+          {
+            print STDERR ("DEBUG: Standard error output suppressed due to ",
+                          "setup error.  Supply [$dflags->[0] 2] (or greater ",
+                          "than 1) to see all STDERR output.\n")
+              if(scalar(@debug_nums) == 1);
+
+            return($fallbacks);
+          }
+      }
+
+    #quiet
+    my $qflags =
+      [getOptStrFlags($def_option_hash->{quiet}->{PARAMS}->{FLAG})];
+    if(scalar(grep {my $f = $_;scalar(grep {$f eq $_} @$qflags)}
+              @$active_args))
+      {$fallbacks->{quiet} = 1}
+    #Note, quiet will be turned off below if there's a conflict, thus over-
+    #rides will be allowed, yet the script will fail and exit with an error.
+    #This allows the user to see the problem.
+
+    my $expmodes   = {run => 0,dry_run => 0,help => 0,usage => 0};
+    my $expmodesum = 0;
+    #run
+    my $rflags =
+      [getOptStrFlags($def_option_hash->{run}->{PARAMS}->{FLAG})];
+    if(scalar(grep {my $f = $_;scalar(grep {$f eq $_} @$rflags)}
+              @$active_args))
+      {
+        $fallbacks->{run} = $expmodes->{run} = 1;
+        $expmodesum++;
+      }
+    #dry run
+    my $yflags =
+      [getOptStrFlags($def_option_hash->{dry_run}->{PARAMS}->{FLAG})];
+    if(scalar(grep {my $f = $_;scalar(grep {$f eq $_} @$yflags)}
+              @$active_args))
+      {
+        $fallbacks->{dry_run} = $expmodes->{dry_run} = 1;
+        $expmodesum++;
+      }
+    #usage
+    my $uflags =
+      [getOptStrFlags($def_option_hash->{usage}->{PARAMS}->{FLAG})];
+    if(scalar(grep {my $f = $_;scalar(grep {$f eq $_} @$uflags)}
+              @$active_args))
+      {
+        $fallbacks->{usage} = $expmodes->{usage} = 1;
+        $expmodesum++;
+      }
+    #help
+    my $hflags =
+      [getOptStrFlags($def_option_hash->{help}->{PARAMS}->{FLAG})];
+    if(scalar(grep {my $f = $_;scalar(grep {$f eq $_} @$hflags)}
+              @$active_args))
+      {
+        $fallbacks->{help} = $expmodes->{help} = 1;
+        $expmodesum++;
+      }
+    #Resolve problems with the run modes
+    my $modesum = 0;
+    $modesum += $_ foreach(map {$fallbacks->{$_}} qw(run dry_run usage help));
+    if($modesum != 1)
+      {
+        if($expmodesum == 1)
+          {
+            foreach(qw(run dry_run usage help))
+              {$fallbacks->{$_} = $expmodes->{$_}}
+          }
+        else
+          {
+            my $defmsum = 0;
+            $defmsum += $_ foreach(map {$def_option_hash->{$_}->{DEFAULT}}
+                                   qw(run dry_run usage help));
+            if($defmsum == 1)
+              {foreach(qw(run dry_run usage help))
+                 {$fallbacks->{$_} = $def_option_hash->{$_}->{DEFAULT}}}
+            else
+              {
+                foreach(qw(run dry_run usage help))
+                  {$fallbacks->{$_} = 0}
+                $fallbacks->{usage} = 2;
+              }
+          }
+      }
+
+    #verbose
+    my $vflags =
+      [getOptStrFlags($def_option_hash->{verbose}->{PARAMS}->{FLAG})];
+    my @verbose_nums =
+      map {isInt($active_args->[$_]) ? $active_args->[$_] - 1 : 1}
+        grep {my $i = $_;
+              scalar(grep {$active_args->[$i] eq $_} @$vflags) ||
+                ($i > 0 && isInt($active_args->[$i]) &&
+                 scalar(grep {$active_args->[$i - 1] eq $_} @$vflags))}
+          (0..$#{$active_args});
+    if(scalar(@verbose_nums))
+      {$fallbacks->{verbose} = sum(@verbose_nums)}
+
+    #DEBUG
+    my $dflags =
+      [getOptStrFlags($def_option_hash->{debug}->{PARAMS}->{FLAG})];
+    my @debug_nums =
+      map {isInt($active_args->[$_]) ? $active_args->[$_] - 1 : 1}
+        grep {my $i = $_;
+              scalar(grep {$active_args->[$i] eq $_} @$dflags) ||
+                ($i > 0 && isInt($active_args->[$i]) &&
+                 scalar(grep {$active_args->[$i - 1] eq $_} @$dflags))}
+          (0..$#{$active_args});
+    if(scalar(@debug_nums))
+      {$fallbacks->{debug} = sum(@debug_nums)}
+
+    #error_lim
+    my $lflags =
+      [getOptStrFlags($def_option_hash->{error_lim}->{PARAMS}->{FLAG})];
+    my @elim_nums =
+      map {isInt($active_args->[$_]) ? $active_args->[$_] : 0}
+        grep {my $i = $_;
+              scalar(grep {$active_args->[$i] eq $_} @$lflags) ||
+                ($i > 0 && isInt($active_args->[$i]) &&
+                 scalar(grep {$active_args->[$i - 1] eq $_} @$lflags))}
+          (0..$#{$active_args});
+    if(scalar(@elim_nums))
+      {$fallbacks->{error_lim} = pop(@elim_nums)}
+
+    #extended
+    my $eflags =
+      [getOptStrFlags($def_option_hash->{extended}->{PARAMS}->{FLAG})];
+    my @extended_nums =
+      map {isInt($active_args->[$_]) ? $active_args->[$_] - 1 : 1}
+        grep {my $i = $_;
+              scalar(grep {$active_args->[$i] eq $_} @$eflags) ||
+                ($i > 0 && isInt($active_args->[$i]) &&
+                 scalar(grep {$active_args->[$i - 1] eq $_} @$eflags))}
+          (0..$#{$active_args});
+    if(scalar(@extended_nums))
+      {$fallbacks->{extended} = sum(@extended_nums)}
+
+    #force
+    my $fflags =
+      [getOptStrFlags($def_option_hash->{force}->{PARAMS}->{FLAG})];
+    my @force_nums =
+      map {isInt($active_args->[$_]) ? $active_args->[$_] - 1 : 1}
+        grep {my $i = $_;
+              scalar(grep {$active_args->[$i] eq $_} @$fflags) ||
+                ($i > 0 && isInt($active_args->[$i]) &&
+                 scalar(grep {$active_args->[$i - 1] eq $_} @$fflags))}
+          (0..$#{$active_args});
+    if(scalar(@force_nums))
+      {$fallbacks->{force} = sum(@force_nums)}
+
+    #If there's a conflict on the command line
+    if($fallbacks->{quiet} && ($fallbacks->{debug} || $fallbacks->{verbose}))
+      {$fallbacks->{quiet} = 0}
+
+    if($fallbacks->{quiet} && $command_line_stage >= DEFAULTED &&
+       $def_option_hash->{verbose}->{ADDED})
+      {
+        #See if quiet/debug/verbose have a conflict with a programmer or user
+        #default, because they have to be explicitly over-ridable
+        my $vdef = hasDefault($usage_lookup->{verbose});
+        if($vdef)
+          {$fallbacks->{quiet} = 0}
+      }
+    elsif($fallbacks->{quiet} && $command_line_stage >= DEFAULTED &&
+          $def_option_hash->{debug}->{ADDED})
+      {
+        #See if quiet/debug/verbose have a conflict with a programmer or user
+        #default, because they have to be explicitly over-ridable
+        my $ddef = hasDefault($usage_lookup->{debug});
+        if($ddef)
+          {$fallbacks->{quiet} = 0}
+      }
+
+    #logfile - if the log file or the log file suffix option was created and
+    #supplied, the following will work if the options made it through validation
+    if($command_line_stage < VALIDATED)
+      {
+        #Re-initialize any options that were already added
+        #$command_line_stage = ARGSREAD if($command_line_stage < ARGSREAD);
+        stageVarref($usage_lookup->{verbose},$fallbacks->{verbose})
+          if(defined($usage_lookup->{verbose}) &&
+             exists($problem_hash->{verbose}));
+        stageVarref($usage_lookup->{quiet},$fallbacks->{quiet})
+          if(defined($usage_lookup->{quiet}) &&
+             exists($problem_hash->{quiet}));
+        stageVarref($usage_lookup->{debug},$fallbacks->{debug})
+          if(defined($usage_lookup->{debug}) &&
+             exists($problem_hash->{debug}));
+        stageVarref($usage_lookup->{extended},$fallbacks->{extended})
+          if(defined($usage_lookup->{extended}) &&
+             exists($problem_hash->{extended}));
+        stageVarref($usage_lookup->{error_lim},$fallbacks->{error_lim})
+          if(defined($usage_lookup->{error_lim}) &&
+             exists($problem_hash->{error_lim}));
+
+	#Commit what we can (this will not set options that had a mutex
+	#conflict - only those that have been properly staged)
+	commitAllVarrefs();
+      }
+    if($command_line_stage < LOGGING && scalar(@$problems) == 0)
+      {startLogging(1)}
+
+    return($fallbacks);
   }
 
 #This method creates a single-line trace.  It skips the call to this method and
@@ -13747,8 +18673,7 @@ sub getTrace
     #the programmer's script.  They don't need a reminder of where their own
     #errors, warnings, and debugs, called directly from their script, are
     #coming from (unless in pipeline mode).
-    my $script = $0;
-    $script =~ s/^.*\/([^\/]+)$/$1/;
+    my $script        = getScriptName();
     my $last_filename = $script;
 
     #For each sub, report the line inside the sub where the call originated
@@ -13813,33 +18738,80 @@ sub getTrace
 #run from inside another script.  In both cases, it is useful to know so that
 #messages on STDERR can be prepended with the script name so that the user
 #knows the source of any message
+#WARNING: Called from flushStderrBuffer.  DO NOT PUT calls to debug in here.
 sub inPipeline
   {
-    my $ppid = getppid();
-    my $siblings = `pgrep -P $ppid`;
+    if(defined($pipeline_auto))
+      {return($pipeline_auto)}
+
+    my $ppid     = getppid();
+    my $siblings = `pgrep -P $ppid -l`;
 
     #Return true if any sibling processes were detected
-    return(1) if($siblings =~ /\d/);
+    if($siblings =~ /\d/)
+      {
+        if(!isCaller('flushStderrBuffer','debug'))
+          {debug("inPipeline - siblings detected.",
+                 {LEVEL => -1,DETAIL => "pgrep output: [$siblings]."})}
+        $pipeline_auto = 1;
+        return(1);
+      }
 
-    #Return true if the parent is a script
-    return(calledInsideAScript($ppid));
+    #True if the parent is a script
+    $pipeline_auto = calledInsideAScript($ppid);
+
+    return($pipeline_auto);
+  }
+
+#This method guesses whether this script is running with serially run siblings
+#(i.e. in a script).  It uses lsof.  Cases where the script is intended to
+#return true: 1. 2. when the script is being run from inside a script being read
+#by an interpreter.  It is useful to know so that messages on STDERR can be
+#prepended with the script name so that the user knows the source of any message
+#and in determining the source of STDIN (e.g. not connected to a tty and
+#(possibly) not a pipe, but rather: inherited from the parent
+#WARNING: Called from flushStderrBuffer via inPipeline.  DO NOT PUT calls to
+#debug in here.
+sub calledInsideAScript
+  {
+    my $ppid = $_[0];
+
+    #Find out what file handles the parent process has open
+    my $parent_data = `lsof -w -b -p $ppid`;
+
+    #Return true if the parent has a read-only handle open on a regular file
+    #(implying it's reading a script - the terminal/shell does a read/write
+    #(mode 'u'))
+    if($parent_data =~ /\s+\d+r\s+REG\s+/)
+      {
+        if(!isCaller('flushStderrBuffer','debug'))
+          {debug("inPipeline - called inside a script.",
+                 {LEVEL => -1,DETAIL => "lsof output: [$parent_data]."})}
+        return(1);
+      }
+
+    return(0);
   }
 
 sub amIPipedTo
+  {return(isDebug(1) ? amIPipedToDebug(@_) : !-t STDIN && -p STDIN)}
+
+#This method is actually better for debugging purposes because lsof shows me
+#what pipe is being detected on STDIN.
+sub amIPipedToDebug
   {
     my $forced = defined($_[0]) ? $_[0] : 0;
     my $pipes  = getMyPipeData($forced);
     return($pipes->[0]);
   }
 
-sub amIPipedFrom
-  {
-    my $forced = defined($_[0]) ? $_[0] : 0;
-    my $pipes  = getMyPipeData($forced);
-    return($pipes->[1]);
-  }
-
 sub amIRedirectedTo
+  {return($command_line_stage >= COMMITTED && isDebug(1) ?
+          amIRedirectedToDebug(@_) : !-t STDIN && -f STDIN)}
+
+#This method is actually better for debugging purposes because lsof shows me
+#what file is being detected on STDIN.
+sub amIRedirectedToDebug
   {
     my $forced = defined($_[0]) ? $_[0] : 0;
 
@@ -13854,14 +18826,24 @@ sub amIRedirectedTo
 	my $infile = $1;
 
 	#Ignore lsof read lines that are this script
-	my $script = $0;
-	$script =~ s/^.*\/([^\/]+)$/$1/;
+	my $script    = getScriptName();
 	my $scriptpat = quotemeta($script);
 
 	if($infile !~ m%/$scriptpat$%)
-	  {return(1)}
-      }
+	  {
+            if(!$lsof_debugged && isDebug(1))
+              {
+                $lsof_debugged = 1;
+                debug("Standard input is redirected from: [$infile].",
+                      {DETAIL => 'If you did not provide this file on ' .
+                       'redirect, make sure you have not closed STDIN in the ' .
+                       "parent process.  This file was found in lsof output:" .
+                       "\n" . $handle_data});
+              }
 
+            return(1);
+          }
+      }
 
     return(0);
   }
@@ -13908,87 +18890,78 @@ sub getMyLsofData
     if(!$forced && defined($lsof_cache) && $lsof_cache ne '')
       {return($lsof_cache)}
 
-    $lsof_cache = `lsof -w -b -p $$`;
+    my $lsof_cmd = "lsof -w -b -p $$";
+    $lsof_cache = `$lsof_cmd 2> /dev/null`;
 
     return($lsof_cache);
   }
 
-#This method guesses whether this script is running with serially run siblings
-#(i.e. in a script).  It uses lsof.  Cases where the script is intended to
-#return true: 1. 2. when the script is being run from inside a script being read
-#by an interpreter.  It is useful to know so that messages on STDERR can be
-#prepended with the script name so that the user knows the source of any message
-#and in determining the source of STDIN (e.g. not connected to a tty and
-#(possibly) not a pipe, but rather: inherited from the parent
-sub calledInsideAScript
-  {
-    my $ppid = $_[0];
-
-    #Find out what file handles the parent process has open
-    my $parent_data = `lsof -w -b -p $ppid`;
-
-    #Return true if the parent has a read-only handle open on a regular file
-    #(implying it's reading a script - the terminal/shell does a read/write
-    #(mode 'u'))
-    return(1) if($parent_data =~ /\s+\d+r\s+REG\s+/);
-
-    return(0);
-  }
-
-#Do not call this method internally, as it could cause an infinite loop with
-#processCommandLine.  Instead, check $force
-#Globals used: $force
+#Do not call this method internally.  Instead, check $force
+#Globals used: $command_line_stage
 sub isForced
   {
-    unless($processCommandLine_called)
-      {processCommandLine()}
-    return($force);
+    unless($command_line_stage)
+      {
+	warning("isForced called before command line has been processed.");
+	processCommandLine();
+      }
+    return(getVarref('force',1));
   }
 
-#Do not call this method internally, as it could cause an infinite loop with
-#processCommandLine.  Instead, check $verbose
-#Globals used: $verbose
+#Do not call this method internally.  Instead, check $verbose
+#Globals used: $command_line_stage
 sub isVerbose
   {
-    unless($processCommandLine_called)
-      {processCommandLine()}
-    return($verbose);
+    unless($command_line_stage)
+      {
+	warning("isVerbose called before command line has been processed.");
+	processCommandLine();
+      }
+    return(getVarref('verbose',1));
   }
 
-#Do not call this method internally, as it could cause an infinite loop with
-#processCommandLine.  Instead, check $DEBUG
-#Globals used: $DEBUG
+#Do not call this method internally.  Instead, check $DEBUG
+#Globals used: $command_line_stage
 sub isDebug
   {
-    unless($processCommandLine_called)
-      {processCommandLine()}
-    return($DEBUG);
+    my $stgok = defined($_[0]) ? $_[0] : 0; #Internal usage only
+    unless($command_line_stage)
+      {
+	warning("isDebug called before command line has been processed.");
+	processCommandLine();
+      }
+    return(getVarref('debug',1,$stgok));
   }
 
-#Do not call this method internally, as it could cause an infinite loop with
-#processCommandLine.  Instead, check $header
-#Globals used: $header
+#Do not call this method internally.  Instead, check $header
 sub headerRequested
   {
-    unless($processCommandLine_called)
-      {processCommandLine()}
-    return($header);
+    unless($command_line_stage)
+      {
+	warning("headerRequested called before command line has been ",
+		"processed.");
+	processCommandLine();
+      }
+    return(getVarref('header',1,0));
   }
 
-#Do not call this method internally, as it could cause an infinite loop with
-#processCommandLine.  Instead, check $dry_run
+#Do not call this method internally.  Instead, check $dry_run
 #Globals used: $dry_run
 sub isDryRun
   {
-    unless($processCommandLine_called)
-      {processCommandLine()}
-    return($dry_run);
+    unless($command_line_stage)
+      {
+	warning("isDryRun called before command line has been processed.");
+	processCommandLine();
+      }
+    return(getVarref('dry_run',1));
   }
 
 sub setDefaults
   {
-    my @in = getSubParams([qw(HEADER ERRLIMIT COLLISIONMODE RUNMODE|DEFRUNMODE
-			      DEFSDIR UNPROCFILEWARN)],
+    my @in = getSubParams([qw(HEADER ERRLIMIT COLLISIONMODE DEFRUNMODE|RUNMODE
+			      DEFSDIR UNPROCFILEWARN REPORT VERBOSE QUIET
+			      DEBUG)],
 			  [],[@_]);
     my $header_def     = $in[0];
     my $errlimit_def   = $in[1];
@@ -13996,11 +18969,28 @@ sub setDefaults
     my $runmode_def    = $in[3];
     my $defs_dir       = $in[4];
     my $unprocwarn_def = $in[5];
+    my $report_def     = $in[6];
+    my $verbose_def    = $in[7];
+    my $quiet_def      = $in[8];
+    my $debug_def      = $in[9];
 
     my $errors = 0;
 
+    if($command_line_stage >= ARGSREAD)
+      {
+	error("Cannot call setDefaults after the command line has been ",
+	      "processed.");
+	quit(-20);
+	return(1);
+      }
+
     if(defined($header_def) && ($header_def == 0 || $header_def == 1))
-      {$header = $header_def}
+      {
+	if(!$def_option_hash->{header}->{ADDED})
+	  {$def_option_hash->{header}->{PARAMS}->{DEFAULT} = $header_def}
+	else
+	  {$usage_lookup->{header}->{DEFAULT_PRG} = $header_def}
+      }
     elsif(defined($header_def))
       {
 	error("Invalid HEADER value: [$header_def].  Must be 0 or 1.");
@@ -14008,7 +18998,12 @@ sub setDefaults
       }
 
     if(defined($errlimit_def) && $errlimit_def =~ /^\d+$/)
-      {$error_limit = $errlimit_def}
+      {
+	if(!$def_option_hash->{error_lim}->{ADDED})
+	  {$def_option_hash->{error_lim}->{PARAMS}->{DEFAULT} = $errlimit_def}
+	else
+	  {$usage_lookup->{error_lim}->{DEFAULT_PRG} = $errlimit_def}
+      }
     elsif(defined($errlimit_def))
       {
 	error("Invalid ERRLIMIT value: [$errlimit_def].  Must be an unsigned ",
@@ -14030,7 +19025,7 @@ sub setDefaults
     if(defined($runmode_def) &&
        ($runmode_def eq 'run'  || $runmode_def eq 'dry-run' ||
 	$runmode_def eq 'help' || $runmode_def eq 'usage'))
-      {$default_run_mode = $runmode_def}
+      {setDefaultRunMode($runmode_def)}
     elsif(defined($runmode_def))
       {
 	error("Invalid DEFRUNMODE value: [$runmode_def].  Must be one of ",
@@ -14055,14 +19050,169 @@ sub setDefaults
 	$errors++;
       }
 
+    if(defined($report_def) &&
+       ($report_def == 0 || $report_def == 1 || $report_def == 2))
+      {$runreport = $report_def}
+    elsif(defined($report_def))
+      {
+	error("Invalid REPORT: [$report_def].  Must be 0 or 1.");
+	$errors++;
+      }
+
+    if(defined($quiet_def) && ($quiet_def == 0 || $quiet_def == 1))
+      {
+	if(!$def_option_hash->{quiet}->{ADDED})
+	  {$def_option_hash->{quiet}->{PARAMS}->{DEFAULT} = $quiet_def}
+	else
+	  {$usage_lookup->{quiet}->{DEFAULT_PRG} = $quiet_def}
+      }
+    elsif(defined($quiet_def))
+      {
+	error("Invalid QUIET: [$quiet_def].  Must be 0 or 1.");
+	$errors++;
+      }
+
+    if(defined($quiet_def) && $quiet_def &&
+       ((defined($verbose_def) && $verbose_def) ||
+	(defined($debug_def) && $debug_def)))
+      {
+	error("QUIET and VERBOSE or DEBUG conflict.  Cannot be in quiet mode ",
+	      "when also in verbose and/or debug mode.");
+	$errors++;
+      }
+
+    if(defined($verbose_def) && isInt($verbose_def))
+      {
+	if(!$def_option_hash->{verbose}->{ADDED})
+	  {$def_option_hash->{verbose}->{PARAMS}->{DEFAULT} = $verbose_def}
+	else
+	  {$usage_lookup->{verbose}->{DEFAULT_PRG} = $verbose_def}
+      }
+    elsif(defined($verbose_def))
+      {
+	error("Invalid VERBOSE: [$verbose_def].  Must be an integer.");
+	$errors++;
+      }
+
+    if(defined($debug_def) && isInt($debug_def))
+      {
+	if(!$def_option_hash->{debug}->{ADDED})
+	  {$def_option_hash->{debug}->{PARAMS}->{DEFAULT} = $debug_def}
+	else
+	  {$usage_lookup->{debug}->{DEFAULT_PRG} = $debug_def}
+      }
+    elsif(defined($debug_def))
+      {
+	error("Invalid DEBUG: [$debug_def].  Must be an integer.");
+	$errors++;
+      }
+
     if($errors > 0)
       {
-	quit(-66);
+	quit(-44);
 	return(1);
       }
 
     return(0);
   }
+
+#Globals used: $log_handle, $logging, $logfile_suffix_added, $logfile_added,
+#$logfile_optid, $logfile_suffix_optid, $log_header
+sub startLogging
+  {
+    my $override_stage = defined($_[0]) ? $_[0] : 0;
+
+    if(!$command_line_stage && !$override_stage)
+      {processCommandLine()}
+
+    my $stgok = $override_stage ? 1 : undef;
+
+    $logging = 0;
+
+    my($logfile,$usg_hash);
+    if($logfile_suffix_added && $logfile_added)
+      {
+        if(optionIDToMutualParam($logfile_optid,'VALIDATED'))
+          {return($logging)}
+
+	my $lf_uhash = $usage_array->[$logfile_optid];
+	my $ls_uhash = $usage_array->[$logfile_suffix_optid];
+	my $st_uhash = $usage_array->[$ls_uhash->{PAIRID}];
+	if(hasValue('logfile',getVarref($lf_uhash,undef,$stgok)) &&
+	   hasValue('logsuff',getVarref($ls_uhash,undef,$stgok)) &&
+	   hasValue($st_uhash->{OPTTYPE},getVarref($st_uhash,undef,$stgok)))
+	  {
+	    error('Logfile and logfile suffix both supplied.  Only 1 is ',
+		  'allowed.');
+	    return($logging);
+	  }
+	elsif(hasValue('logfile',getVarref($lf_uhash,undef,$stgok)))
+	  {
+	    $logfile = getVarref($lf_uhash,1,$stgok);
+	    $usg_hash = $lf_uhash;
+	  }
+	elsif(hasValue('logsuff',getVarref($ls_uhash,undef,$stgok)) &&
+	      hasValue($st_uhash->{OPTTYPE},getVarref($st_uhash,undef,$stgok)))
+	  {
+	    $logfile = getVarref($st_uhash,1) . getVarref($ls_uhash,1,$stgok);
+	    $usg_hash = $ls_uhash;
+	  }
+	else
+	  {return($logging)}
+      }
+    elsif($logfile_added)
+      {
+	my $lf_uhash = $usage_array->[$logfile_optid];
+	if(hasValue('logfile',getVarref($lf_uhash,undef,$stgok)))
+	  {
+	    $logfile = getVarref($lf_uhash,1,$stgok);
+	    $usg_hash = $lf_uhash;
+	  }
+	else
+	  {return($logging)}
+      }
+    elsif($logfile_suffix_added)
+      {
+	my $ls_uhash = $usage_array->[$logfile_suffix_optid];
+	my $st_uhash = $usage_array->[$ls_uhash->{PAIRID}];
+	if(hasValue('logsuff',getVarref($ls_uhash,undef,$stgok)) &&
+	   hasValue($st_uhash->{OPTTYPE},getVarref($st_uhash,undef,$stgok)))
+	  {
+	    $logfile = getVarref($st_uhash) . getVarref($ls_uhash,undef,$stgok);
+	    $usg_hash = $ls_uhash;
+	  }
+	else
+	  {return($logging)}
+      }
+    else
+      {return($logging)}
+
+    my $handle = *LOG;
+
+    $logging = openOut(HANDLE => $handle,
+		       FILE   => $logfile,
+		       SELECT => 0,
+		       QUIET  => -1,
+		       HEADER => $log_header,
+		       APPEND => $usg_hash->{APPEND_MODE},
+		       MERGE  => 1);
+
+    if($logging)
+      {$log_handle = $handle}
+    elsif($error_number)
+      {
+        #Logging will be attempted a second time in cleanup mode, which will
+        #thwart forcing, so do not call a second time (in cleanup_mode)
+        my $force = getVarref('force',1,0);
+        quit(-4) if(!$force && $cleanup_mode);
+      }
+
+    return($logging);
+  }
+
+#Globals used: $log_handle, $logging
+sub stopLogging
+  {closeOut($log_handle) if($logging)}
 
 ##
 ## This method prints a description of the script and it's input and output
@@ -14074,17 +19224,15 @@ sub help
     ##TODO: Give the programmer a way to set IGNORE_UNSUPPLIED in all
     ##      instances.  See requirement 185
     my @in       = getSubParams([qw(ADVANCED IGNORE_UNSUPPLIED)],[],[@_]);
-    my $script   = $0;
+    my $script   = getScriptName();
     my $advanced = $in[0];
     my $ignore   = $in[1];
     my @stat     = stat($script);
     my $ctime    = @stat && defined($stat[9]) ? $stat[9] : scalar(time);
     my $lmd      = localtime($ctime);
 
-    unless($processCommandLine_called)
+    unless($command_line_stage)
       {processCommandLine()}
-
-    $script =~ s/^.*\/([^\/]+)$/$1/;
 
     $script_version_number = 'UNKNOWN'
       if(!defined($script_version_number));
@@ -14094,11 +19242,7 @@ sub help
 
     my $custom_help = customHelp($ignore,$advanced);
 
-    if(getRunModeStatus() != 1 || $default_run_mode ne 'usage')
-      {
-	$custom_help .= "\n\n";
-	$custom_help .= "Supply --usage to see usage output.";
-      }
+    my $drm = getDefaultRunMode();
 
     #Print a description of this program
     print << "end_print";
@@ -14108,10 +19252,9 @@ Created: $created_on_date
 Last Modified: $lmd
 
 $custom_help
-
 end_print
 
-    if($advanced)
+    if($advanced > 1)
       {
 	my $legend = "USAGE LEGEND\n\n";
 	$legend .=
@@ -14119,8 +19262,9 @@ end_print
 		    [11,1],[0,1,1],[0,0,0]);
 	$legend .=
 	  alignCols(['~','=',
-		     join('',('Required option, but has a default value, thus ',
-			      'effectively optional.'))],
+		     join('',('Required option, but it (or a mutually ',
+                              'exclusive partner) has a default value, thus ',
+                              'is effectively optional.'))],
 		    [11,1],[0,1,1],[0,0,0]);
 	$legend .=
 	  alignCols(['^','=',
@@ -14225,12 +19369,12 @@ end_print
 			      "dash character ('-') as an argument, which ",
 			      'stands for either "read from STDIN" or "write ',
 			      'to STDOUT", depending on the file flag type.  ',
-			      (!defined($primary_infile_type) ? '' :
+			      (!defined($primary_infile_optid) ? '' :
 			       "Infile option " .
-			       getInfileFlag($primary_infile_type) . " will " .
-			       "recognize input on standard in automatically " .
-			       "and thus does not require a dash to be " .
-			       "supplied" .
+			       getFlag($usage_array->[$primary_infile_optid]) .
+			       " will recognize input on standard in " .
+			       "automatically and thus does not require a " .
+			       "dash to be supplied" .
 			       (getNumInfileTypes() < 2 ? '.  ' :
 				' (unless a dash is supplied to one of the ' .
 				'other infile options).  ')),
@@ -14330,7 +19474,7 @@ end_print
 	my $header = '                 ' .
 	  join("\n                 ",split(/\n/,getHeader()));
 
-	my $odf = getOutdirFlag(2);
+	my $odf = getOutdirFlag(undef,2);
 
 	print("ADVANCED\n========\n\n",
 	      alignCols(['* HEADER FORMAT:',
@@ -14456,19 +19600,27 @@ If this script has multiple types of file options (which are processed together)
 
 end_print
       }
-    elsif($advanced)
-      {print("Supply `--help --extended 2` for details on advanced interface ",
-	     "options.\n\n")}
+
+    if($advanced == 1)
+      {print('Supply `',($drm ne 'help' ? '--help ' : ''),'--extended 2` ',
+             "for details on advanced interface options.\n")}
+    elsif($advanced == 0)
+      {print('Supply ',($drm ne 'help' ? '--help ' : ''),'--extended for ',
+             "detailed help.\n")}
+
+    if(getRunStatus() != 1 || $drm ne 'usage')
+      {print("Supply --usage to see list of options.\n\n")}
     else
-      {print("Supply `--help --extended` for advanced help.\n\n")}
+      {print("\n")}
 
     return(0);
   }
 
 sub customUsage
   {
-    my $local_extended = defined($_[0]) ? $_[0] :
-      (defined($extended) ? $extended : 0);
+    my $extended       = getVarref('extended',1,1);
+    my $local_extended = (defined($_[0]) ? $_[0] :
+			  (defined($extended) ? $extended : 0));
 
     my $short = '';
     my $long  = '';
@@ -14476,39 +19628,30 @@ sub customUsage
     my($short_flag_col_width,$long_flag_col_width) =
       getUsageFlagColWidths();
 
-    #We want to keep the order the programmer added the options, except to
-    #require that required options be first and that the combo variable option
-    #'run|dry-run' (see addRunModeOptions) be the very first (if it was
-    #added), so we'll save the order the user added the options.
-    my $pos_hash = {};
-    my $opt_cnt = 0;
-    foreach my $usage_hash (@$usage_array)
-      {$pos_hash->{$usage_hash} = $opt_cnt++}
+    assignUsageOrder();
 
-    my $combo_flag = 'run|dry-run';
-
-    my $advanced_header = 0;
+    my $current_heading = '';
     my($flags_remainder,$short_desc_remainder,$long_desc_remainder);
-    foreach my $usage_hash (grep {(!$_->{HIDDEN} && !$_->{ADVANCED}) ||
-				    ($_->{HIDDEN} && $extended > 2) ||
-				       ($_->{ADVANCED} && !$_->{HIDDEN} &&
-					$extended > 1)}
-			    sort {#Put --extended last
-			      ($a->{GETOPTKEY} eq 'extended:+') <=>
-				($b->{GETOPTKEY} eq 'extended:+') ||
-				  (defined($a->{ADVANCED}) && $a->{ADVANCED})
-				    <=> (defined($b->{ADVANCED}) &&
-					 $b->{ADVANCED}) ||
-					   ($b->{REQUIRED} || $b->{TTREQD}) <=>
-					     ($a->{REQUIRED} || $a->{TTREQD}) ||
-					       (join('|',@{$b->{OPTFLAG}}) eq
-						$combo_flag) <=>
-						  (join('|',@{$a->{OPTFLAG}}) eq
-						   $combo_flag) ||
-						     $pos_hash->{$a} <=>
-						       $pos_hash->{$b}}
+    foreach my $usage_hash (sort {$a->{USAGE_ORDER} <=> $b->{USAGE_ORDER}}
 			    @$usage_array)
       {
+	#If there's a heading
+	if($usage_hash->{HEADING} ne '')
+	  {$current_heading = $usage_hash->{HEADING}}
+
+	#Skip options based on HIDDEN, ADVANCED, and value of $extended
+	next if(($usage_hash->{HIDDEN}   && $extended < 3) ||
+                ($usage_hash->{ADVANCED} && $extended < 2));
+
+	#If a heading was in a hidden or advanced option's settings and that
+	#option is not a part of this usage message, it will be held onto until
+	#something in that section is encountered that will be displayed
+	if($current_heading ne '')
+	  {
+	    $long .= "$current_heading\n\n";
+	    $current_heading = '';
+	  }
+
 	my $short_flags = getUsageFlags($usage_hash,1);
 	my $long_flags  = getUsageFlags($usage_hash);
 	my $short_desc  = $usage_hash->{SUMMARY};
@@ -14540,27 +19683,66 @@ sub customUsage
 	      }
 	  }
 
+	my $mutually_required = 0;
+	my $hidden_mutexes    = 0;
+	my $default_mutexes   = 0;
+	if(exists($exclusive_lookup->{$usage_hash->{OPTION_ID}}))
+	  {
+	    my $optid = $usage_hash->{OPTION_ID};
+
+	    foreach my $exclid (keys(%{$exclusive_lookup->{$optid}}))
+	      {
+		my $num_hidden = 0;
+
+		#If this option is part of a mutually exclusive group where one
+		#is required
+		if(exists($mutual_params->{$exclid}) &&
+		   exists($mutual_params->{$exclid}->{REQUIRED}) &&
+		   $mutual_params->{$exclid}->{REQUIRED})
+		  {$mutually_required = 1}
+
+		my $num = scalar(@{$exclusive_options->[$exclid]}) - 1;
+		foreach my $oid (@{$exclusive_options->[$exclid]})
+		  {
+		    if($usage_array->[$oid]->{HIDDEN})
+		      {$num_hidden++}
+		    if(hasDefault($usage_array->[$oid]))
+		      {$default_mutexes = 1}
+		  }
+		if($num_hidden >= $num)
+		  {$hidden_mutexes = 1}
+	      }
+	  }
 	my $required = '';
 	if((exists($usage_hash->{REQUIRED}) &&
 	    defined($usage_hash->{REQUIRED}) && $usage_hash->{REQUIRED}) ||
-	   #Indiv. opts are made optional when in a tagteam, so we must check:
-	   $usage_hash->{TTREQD})
+	   $mutually_required)
 	  {
-	    if(hasDefinedDefault($usage_hash))
-	      {$required = '~'}
-	    #1 of 2 tagteam options is required and 1 is hidden
-	    elsif($usage_hash->{TTREQD} && $usage_hash->{TTHIDN})
-	      {$required = '*'}
-	    #1 of 2 tagteam options is required and 0 or 2 are hidden
-	    elsif($usage_hash->{TTREQD} && !$usage_hash->{TTHIDN})
-	      {$required = '^'}
+	    if($mutually_required)
+	      {
+		if($default_mutexes)
+		  {
+                    #Only show the ~ in advanced mode
+                    $required = $local_extended > 1 ? '~' : '';
+                  }
+		#1 of 2 tagteam options is required and 1 is hidden
+		elsif($hidden_mutexes)
+		  {$required = '*'}
+		else
+		  {$required = '^'}
+	      }
+	    elsif(hasDefault($usage_hash))
+	      {
+                #Only show the ~ in advanced mode
+                $required = $local_extended > 1 ? '~' : '';
+              }
 	    else
 	      {$required = '*'}
 	  }
 
 	#Add the default string if it's defined and not already manually added
 	#to the short description
-	my $default  = displayDefault($usage_hash);
+	my $default = displayDefault($usage_hash);
 	if($default ne '' && defined($short_desc) && $short_desc ne '' &&
 	   $short_desc !~ /^\[/)
 	  {
@@ -14588,17 +19770,6 @@ sub customUsage
 	      {$long_desc =~ s/\]\s*/\] /}
 	  }
 
-	if(!$advanced_header && $usage_hash->{ADVANCED} &&
-	   ((defined($long_desc) && $long_desc ne '') ||
-	    (defined($short_desc) && $short_desc ne '')))
-	  {
-	    $advanced_header = 1;
-	    $long .= "ADVANCED\n\n";
-	  }
-
-	if($advanced_header && $usage_hash->{GETOPTKEY} eq 'extended:+')
-	  {$long .= "\n"}
-
 	if(defined($short_desc) && $short_desc ne '')
 	  {$short .= alignCols([$required,$short_flags,$short_desc],
 			       [1,$short_flag_col_width],
@@ -14621,6 +19792,88 @@ sub customUsage
     return($short,$long);
   }
 
+sub isEffectivelyRequired
+  {
+    my $usage_hash = $_[0];
+
+    my $required          = 0;
+    my $mutually_required = 0;
+    my $hidden_mutexes    = 0;
+    my $default_mutexes   = 0;
+    if(exists($exclusive_lookup->{$usage_hash->{OPTION_ID}}))
+      {
+        my $optid = $usage_hash->{OPTION_ID};
+
+        foreach my $exclid (keys(%{$exclusive_lookup->{$optid}}))
+          {
+            my $num_hidden = 0;
+
+            #If this option is part of a mutually exclusive group where one
+            #is required
+            if(exists($mutual_params->{$exclid}) &&
+               exists($mutual_params->{$exclid}->{REQUIRED}) &&
+               $mutual_params->{$exclid}->{REQUIRED})
+              {$mutually_required = 1}
+
+            my $num = scalar(@{$exclusive_options->[$exclid]}) - 1;
+            foreach my $oid (@{$exclusive_options->[$exclid]})
+              {
+                if($usage_array->[$oid]->{HIDDEN})
+                  {$num_hidden++}
+                if(hasDefault($usage_array->[$oid]))
+                  {$default_mutexes = 1}
+              }
+            if($num_hidden >= $num)
+              {$hidden_mutexes = 1}
+          }
+      }
+
+    if((exists($usage_hash->{REQUIRED}) &&
+        defined($usage_hash->{REQUIRED}) && $usage_hash->{REQUIRED}) ||
+       $mutually_required)
+      {
+        if(($mutually_required && !$default_mutexes) ||
+           (!$mutually_required && !hasDefault($usage_hash)))
+          {$required = 1}
+      }
+
+    return($required);
+  }
+
+sub assignUsageOrder
+  {
+    my $num_options = scalar(@$usage_array);
+    my %taken_nums  = ();
+    my $warned      = 0;
+    foreach my $uh (grep {defined($_->{USAGE_ORDER})} @$usage_array)
+      {
+	my $position = $uh->{USAGE_ORDER};
+	if($position < 0)
+	  {
+	    $position = ($uh->{USAGE_ORDER} < 0 ?
+			 $num_options + 1 + $uh->{USAGE_ORDER} :
+			 $uh->{USAGE_ORDER});
+	    if($position < 0)
+	      {
+		warning("Negative usage order out of bounds.  Using modulus.");
+		$position = $num_options + 1 + ($position % $num_options);
+	      }
+	    $uh->{USAGE_ORDER} = $position;
+	  }
+	if(!$warned && exists($taken_nums{$position}))
+	  {
+	    warning("Multiple options assigned to the same position in the ",
+		    "usage order.");
+	    $warned = 1;
+	  }
+	$taken_nums{$position} = 0;
+      }
+    my @avail_nums  = (grep {!exists($taken_nums{$_})}
+		       (1..scalar(@$usage_array)));
+    foreach my $uh (grep {!defined($_->{USAGE_ORDER})} @$usage_array)
+      {$uh->{USAGE_ORDER} = shift(@avail_nums)}
+  }
+
 ##TODO: Add support for setting multiple times. (Currently only called by usage/
 ##      help.)
 sub getWindowWidth
@@ -14631,7 +19884,13 @@ sub getWindowWidth
 	#If the output is piped, or to a file, return the default
 	if(isStandardOutputToTerminal())
 	  {
-	    eval('use Term::ReadKey;1') || return($window_width);
+            my $orig_sigd = $SIG{__DIE__};
+            $SIG{__DIE__} = sub {debug({DETAIL => 'Term::ReadKey eval ERROR: ',
+                                        LEVEL  => -2},@_)};
+	    my $present   = eval('use Term::ReadKey;1');
+            $SIG{__DIE__} = $orig_sigd;
+            if(!$present)
+              {return($window_width)}
 	    $window_width = (GetTerminalSize())[0];
 	  }
 	return($window_width);
@@ -14641,6 +19900,7 @@ sub getWindowWidth
 
 sub getUsageFlagColWidths
   {
+    my $extended             = getVarref('extended',1,1);
     my $max_flag_col_width   = 24;
     my $short_flag_col_width = 0;
     my $long_flag_col_width  = 0;
@@ -14683,16 +19943,17 @@ sub getUsageFlagColWidths
 
 #Takes the usage hash of 1 option and returns the flags with arguments as they
 #are to be displayed in the detailed usage output.
-#Globals used: $extended,$GetOptHash
 sub getUsageFlags
   {
     my $usghash = $_[0];
     my $minmode = $_[1];
 
     #Prepare the list of flags
-    my @flaglist = @{$usghash->{OPTFLAG}};
+    my @flaglist = @{$usghash->{OPTFLAGS}};
     if($usghash->{FLAGLESS})
       {unshift(@flaglist,'')}
+
+    debug({LEVEL => -1},"Starting flag list: [",join(',',@flaglist),"].");
 
     my $flagstr =
       join("\n",
@@ -14707,7 +19968,7 @@ sub getUsageFlags
 	       {
 		 $en = join(',',@{$usghash->{ACCEPTS}});
 		 if(length($en) > 60)
-		   {$en =~ s/(.{57})/$1.../}
+		   {$en =~ s/(.{57}).*/$1.../}
 	       }
 
 	     my $dl = '';
@@ -14743,7 +20004,8 @@ sub getUsageFlags
 		   {$nf = "--no-$nf"}
 		 else
 		   {$nf = "--no$nf"}
-		 my $def = ${$GetOptHash->{$usghash->{GETOPTKEY}}};
+		 my $def = defined($usghash->{DEFAULT_USR}) ?
+		   $usghash->{DEFAULT_USR} : $usghash->{DEFAULT_PRG};
 		 if(!defined($def))
 		   {($f,$nf)}
 		 elsif($def)
@@ -14778,9 +20040,12 @@ sub getUsageFlags
 	     elsif($usghash->{OPTTYPE} eq 'infile' ||
 		   $usghash->{OPTTYPE} eq 'outfile')
 	       {"$_<file*...>..."}
+	     elsif($usghash->{OPTTYPE} eq 'logfile')
+	       {"$_<file>"}
 	     elsif($usghash->{OPTTYPE} eq 'outdir')
 	       {"$_<dir*...>..."}
-	     elsif($usghash->{OPTTYPE} eq 'suffix')
+	     elsif($usghash->{OPTTYPE} eq 'suffix' ||
+		   $usghash->{OPTTYPE} eq 'logsuff')
 	       {"$_<sfx>"}
 	     else
 	       {"$_ ?ERROR?"}
@@ -14789,8 +20054,9 @@ sub getUsageFlags
 	     #Append stdin & stub/dash for primary/non-primary input files
 	     ($usghash->{OPTTYPE} eq 'infile' ?
 	      ($usghash->{PRIMARY} ? "\n< <file>\n" .
-	       getDefaultFlag($usghash->{OPTFLAG}) . ' <stub> < <file>' :
-	       "\n" . getDefaultFlag($usghash->{OPTFLAG}) .
+	       (hasLinkedSuffix($usghash) ?
+		getDefaultFlag($usghash->{OPTFLAGS}) . ' <stub> < <file>' :
+		'') : "\n" . getDefaultFlag($usghash->{OPTFLAGS}) .
 	       ' - < <file>') : '') .
 
 		 ($usghash->{HIDDEN} ? "\n[HIDDEN-OPTION]" : '');
@@ -14803,67 +20069,197 @@ sub getUsageFlags
     return($flagstr);
   }
 
+#This sub takes a usage hash and determines whether there exists an outfile
+#suffix type that is linked to it.
+sub hasLinkedSuffix
+  {
+    my $usghash = $_[0];
+    if($usghash->{OPTTYPE} ne 'infile')
+      {
+	error("Option type not infile: [$usghash->{OPTTYPE}].");
+	return(0);
+      }
+
+    return(scalar(grep {$_->{OPTTYPE} eq 'suffix' &&
+			  $_->{PAIRID} == $usghash->{OPTION_ID}}
+		  @$usage_array));
+  }
+
 sub showDefault
   {
-    my $type    = $_[0];
-    my $ref     = $_[1];
-    my $default = $_[2];
+    my $usg_hash = $_[0];
 
-    if($type ne 'bool' && $type ne 'negbool' && $type ne 'count')
+    my $type     = $usg_hash->{OPTTYPE};
+    my $is_udef  = $usg_hash->{SUPPLIED_UDF};
+    my $def      = getDefault($usg_hash);
+    my $dispdef  = $usg_hash->{DISPDEF};
+
+    #Always show a defined display default
+    if(!$is_udef && defined($dispdef))
+      {return(1)}
+    elsif($type ne 'bool' && $type ne 'negbool' && $type ne 'count')
       {return(1)}
     elsif($type eq 'bool')
-      {return(defined($default) && $default ne '' && $default ne '0')}
-    elsif($type eq 'negbool') #Only show a negatable boolean's def if the
-                              #default is defined and the value is undefined
-      {return(defined($default) && (!defined($ref) || !defined($$ref)))}
-    elsif($type eq 'count')   #Only show a count's def if it's non-0
-      {return(defined($default) && $default != 0)}
+      {return(defined($def) && $def ne '' && $def ne '0')}
+    #Never show a negbool default (unless dispdef is true above)
+    elsif($type eq 'negbool')
+      {return(0)}
+    #Only show a count's def if it is non-0
+    elsif($type eq 'count')
+      {return(defined($def) && $def != 0)}
 
     return(1);
   }
 
-#Globals used: $GetOptHash
 sub displayDefault
   {
     my $usage_hash = $_[0];
-    my $disp = '';
-    if(showDefault($usage_hash->{OPTTYPE},
-                   $GetOptHash->{$usage_hash->{GETOPTKEY}},
-                   $usage_hash->{DEFAULT}))
-      {
-        my $undef    = '';
-        my $emptystr = '[]';
+    my $disp       = '';
 
+    if(showDefault($usage_hash))
+      {
+	my $undef    = '';
+        my $emptystr = '[] ';
         #Empty string defaults for these types make no sense and imply the
         #default is undefined, so don't display square brackets
         if($usage_hash->{OPTTYPE} =~ /file/ ||
-           $usage_hash->{OPTTYPE} =~ /suffix/ ||
            $usage_hash->{OPTTYPE} =~ /integer/ ||
            $usage_hash->{OPTTYPE} =~ /float/ ||
            $usage_hash->{OPTTYPE} =~ /enum/ ||
            $usage_hash->{OPTTYPE} eq 'outdir')
           {$emptystr = ''}
 
-        if(defined($usage_hash->{DEFAULT}))
-          {
-            if($usage_hash->{DEFAULT} eq '')
-              {
-                if(defined($GetOptHash->{$usage_hash->{GETOPTKEY}}))
-                  {$disp = $emptystr}
-                else
-                  {$disp = $undef}
-              }
-            else
-              {$disp = "[$usage_hash->{DEFAULT}]"}
-          }
-        else
-          {$disp = $undef}
+        my $defval = getDefault($usage_hash);
+
+	if(defined($defval) && hasValue($usage_hash->{OPTTYPE},
+                                        $usage_hash->{DEFAULT_USR},
+                                        1))
+	  {
+	    if(ref($defval) eq '')
+	      {
+		if($defval eq '')
+		  {$disp = $emptystr}
+		else
+		  {
+		    if($usage_hash->{OPTTYPE} eq 'bool' && $defval)
+		      {$disp = "[On] "}
+		    else
+		      {$disp = "[$defval] "}
+		  }
+	      }
+	    elsif(ref($defval) eq 'ARRAY')
+	      {
+		$disp = displayDefaultArray($defval);
+		if(defined($disp))
+		  {$disp = "[$disp] "}
+		else
+		  {$disp = $undef}
+	      }
+	    else
+	      {error("Invalid/unsupported user default reference.")}
+	  }
+	elsif(!$usage_hash->{SUPPLIED_UDF} && defined($usage_hash->{DISPDEF}))
+	  {
+	    if($usage_hash->{DISPDEF} eq '')
+	      {
+		#Special case: treat empty string as no default if the
+		#programmer supplied a code reference and no DEFAULT, regardless
+		#of option type
+		if(!canGetRealDefault($usage_hash) && !defined($defval))
+		  {$disp = ''}
+		else
+		  {$disp = $emptystr}
+	      }
+	    else
+	      {$disp = "[$usage_hash->{DISPDEF}] "}
+	  }
+	elsif(defined($defval))
+	  {
+	    if(ref($defval) eq '')
+	      {
+		if($defval eq '')
+		  {$disp = $emptystr}
+		else
+		  {
+		    if($usage_hash->{OPTTYPE} eq 'bool' && $defval)
+		      {$disp = "[On] "}
+		    else
+		      {$disp = "[$defval] "}
+		  }
+	      }
+	    elsif(ref($defval) eq 'ARRAY')
+	      {
+		$disp = displayDefaultArray($defval);
+		if(defined($disp))
+		  {$disp = "[$disp] "}
+		else
+		  {$disp = $undef}
+	      }
+	    else
+	      {error("Invalid/unsupported default reference.")}
+	  }
+	elsif(!canGetRealDefault($usage_hash))
+	  {
+            #TODO: Add DEBUG param to warning() params
+	    if(isDebug())
+	      {warning('Cannot retrieve display default value for [',
+		       getBestFlag($usage_hash),'].  Default in usage will be ',
+		       'displayed as "default unknown".',
+		       {DETAIL => ('The script author supplied a subroutine ' .
+				   'reference for this option and did not ' .
+				   'supply a display default value ' .
+				   '(DISPDEF).  Users can supply a default ' .
+				   'using [' .
+				   getBestFlag($usage_lookup->{save_args}) .
+				   '].')})}
+	    $disp = '[default unknown] ';
+	  }
+	else
+	  {$disp = $undef}
       }
 
     return($disp);
   }
 
-#$usage_hash->{DEFAULT} is only for display purposes. This sub checks the actual
+sub displayDefaultArray
+  {
+    my $default  = $_[0];
+    my $extended = getVarref('extended',1,1);
+    my($def_str);
+
+    if(defined($default) && ref($default) eq 'ARRAY' &&
+       scalar(grep {ref($_) ne 'ARRAY'} @$default) == 0 &&
+       scalar(grep {my $a=$_;scalar(grep {ref($_) ne ''} @$a)} @$default) == 0)
+      {
+	my $addparens =
+	  (scalar(@$default) > 1 ||
+	   (scalar(@$default) == 1 && scalar(@{$default->[0]}) > 1));
+	$def_str = ($addparens ? '(' : '') .
+	  join('),(',map {my $a = $_;
+			  join(',',map {defined($_) ? $_ : 'undef'} @$a)}
+	       @$default) . ($addparens ? ')' : '');
+      }
+    elsif(defined($default) && ref($default) eq 'ARRAY' &&
+	  scalar(grep {ref($_) ne ''} @$default) == 0)
+      {
+	$def_str  = join(',',map {defined($_) ? $_ : 'undef'} @$default);
+      }
+    elsif(defined($default))
+      {
+	warning("Default array value supplied to displayDefaultArray must be ",
+		"a reference to an array of scalars or a reference to an ",
+		"array of references to arrays of scalars.");
+      }
+
+    #If the default string is defined, extended is < 3, and the length is less
+    #than the default display max, shorten the string with an ellipsis
+    if(defined($def_str) && $extended < 3 && length($def_str) < $dispdef_max)
+      {$def_str = clipStr($def_str,$dispdef_max)}
+
+    return($def_str);
+  }
+
+#$usage_hash->{DISPDEF} is only for display purposes. This sub checks the actual
 #default value either in the reference variable or the default saved elsewhere
 sub hasDefinedDefault
   {
@@ -14874,16 +20270,117 @@ sub hasDefinedDefault
     #may not be true)
     ##TODO: Check the actual default, which includes checking things like the
     #default_infiles_array, etc.
-    if(defined($usage_hash->{DEFAULT}) && $usage_hash->{DEFAULT} ne '')
+    if(hasDefinedDisplayDefault($usage_hash) ||
+       hasDefinedActualDefault($usage_hash))
       {return(1)}
 
     return(0);
   }
 
-#Globals used: $help_summary, $advanced_help, $extended
+sub hasDefinedDisplayDefault
+  {
+    my $usage_hash = $_[0];
+    return(defined($usage_hash->{DISPDEF}) && $usage_hash->{DISPDEF} ne '');
+  }
+
+sub hasDefinedActualDefault
+  {
+    my $usage_hash = $_[0];
+
+    if(!canGetRealDefault($usage_hash))
+      {
+	debug("Unable to determine default value for option [",
+	      getDefaultFlag($usage_hash->{OPTFLAGS}),"].");
+	return(0);
+      }
+
+    my $def = getRealDefault($usage_hash);
+
+    if($usage_hash->{OPTTYPE} eq 'string'  ||
+       $usage_hash->{OPTTYPE} eq 'integer' ||
+       $usage_hash->{OPTTYPE} eq 'float'   ||
+       $usage_hash->{OPTTYPE} eq 'enum'    ||
+       $usage_hash->{OPTTYPE} eq 'bool'    ||
+       $usage_hash->{OPTTYPE} eq 'negbool' ||
+       $usage_hash->{OPTTYPE} eq 'count'   ||
+       $usage_hash->{OPTTYPE} eq 'suffix'  ||
+       $usage_hash->{OPTTYPE} eq 'logfile' ||
+       $usage_hash->{OPTTYPE} eq 'logsuff')
+      {return(defined($def))}
+    elsif($usage_hash->{OPTTYPE} eq 'string_array'  ||
+	  $usage_hash->{OPTTYPE} eq 'integer_array' ||
+	  $usage_hash->{OPTTYPE} eq 'float_array'   ||
+	  $usage_hash->{OPTTYPE} eq 'enum_array')
+      {return(defined($def) && scalar(@$def))}
+    elsif($usage_hash->{OPTTYPE} eq 'string_array2d'  ||
+	  $usage_hash->{OPTTYPE} eq 'integer_array2d' ||
+	  $usage_hash->{OPTTYPE} eq 'float_array2d'   ||
+	  $usage_hash->{OPTTYPE} eq 'enum_array2d'    ||
+	  $usage_hash->{OPTTYPE} eq 'infile'          ||
+	  $usage_hash->{OPTTYPE} eq 'outfile'         ||
+	  $usage_hash->{OPTTYPE} eq 'outdir')
+      {return(defined($def) && scalar(@$def) &&
+	      scalar(grep {scalar(@$_)} @$def))}
+
+    debug("Unknown option type [",getDefaultFlag($usage_hash->{OPTTYPE}),"].");
+
+    return(0);
+  }
+
+sub getRealDefault
+  {
+    my $usage_hash = $_[0];
+
+    if(scalar(grep {$usage_hash->{OPTTYPE} eq $_}
+	      ('string','integer','float','bool','negbool','count','enum',
+	       'suffix','logfile','logsuff')))
+      {
+	#If the supplied reference is to a scalar, return the scalar value
+	if(defined($usage_hash->{VARREF_PRG}) &&
+	   ref($usage_hash->{VARREF_PRG}) eq 'SCALAR' &&
+	   defined(${$usage_hash->{VARREF_PRG}}))
+	  {return(${$usage_hash->{VARREF_PRG}})}
+
+	#Otherwise (i.e. it's a CODE reference), return undef
+	return(undef);
+      }
+    elsif(scalar(grep {$usage_hash->{OPTTYPE} eq $_}
+		 ('string_array','integer_array','float_array',
+		  'string_array2d','integer_array2d','float_array2d',
+		  'infile','outfile','outdir')))
+      {
+	if(defined($usage_hash->{VARREF_PRG}) &&
+	   ref($usage_hash->{VARREF_PRG}) eq 'ARRAY')
+	  {return(scalar(copyArray($usage_hash->{VARREF_PRG})))}
+	return(undef);
+      }
+    else
+      {
+	debug("Unknown option type for flag [",
+	      getDefaultFlag($usage_hash->{OPTFLAGS}),
+	      "]: [$usage_hash->{OPTTYPE}].");
+
+	return($usage_hash->{VARREF_PRG});
+      }
+  }
+
+#Takes: usage hash
+#This says whether or not it's possible to access the real default value.  The
+#real default value is the value assigned to the variable the programmer is
+#using in main and which they supplied to one of the add*Option methods.  We
+#cannot access that value only if the programmer supplied a code reference using
+#addOption or addOptions (i.e. types 'string', 'integer', 'float', 'bool',
+#'negbool', 'count', or 'enum').  Other types can have code references supplied
+#to Getopt::Long because we maintain their defaults internally
+sub canGetRealDefault
+  {return(ref($_[0]->{VARREF_PRG}) ne 'CODE')}
+
+#Globals used: $help_summary, $advanced_help
 sub customHelp
   {
     my $ignore = defined($_[0]) ? $_[0] : 0;  #Ignore unset FORMAT descriptions
+
+    my $extended       = getVarref('extended',1,1);
     my $local_extended = (defined($_[1]) ? $_[1] :               #Advanced help
 			  (defined($extended) ? $extended : 0));
 
@@ -14914,13 +20411,13 @@ sub customHelp
 				     $_->{PRIMARY})}
 			    @$usage_array)
       {
-	my $flag = "INPUT FORMAT:\n" . join(',',@{$usage_hash->{OPTFLAG}});
+	my $flag = "INPUT FORMAT:\n" . join(',',@{$usage_hash->{OPTFLAGS}});
 	if($usage_hash->{HIDDEN} && $usage_hash->{PRIMARY})
 	  {
 	    $flag = "STDIN FORMAT:";
 	    #Include the hidden flags if extended > 1
 	    if($local_extended > 1)
-	      {$flag .= "\n" . join(',',@{$usage_hash->{OPTFLAG}})}
+	      {$flag .= "\n" . join(',',@{$usage_hash->{OPTFLAGS}})}
 	    if($usage_hash->{HIDDEN})
 	      {$flag .= ($usage_hash->{FLAGLESS} || $local_extended <= 1 ?
 			 "\n" : ',') . '[HIDDEN-OPTION]'}
@@ -14954,12 +20451,9 @@ sub customHelp
       {
 	#If this is a suffix linked to an outfile type, skip it completely -
 	#This is just an internal way of code re-use
-	if($usage_hash->{HIDDEN} && $usage_hash->{OPTTYPE} eq 'suffix')
-	  {
-	    my $file_type_id = $suffix_id_lookup->[$usage_hash->{FILEID}]->[0];
-	    if(exists($outfile_types_hash->{$file_type_id}))
-	      {next}
-	  }
+	if($usage_hash->{HIDDEN} && $usage_hash->{OPTTYPE} eq 'suffix' &&
+	   $usage_array->[$usage_hash->{PAIRID}]->{OPTTYPE} eq 'outfile')
+	  {next}
 
 	#If this option is a part of a tagteam
 	if($usage_hash->{TAGTEAM})
@@ -14975,7 +20469,8 @@ sub customHelp
 
 	    #The tagteam usage hash has its own hidden value (if both of its
 	    #options are hidden), so we need to check HIDDEN again
-	    next if($usage_hash->{HIDDEN} && !$usage_hash->{PRIMARY});
+	    next if($usage_hash->{HIDDEN} && $local_extended < 2 &&
+                    !$usage_hash->{PRIMARY});
 	  }
 
 	my $flag = '';
@@ -14988,7 +20483,7 @@ sub customHelp
 
 	#Append the flags to the header as a sub-title if not hidden
 	if(!$usage_hash->{HIDDEN} || $local_extended > 1)
-	  {$flag .= "\n" . join(',',@{$usage_hash->{OPTFLAG}})}
+	  {$flag .= "\n" . join(',',@{$usage_hash->{OPTFLAGS}})}
 	if($usage_hash->{HIDDEN})
 	  {$flag .= "\n[HIDDEN-OPTION]"}
 
@@ -15139,7 +20634,8 @@ sub alignCols
 		elsif(#The random chop didn't just happened to be a valid spot
 		      $next_char ne "\n" && $next_char ne '' &&
 		      $next_char ne ' ' &&
-		      !($current =~ /(?<!-)-$/ && $next_char =~ /[a-zA-Z]/))
+		      !($current =~ /(?<=[a-zA-Z])-$/ &&
+			$next_char =~ /[a-zA-Z]/))
 		  {
 		    #$current =~ s/(.*)\b\{lb}\s*\S+/$1/;
 		    if(length($current) == $col_width)
@@ -15263,19 +20759,36 @@ sub alignCols
 
 sub getSummaryUsageOptStr
   {
+    my $extended       = getVarref('extended',1,1);
     my $local_extended = scalar(@_) > 0 && defined($_[0]) ? $_[0] :
       (defined($extended) ? $extended : 0);
 
-    my $script = $0;
-    $script =~ s/^.*\/([^\/]+)$/$1/;
-
-    my $optionals          = 'OPTIONS';
-    my $optionals_wo_prim  = 'OPTIONS';
+    my $script             = getScriptName();
+    my $optionals          = ' [OPTIONS]';
+    my $optionals_wo_prim  = $optionals;
     my $requireds          = '';
     my $requireds_wo_prim  = '';
     my $primary_inf_exists = 0;
     my $primary_hidden     = 0;
     my $first_reqd         = 1;
+    my $all_hidden         = 1;
+
+    #The following is to treat optional options paired to from REQUIRED options
+    #as required
+    my $effective_reqd_hash = {};
+    foreach my $usage_hash (@$usage_array)
+      {
+        if(defined($usage_hash->{REQUIRED}) && $usage_hash->{REQUIRED})
+          {
+            $effective_reqd_hash->{$usage_hash->{OPTION_ID}} = 1;
+            #If this option is paired with another option that is optional
+            if(defined($usage_hash->{PAIRID}) &&
+               !$usage_array->[$usage_hash->{PAIRID}]->{REQUIRED})
+              {$effective_reqd_hash->{$usage_hash->{PAIRID}} = 1}
+          }
+        elsif(!exists($effective_reqd_hash->{$usage_hash->{OPTION_ID}}))
+          {$effective_reqd_hash->{$usage_hash->{OPTION_ID}} = 0}
+      }
 
     #Add visible options
     foreach my $usage_hash (grep {!defined($_->{HIDDEN}) ||
@@ -15285,6 +20798,9 @@ sub getSummaryUsageOptStr
 				       $_->{PRIMARY})}
 			    @$usage_array)
       {
+        if(!defined($usage_hash->{HIDDEN}) || !$usage_hash->{HIDDEN})
+          {$all_hidden = 0}
+
 	my $prim = 0;
 	#If this is an input file type and it is primary
 	if($usage_hash->{OPTTYPE} eq 'infile' &&
@@ -15296,185 +20812,91 @@ sub getSummaryUsageOptStr
 	    $primary_hidden     = $usage_hash->{HIDDEN};
 	  }
 
-	next if(exists($usage_hash->{HIDDEN}) &&
-		defined($usage_hash->{HIDDEN}) && $usage_hash->{HIDDEN});
-
-	my $flag = getDefaultFlag($usage_hash->{OPTFLAG});
-	if($usage_hash->{OPTTYPE} eq 'negbool')
-	  {
-	    my $def = ${$GetOptHash->{$usage_hash->{GETOPTKEY}}};
-	    if(!defined($def))
-	      {$flag =~ s/^-+/--[no]/}
-	    elsif($def)
-	      {
-		my $nf = $flag;
-		$nf =~ s/^-+//;
-		$nf = "--no$nf";
-		$flag = $nf;
-	      }
-	  }
-
 	#Add to the required options string
-	if(defined($usage_hash->{REQUIRED}) && $usage_hash->{REQUIRED})
+	if($effective_reqd_hash->{$usage_hash->{OPTION_ID}} &&
+	   (!exists($usage_hash->{HIDDEN}) || !defined($usage_hash->{HIDDEN}) ||
+	    !$usage_hash->{HIDDEN}))
 	  {
-	    $requireds .= ($first_reqd ? '' : ' ') . $flag;
+	    my($reqd,$reqdwp) = addOptToSumUsgStr($usage_hash);
+	    $requireds .= ($first_reqd ? '' : ' ') . $reqd;
 	    if(!$prim)
-	      {$requireds_wo_prim .= ($first_reqd ? '' : ' ') . $flag}
-
-	    #Add a required input file's example argument
-	    if($usage_hash->{OPTTYPE} eq 'infile')
-	      {
-		$requireds .= " <file*...>...";
-		$requireds_wo_prim .= " <file*...>..." unless($prim);
-	      }
-	    #Add a required output file's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'outfile')
-	      {
-		$requireds .= " <file*...>...";
-		$requireds_wo_prim .= " <file*...>...";
-	      }
-	    #Add a required output file's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'suffix')
-	      {
-		$requireds .= " <sfx>";
-		$requireds_wo_prim .= " <sfx>";
-	      }
-	    #Add a required output directory's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'outdir')
-	      {
-		$requireds .= " <dir*...>";
-		$requireds_wo_prim .= " <dir*...>";
-	      }
-	    #Add a required integer array option's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'integer_array')
-	      {
-		$requireds .= " <int...>";
-		$requireds_wo_prim .= " <int...>";
-	      }
-	    #Add a required float array option's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'float_array')
-	      {
-		$requireds .= " <flt...>";
-		$requireds_wo_prim .= " <flt...>";
-	      }
-	    #Add a required string array option's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'string_array')
-	      {
-		$requireds .= " <str...>";
-		$requireds_wo_prim .= " <str...>";
-	      }
-	    #Add a required enum array option's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'enum_array')
-	      {
-		my $acc = $usage_hash->{ACCEPTS};
-		if(defined($acc) && ref($acc) eq 'ARRAY' && scalar(@$acc))
-		  {
-		    $acc = join('|',@$acc);
-		    if(length($acc) > 20)
-		      {$acc =~ s/(.{17}).*/$1.../}
-		  }
-		else
-		  {$acc = 'str'}
-		$requireds .= " <$acc...>";
-		$requireds_wo_prim .= " <$acc...>";
-	      }
-	    #Add a required integer array option's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'integer_array2d')
-	      {
-		$requireds .= " <int...>...";
-		$requireds_wo_prim .= " <int...>...";
-	      }
-	    #Add a required float array option's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'float_array2d')
-	      {
-		$requireds .= " <flt...>...";
-		$requireds_wo_prim .= " <flt...>...";
-	      }
-	    #Add a required string array option's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'string_array2d')
-	      {
-		$requireds .= " <str...>...";
-		$requireds_wo_prim .= " <str...>...";
-	      }
-	    #Add a required enum array option's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'enum_array2d')
-	      {
-		my $acc = $usage_hash->{ACCEPTS};
-		if(defined($acc) && ref($acc) eq 'ARRAY' && scalar(@$acc))
-		  {
-		    $acc = join('|',@$acc);
-		    if(length($acc) > 20)
-		      {$acc =~ s/(.{17}).*/$1.../}
-		  }
-		else
-		  {$acc = 'str'}
-		$requireds .= " <$acc...>...";
-		$requireds_wo_prim .= " <$acc...>...";
-	      }
-	    #Add a required negatable boolean option's negation
-	    elsif($usage_hash->{OPTTYPE} eq 'negbool')
-	      {
-		my $neg = $flag;
-		$neg =~ s/^-+/--no/;
-		my $od = ${$GetOptHash->{$usage_hash->{GETOPTKEY}}};
-		my($of);
-		if(!defined($od))
-		  {$of = $flag}
-		elsif($od)
-		  {$of = $neg}
-		else
-		  {$of = $flag}
-		$requireds .= $of;
-		$requireds_wo_prim .= $of;
-	      }
-	    #Add a required count option's example optional argument
-	    elsif($usage_hash->{OPTTYPE} eq 'count')
-	      {
-		$requireds .= " [<cnt>]";
-		$requireds_wo_prim .= " [<cnt>]";
-	      }
-	    #Add a required integer option's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'integer')
-	      {
-		$requireds .= " <int>";
-		$requireds_wo_prim .= " <int>";
-	      }
-	    #Add a required float option's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'float')
-	      {
-		$requireds .= " <flt>";
-		$requireds_wo_prim .= " <flt>";
-	      }
-	    #Add a required string option's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'enum')
-	      {
-		my $acc = $usage_hash->{ACCEPTS};
-		if(defined($acc) && ref($acc) eq 'ARRAY' && scalar(@$acc))
-		  {
-		    $acc = join('|',@$acc);
-		    if(length($acc) > 20)
-		      {$acc =~ s/(.{17}).*/$1.../}
-		    $acc = "<$acc>";
-		  }
-		else
-		  {$acc = 'str'}
-		$requireds .= " $acc";
-		$requireds_wo_prim .= " $acc";
-	      }
-	    #Add a required string option's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'string')
-	      {
-		$requireds .= " <str>";
-		$requireds_wo_prim .= " <str>";
-	      }
-	    #Add a required unknown option's example argument
-	    elsif($usage_hash->{OPTTYPE} eq 'unk')
-	      {
-		$requireds .= " <val>";
-		$requireds_wo_prim .= " <val>";
-	      }
+	      {$requireds_wo_prim .= ($first_reqd ? '' : ' ') . $reqdwp}
 	    $first_reqd = 0;
 	  }
+      }
+
+    if($all_hidden)
+      {$optionals = $optionals_wo_prim = ''}
+
+    #Add required mutually exclusive options to the required options string
+    #First collect them to know whether there's only 1 that's visible
+    my $mutex_required_optids         = [];
+    my $mutex_required_optids_wo_prim = [];
+    foreach my $exclusive_set (map {$exclusive_options->[$_]}
+			       grep {exists($mutual_params->{$_}) &&
+				       exists($mutual_params->{$_}->{REQUIRED})
+					 && $mutual_params->{$_}->{REQUIRED}}
+			       (0..$#{$exclusive_options}))
+      {
+	my $ids_to_add         = [];
+	my $ids_to_add_wo_prim = 0;
+	foreach my $optid (grep {isEffectivelyRequired($usage_array->[$_])}
+                           grep {!defined($usage_array->[$_]->{HIDDEN}) ||
+				   !$usage_array->[$_]->{HIDDEN} ||
+                                     $local_extended >= 3}
+			   @$exclusive_set)
+	  {
+	    push(@$ids_to_add,$usage_array->[$optid]);
+	    $ids_to_add_wo_prim++ if(!$usage_array->[$optid]->{PRIMARY});
+	  }
+	if(scalar(@$ids_to_add) == 0)
+	  {
+            #Issue an error for all being hidden unless all members are PRIMARY
+            #or one has a default
+            if(scalar(grep {!defined($usage_array->[$_]->{HIDDEN}) ||
+                              !$usage_array->[$_]->{HIDDEN} ||
+                                $local_extended >= 3}
+                      @$exclusive_set) == 0 &&
+               scalar(@$exclusive_set) !=
+                scalar(grep {$usage_array->[$_]->{PRIMARY}} @$exclusive_set) &&
+               scalar(grep {hasDefault($usage_array->[$_])} @$exclusive_set) !=
+               1)
+              {error('All options in a mutually exclusive option set are ',
+                     'hidden without a default: [',
+                     join(',',map {$usage_array->[$_]->{OPTFLAG_DEF}}
+                          @$exclusive_set),"].")}
+          }
+	else
+	  {
+	    push(@$mutex_required_optids,$ids_to_add);
+	    push(@$mutex_required_optids_wo_prim,$ids_to_add_wo_prim);
+	  }
+      }
+    foreach my $seti (0..$#{$mutex_required_optids})
+      {
+	my $set            = $mutex_required_optids->[$seti];
+	my $wo_prim_parens = ($mutex_required_optids_wo_prim->[$seti] == 1);
+	my($reqd,$reqdwp);
+	$requireds .=
+	  ($first_reqd ? '' : ' ') . (scalar(@$set) == 1 ? '' : '(');
+	$requireds_wo_prim .=
+	  ($first_reqd ? '' : ' ') . ($wo_prim_parens    ? '' : '(');
+	$first_reqd = 0;
+
+	foreach my $i (0..$#{$set})
+	  {
+	    my $join = ($i == $#{$set} ? '' :
+			(scalar(@$set) == 2 ? ' or ' :
+			 ($i == ($#{$set} - 1) ? ', or ' : ', ')));
+
+	    ($reqd,$reqdwp) = addOptToSumUsgStr($set->[$i]);
+	    $requireds .= $reqd . $join;
+	    if(!$set->[$i]->{PRIMARY})
+	      {$requireds_wo_prim .= $reqdwp . $join}
+	  }
+
+	$requireds         .= (scalar(@$set) == 1 ? '' : ')');
+	$requireds_wo_prim .= (scalar(@$set) == 1 ? '' : ')');
       }
 
     #Hidden only refers to the flags and thus the usage entries.  If a primary
@@ -15482,68 +20904,277 @@ sub getSummaryUsageOptStr
     #the script can take anything on STDIN.
     my $summary_str = (!$primary_inf_exists ||
 		       ($primary_inf_exists && !$primary_hidden) ?
-		       "$script " . ($requireds ne '' ? "$requireds " : '') .
-		       "[$optionals]\n" : '');
+		       $script . ($requireds ne '' ? " $requireds" : '') .
+		       "$optionals\n" : '');
     if(($local_extended && $primary_inf_exists) ||
        ($primary_inf_exists && $primary_hidden))
-      {$summary_str .= "$script " . ($requireds_wo_prim ne '' ?
-				     "$requireds_wo_prim " : '') .
-				       "[$optionals_wo_prim] < input_file\n"}
+      {$summary_str .= "$script" . ($requireds_wo_prim ne '' ?
+				     " $requireds_wo_prim" : '') .
+				       "$optionals_wo_prim < input_file\n"}
     $summary_str .= "\n";
 
     return($summary_str);
+  }
+
+sub addOptToSumUsgStr
+  {
+    my $usage_hash        = $_[0];
+    my $requireds         = '';
+    my $requireds_wo_prim = '';
+
+    my $flag = getDefaultFlag($usage_hash->{OPTFLAGS});
+    if($usage_hash->{OPTTYPE} eq 'negbool')
+      {
+	my $def = getRealDefault($usage_hash);
+	if(defined($def) && ref($def) ne '')
+	  {$def = undef}
+	if(!defined($def))
+	  {$flag =~ s/^-+/--[no]/}
+	elsif($def)
+	  {
+	    my $nf = $flag;
+	    $nf =~ s/^-+//;
+	    $nf = "--[no]$nf";
+	    $flag = $nf;
+	  }
+      }
+
+    my $prim = ($usage_hash->{OPTTYPE} eq 'infile' &&
+		exists($usage_hash->{PRIMARY}) &&
+		defined($usage_hash->{PRIMARY}) && $usage_hash->{PRIMARY});
+
+    $requireds = $flag;
+    if(!$prim)
+      {$requireds_wo_prim .= $flag}
+
+    #Add a required input file's example argument
+    if($usage_hash->{OPTTYPE} eq 'infile')
+      {
+	$requireds .= " <file*...>...";
+	$requireds_wo_prim .= " <file*...>..." unless($prim);
+      }
+    #Add a required output file's example argument
+    elsif($usage_hash->{OPTTYPE} eq 'outfile')
+      {
+	$requireds .= " <file*...>...";
+	$requireds_wo_prim .= " <file*...>...";
+      }
+    #Add a required output log file's example argument
+    elsif($usage_hash->{OPTTYPE} eq 'logfile')
+      {
+	$requireds .= " <file>";
+	$requireds_wo_prim .= " <file>";
+      }
+    #Add a required output file's example argument
+    elsif($usage_hash->{OPTTYPE} eq 'suffix' ||
+	  $usage_hash->{OPTTYPE} eq 'logsuff')
+      {
+	$requireds .= " <sfx>";
+	$requireds_wo_prim .= " <sfx>";
+      }
+    #Add a required output directory's example argument
+    elsif($usage_hash->{OPTTYPE} eq 'outdir')
+      {
+	$requireds .= " <dir*...>";
+	$requireds_wo_prim .= " <dir*...>";
+      }
+    #Add a required integer array option's example argument
+    elsif($usage_hash->{OPTTYPE} eq 'integer_array')
+      {
+	$requireds .= " <int...>";
+	$requireds_wo_prim .= " <int...>";
+      }
+    #Add a required float array option's example argument
+    elsif($usage_hash->{OPTTYPE} eq 'float_array')
+      {
+	$requireds .= " <flt...>";
+	$requireds_wo_prim .= " <flt...>";
+      }
+    #Add a required string array option's example argument
+    elsif($usage_hash->{OPTTYPE} eq 'string_array')
+      {
+	$requireds .= " <str...>";
+	$requireds_wo_prim .= " <str...>";
+      }
+    #Add a required enum array option's example argument
+    elsif($usage_hash->{OPTTYPE} eq 'enum_array')
+      {
+	my $acc = $usage_hash->{ACCEPTS};
+	if(defined($acc) && ref($acc) eq 'ARRAY' && scalar(@$acc))
+	  {
+	    $acc = join('|',@$acc);
+	    if(length($acc) > 20)
+	      {$acc =~ s/(.{17}).*/$1.../}
+	  }
+	else
+	  {$acc = 'str'}
+	$requireds .= " <$acc...>";
+	$requireds_wo_prim .= " <$acc...>";
+      }
+    #Add a required integer array option's example argument
+    elsif($usage_hash->{OPTTYPE} eq 'integer_array2d')
+      {
+	$requireds .= " <int...>...";
+	$requireds_wo_prim .= " <int...>...";
+      }
+    #Add a required float array option's example argument
+    elsif($usage_hash->{OPTTYPE} eq 'float_array2d')
+      {
+	$requireds .= " <flt...>...";
+	$requireds_wo_prim .= " <flt...>...";
+      }
+    #Add a required string array option's example argument
+    elsif($usage_hash->{OPTTYPE} eq 'string_array2d')
+      {
+	$requireds .= " <str...>...";
+	$requireds_wo_prim .= " <str...>...";
+      }
+    #Add a required enum array option's example argument
+    elsif($usage_hash->{OPTTYPE} eq 'enum_array2d')
+      {
+	my $acc = $usage_hash->{ACCEPTS};
+	if(defined($acc) && ref($acc) eq 'ARRAY' && scalar(@$acc))
+	  {
+	    $acc = join('|',@$acc);
+	    if(length($acc) > 20)
+	      {$acc =~ s/(.{17}).*/$1.../}
+	  }
+	else
+	  {$acc = 'str'}
+	$requireds .= " <$acc...>...";
+	$requireds_wo_prim .= " <$acc...>...";
+      }
+    #Add a required count option's example optional argument
+    elsif($usage_hash->{OPTTYPE} eq 'count')
+      {
+	$requireds .= " [<cnt>]";
+	$requireds_wo_prim .= " [<cnt>]";
+      }
+    #Add a required integer option's example argument
+    elsif($usage_hash->{OPTTYPE} eq 'integer')
+      {
+	$requireds .= " <int>";
+	$requireds_wo_prim .= " <int>";
+      }
+    #Add a required float option's example argument
+    elsif($usage_hash->{OPTTYPE} eq 'float')
+      {
+	$requireds .= " <flt>";
+	$requireds_wo_prim .= " <flt>";
+      }
+    #Add a required string option's example argument
+    elsif($usage_hash->{OPTTYPE} eq 'enum')
+      {
+	my $acc = $usage_hash->{ACCEPTS};
+	if(defined($acc) && ref($acc) eq 'ARRAY' && scalar(@$acc))
+	  {
+	    $acc = join('|',@$acc);
+	    if(length($acc) > 20)
+	      {$acc =~ s/(.{17}).*/$1.../}
+	    $acc = "<$acc>";
+	  }
+	else
+	  {$acc = 'str'}
+	$requireds .= " $acc";
+	$requireds_wo_prim .= " $acc";
+      }
+    #Add a required string option's example argument
+    elsif($usage_hash->{OPTTYPE} eq 'string')
+      {
+	$requireds .= " <str>";
+	$requireds_wo_prim .= " <str>";
+      }
+    #Add a required unknown option's example argument
+    elsif($usage_hash->{OPTTYPE} eq 'unk')
+      {
+	$requireds .= " <val>";
+	$requireds_wo_prim .= " <val>";
+      }
+    #Nothing to be added to negbool
+
+    return($requireds,$requireds_wo_prim);
   }
 
 ##
 ## This method prints a usage statement in long or short form depending on
 ## whether "no descriptions" is true.
 ##
-#Globals used: $extended, $GetOptHash, $explicit_quit
+#Globals used: $explicit_quit
 sub usage
   {
     my @in = getSubParams([qw(ERROR_MODE EXTENDED)],[],[@_]);
     my $error_mode     = $in[0]; #Don't print full usage in error mode
-    my $local_extended = scalar(@in) > 1 && defined($in[1]) ? $in[1] :
-      (defined($extended) ? $extended : 0);
+    my $extended       = getVarref('extended',1,1);
+    my $local_extended = (scalar(@in) > 1 && defined($in[1]) ? $in[1] :
+			  (defined($extended) ? $extended : 0));
 
-    unless($processCommandLine_called)
+    unless($command_line_stage)
       {processCommandLine()}
 
-    debug({LEVEL => -1},"Value of usage: [$usage].");
+    debug({LEVEL => -1},"Value of usage: [",
+	  (defined($usage) ? $usage : 'undef'),"].");
 
     #Don't print a usage after quit has been called unless $usage == 1
-    if($explicit_quit && $usage != 1)
+    if($explicit_quit && $usage != 1 && !$error_mode)
       {return(0)}
+
+    #Make sure the defaults will display correctly
+    processMutuallyExclusiveOptionSets(1);
 
     print(($error_mode ? "\n" : ''),getSummaryUsageOptStr($local_extended));
 
-    #Obtain the custom user options
-    my($short,$long) = customUsage();
-
     if($error_mode)
-      {print("Run with ",($default_run_mode eq 'usage' ?
+      {print("Run with ",(getDefaultRunMode() eq 'usage' ?
 			  "no options" : '--usage'),
 	     " for usage.\n")}
     else
       {
+        #Obtain the custom user options
+        my($short,$long) = customUsage();
+
 	if(!$local_extended)
 	  {print($short)}
 	else #Advanced options/extended usage output
 	  {print($long)}
 
-	if($short =~ /^\*/ || $long =~ /^\*/)
+	if($short =~ /(\A|\n)\*/ || $long =~ /(\A|\n)\*/)
 	  {print("* Required.\n")}
-	if($short =~ /^~/ || $long =~ /^~/)
-	  {print("~ Required (but has default).\n")}
-	if($short =~ /^\^/ || $long =~ /^\^/)
-	  {print("^ 1 of 2 mutually exclusive options required.\n")}
+	if($short =~ /(\A|\n)~/ || $long =~ /(\A|\n)~/)
+	  {print('~ Required but satisfied by a default',
+                 ($local_extended < 3 ? ' (supply `' .
+                  $usage_lookup->{extended}->{OPTFLAG_DEF} . ' 3` for more)' :
+                  ' either of the indicated option or of one of a set of ' .
+                  'mutually exclusive options that is required').".\n")}
+	if($short =~ /(\A|\n)\^/ || $long =~ /(\A|\n)\^/)
+	  {print("^ 1 of multiple mutually exclusive options required.\n")}
       }
 
     return(0);
   }
 
+sub getScriptName
+  {
+    my $exclude_extension = $_[0];
+    my $script = $0;
+    $script =~ s/^.*\/([^\/]+)$/$1/;
+    if($exclude_extension)
+      {$script =~ s/(.*)\..*$/$1/}
+    return($script);
+  }
+
 BEGIN
   {
+    #This allows us to track runtime warnings about undefined variables, etc.
+    $SIG{__WARN__} = sub {warning("Runtime warning: [",@_,"].")};
+    $SIG{__DIE__}  = sub
+      {
+        my $err = join('',@_);
+        $@ = '';
+        push(@$compile_err,["$0:",getTrace(),$err]);
+        #Calling die() suppresses the output of unwrapped fatal errors.
+        die();
+      };
+
     #Enable export of subs & vars
     require Exporter;
     our @ISA       = qw(Exporter);
@@ -15557,6 +21188,7 @@ BEGIN
 			addInfileOption              addOutfileSuffixOption
 			addOutdirOption              addOutfileOption
 			addOption                    addOutfileTagteamOption
+			addLogfileOption             addLogfileSuffixOption
 			addOptions                   addArrayOption
 			add2DArrayOption             getOutHandleFileName
 			getNextFileGroup             getAllFileGroups
@@ -15565,35 +21197,59 @@ BEGIN
                         processCommandLine           resetFileGroupIterator
                         isForced                     headerRequested
                         isDryRun                     setDefaults
-                        isDebug                      isVerbose);
+                        isDebug                      isVerbose
+                        makeMutuallyExclusive        isOverwrite
+                        isSkip                       isQuiet);
     our @EXPORT_OK = qw(markTime                     getCommand
 			sglob                        getVersion
 			isThereInputOnSTDIN          isStandardOutputToTerminal
 			printRunReport               getHeader
 			flushStderrBuffer            inPipeline
-                        usage                        help);
+                        usage                        help
+                        addVerboseOption             editVerboseOption
+                        addQuietOption               editQuietOption
+                        addOverwriteOption           editOverwriteOption
+                        addSkipOption                editSkipOption
+                        addHeaderOption              editHeaderOption
+                        addVersionOption             editVersionOption
+                        addExtendedOption            editExtendedOption
+                        addForceOption               editForceOption
+                        addDebugOption               editDebugOption
+                        addSaveArgsOption            editSaveArgsOption
+                        addPipelineOption            editPipelineOption
+                        addErrorLimitOption          editErrorLimitOption
+                        addAppendOption              editAppendOption
+                        addRunOption                 editRunOption
+                        addDryRunOption              editDryRunOption
+                        addUsageOption               editUsageOption
+                        addHelpOption                editHelpOption
+			addCollisionOption           editCollisionOption
+		        getUserDefaults);
 
     _init();
-
-    #This allows us to track runtime warnings about undefined variables, etc.
-    $SIG{__WARN__} = sub {warning("Runtime warning: [",@_,"].")};
-    $SIG{__DIE__}  = sub {@$compile_err = @_};
   }
 
 END
   {
+    my $force = getVarref('force',1,1,1);
     #If the user did not call quit explicitly or force is defined and true
     if(!$explicit_quit || (defined($force) && $force))
       {
 	#We're definitely quitting, so if force is undefined or true, set false
 	$force = 0 if(!defined($force) || $force);
 
-	#Unless there was a compilation error, quit cleanly.
-	#Note that the error is already printed and the error() method has
-	#likely not been compiled yet
-	if(defined($compile_err) && scalar(@$compile_err) &&
-	   (!defined($command_line_processed) || $command_line_processed < 2))
-	  {print STDERR ("CommandLineInterface: Unable to complete set up.\n")}
+	#Unless there was a compilation or setup error error, quit cleanly.
+        #Note that setup errors would have already been printed and that the
+        #error() method (in the event of a compile_err) has likely not been
+        #compiled yet
+	if((defined($compile_err) && scalar(@$compile_err)) ||
+           (defined($num_setup_errors) && $num_setup_errors))
+	  {
+	    #An exit code of -1 will quit even if --force is supplied.  --force
+	    #is intended to over-ride programmatic errors.  --overwrite is
+	    #intended to over-ride existing files.
+	    quit(-1);
+	  }
 	elsif(!defined($cleanup_mode) || !$cleanup_mode)
 	  {quit(0)}
       }
@@ -15742,7 +21398,7 @@ Basic flags for verbosity, help, info, headers, and script control.
 
 =item --extended          more/advanced usage/help/version/header
 
-=item --save-as-default   save command line options as defaults
+=item --save-args         save command line options as defaults
 
 =back
 
@@ -15783,13 +21439,23 @@ These flags help to figure out bugs.
 
 Simply by using CommandLineInterface, your script will have these options available on the command line.  Some of them require your input or the usage of certain methods to be useful.  E.g. Call error() instead of printing to STDERR, add options using the add*Option methods, call openIn() and openOut() instead of open(), etc.
 
+=head2 Limitations
+
+Bundling of options is not supported.  Option bundling is where `-x -v -f` can be abbreviated as `-xvf`.
+
+Flags must have a dash (for single character flags) or a double-dash, e.g. "--flag", for multi-character flags.
+
+While support for array type options is provided, support for hash type options is not yet implemented.
+
 =head2 Methods
 
 =over 12
 
-=item C<add2DArrayOption> FLAG, VARREF [, TYPE, REQUIRED, DEFAULT, HIDDEN, SHORT_DESC, LONG_DESC, ACCEPTS, DELIMITER]
+=item C<add2DArrayOption> FLAG VARREF [TYPE REQUIRED DEFAULT HIDDEN SHORT_DESC LONG_DESC ACCEPTS FLAGLESS DELIMITER ADVANCED HEADING DISPDEF]
 
 Add an option/flag to the command line interface that a user can supply on the command line either multiple times, once with multiple values, or both.  Each instance of the FLAG on the command line defines a sub-array and the space-delimited values (wrapped in quotes) will be pushed onto the inner array.  E.g. -a '1 2 3' -a 'a b c' creates the following 2D array: [['1','2','3'],['a','b','c']].
+
+It returns an option ID that can be used in makeMutuallyExclusive().
 
 FLAG is the name or names of the flag the user supplies on the command line (with or without an argument as defined by TYPE).  You can supply a single FLAG or a reference to an array of FLAGs.  Only alpha-numeric characters, dashes, and underscores are permitted.  Single character flags will be prepended with a single dash '-' and multi-character flags will get a double dash '--'.
 
@@ -15806,7 +21472,7 @@ If not supplied, the default TYPE is str if ACCEPTS is also not supplied, or enu
 
 If REQUIRED is a non-zero value (e.g. '1'), the script will quit with an error and a usage message if at least 1 value is not supplied by the user on the command line.  If required is not supplied or set to 0, the flag will be treated as optional.
 
-The DEFAULT parameter is not used to initialize the VARREF value, but rather is a string simply describing/defining the default in the usage message for this parameter.  Optionally, a reference to an array of references to arrays of scalars may be supplied.  The 2D array will be converted into a string using delimiting paranthases and commas, e.g.: "((1,2),(3,4)),((5),(6,7,8))", when displayed in the usage output's default for the given option.
+The DEFAULT parameter can be given a reference to an array such that when a value is not supplied by the user, the default will be assigned.  If no DEFAULT is set, but the VARREF array reference has a value, the DEFAULT value is automatically set to the value referenced by VARREF.  If both VARREF and DEFAULT have differing values, a fatal error will be generated.
 
 If HIDDEN is a non-zero value (e.g. '1'), the flag/option created by this method will not be a part of the usage output.  Note that if HIDDEN is non-zero, a DEFAULT must be supplied.
 
@@ -15818,12 +21484,20 @@ Note, both SHORT_DESC and LONG_DESC have auto-generated formatting which include
 
 ACCEPTS takes a reference to an array of scalar values.  If defined/supplied, the list of acceptable values will be shown in the usage message for this option after the default value and before the description.  This parameter is intended for short lists of discrete values (i.e. enumerations) only.  Descriptions of acceptable value ranges should instead be incorporated into the LONG_DESC.
 
+FLAGLESS, if non-zero, indicates that arguments without preceding flags are to be assumed to belong to this option.  Note, only 1 option may currently be flagless.
+
 DELIMITER is the character between multiple values supplied to a single FLAG.  Note, if you use a space as your DELIMITER, the arguments must be wrapped in quotes.  Multiple character DELIMITERs are allowed.  Empty values (between multiple instances of contiguous delimiters) are skipped.  A perl regular expression is allowed (e.g. '\s+').  The default is based on TYPE.  Defaults of DELIMITER for each TYPE are:
 
     integer - Non-number characters (i.e. not 0-9, '+', '-', or 'e' (exponent).
     float   - Same as int, but decimals are included.
     string  - No delimiting is done.
     enum    - Any character not in the ACCEPTS values.
+
+If ADVANCED is non-zero, this option will only display in the advanced usage (i.e. when --extended is 3).
+
+A HEADING string can be supplied to any option to have a section heading appear above the defined option.  Options appear in the usage in the order they are created, but note that required options without default values will appear at the top.
+
+The DISPDEF parameter is the "display default" describing the default in the usage.  Optionally, a reference to an array of references to arrays of scalars may be supplied.  The 2D array will be converted into a string using delimiting paranthases and commas, e.g.: "((1,2),(3,4)),((5),(6,7,8))", when displayed in the usage output's default for the given option.
 
 I<EXAMPLE>
 
@@ -15871,7 +21545,9 @@ There's currently no way to require a minimum, maximum, or exact number of requi
 
 There is not yet a way to pair a 2D array option with input or output files.
 
-The reference supplied to VARREF must be an array reference.  There is no accommodation for method references, however addOption() can be used to supply a method reference instead.
+If a VARREF array reference is initialized with default values, the value is replaced by supplied values during the processCommandLine call.  However, it is recommended that the prgrammer use the DEFAULT parameter instead of initializing the value supplied to VARREF.
+
+While VARREF may be a code reference, note that the supplied sub may be called to unset any potentially initialized array values by passing an empty string.  This is done even if no DEFAULT is set in order to satisfy a mutually exclusive option set (see makeMutuallyExclusive()).
 
 I<ADVANCED>
 
@@ -15881,11 +21557,85 @@ VARREF is the value that is supplied as a value in the hash passed to Getopt::Lo
 
 If an array is pre-populated with default values, the default is not replaced, but rather is added to.  In order to set a default value, the prgrammer must set the default after the command line has been processed, if the user did not set a value.
 
+VARREF may be a code reference (i.e. a reference to a subroutine (named or anonymous)) (e.g. `ref($value) eq 'CODE'`).  See the underlying module documentation by running `perldoc Getopt::Long` on the command line for details on the arguments, however the value supplied to the FLAG on the command line is either $_[0] (for FLAGLESS options supplied without a flag) or $_[1] (for options that are not FLAGLESS).
+
+Note that any variable a subroutine (supplied to VARREF) modifies, will not be visible to CommandLineInterface.  CommandLineInterface however calls the subroutine for a number of reasons other than explicit values supplied on the command line in any particular run.  It will be called for the following reasons:
+
+ 1. To set an option supplied on the command line (as many times as it is
+    supplied)
+ 2. To set the supplied DEFAULT value (if appropriate)
+ 3. To set a previously user-supplied default (if appropriate)
+ 4. To clear out a potential value initialized in main (by passing undef) if
+    there is no default and a mutually exclusive partner option is supplied.
+
+A VARREF subroutine is not called to set (or clear out) a default value if no DEFAULT was supplied and a mutually exclusive option was not supplied.
+
+A VARREF subroutine is not called to set the supplied DEFAULT value if a user default for that option exists.
+
 If REQUIRED is true, but the array reference provided is populated with default values, the option is essentially optional.  Setting REQUIRED to true only forces the user to supply a value if the array reference refers to an empty array.  Note also that if the user provides no options on the command line, a general usage is printed, but if other options are supplied, and error about missing required options is generated.
 
-=item C<addArrayOption> FLAG, VARREF [, TYPE, REQUIRED, DEFAULT, HIDDEN, SHORT_DESC, LONG_DESC, DELIMITER, ACCEPTS]
+=item C<addAppendOption> [FLAG DEFAULT DISPDEF REQUIRED HIDDEN ADVANCED SHORT_DESC LONG_DESC HEADING]
+
+This is a builtin option of type bool (see addOption() and addBuiltinOption()).  It controls whether openOut will open in append mode or not.  There is no getter method for this option.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+Default parameters values:
+
+    FLAG        => 'append'
+    DEFAULT     => 0
+    DISPDEF     => undef
+    REQUIRED    => 0
+    HIDDEN      => 0
+    ADVANCED    => 1
+    SHORT_DESC  => undef
+    LONG_DESC   => "Append mode.  Appends output to all existing output files
+                    instead of skipping or overwriting them.  This is useful for
+                    checkpointed jobs on a cluster."
+    HEADING     => ''
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    echo "Pre-existing content." > out.txt
+    example.pl --append --outfile out.txt
+
+I<Code>
+
+    addAppendOption();
+    processCommandLine();
+    openOut(*OUT,getOutfile());
+    print("New output appended to file.\n");
+
+I<Output> (cat out.txt)
+
+    Pre-existing content.
+    New output appended to file.
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options are affected by this method:
+
+    --append            Renamable flag.
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<addArrayOption> FLAG VARREF [TYPE REQUIRED DEFAULT HIDDEN SHORT_DESC LONG_DESC DELIMITER ACCEPTS FLAGLESS INTERPOLATE ADVANCED HEADING DISPDEF]
 
 Add an option/flag to the command line interface that a user can supply on the command line either multiple times, once with multiple values (if DELIMITER is defined), or both, and each value will be pushed onto the VARREF array reference.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
 
 FLAG is the name or names of the flag the user supplies on the command line (with or without an argument as defined by TYPE).  You can supply a single FLAG or a reference to an array of FLAGs.  Only alpha-numeric characters, dashes, and underscores are permitted.  Single character flags will be prepended with a single dash '-' and multi-character flags will get a double dash '--'.
 
@@ -15902,7 +21652,7 @@ If not supplied, the default TYPE is str if ACCEPTS is also not supplied, or enu
 
 If REQUIRED is a non-zero value (e.g. '1'), the script will quit with an error and a usage message if at least 1 value is not supplied by the user on the command line.  If required is not supplied or set to 0, the flag will be treated as optional.
 
-The DEFAULT parameter is not used to initialize the VARREF value, but rather is a scalar (or reference to an array of scalars) simply describing/defining the default in the usage message for this parameter.  Setting the default value if no value is supplied by the user, is a job for the programmer.
+The DEFAULT parameter can be given a reference to an array such that when a value is not supplied by the user, the default will be assigned.  If no DEFAULT is set, but the VARREF array reference has a value, the DEFAULT value is automatically set to the value referenced by VARREF.  If both VARREF and DEFAULT have differing values, a fatal error will be generated.
 
 If HIDDEN is a non-zero value (e.g. '1'), the flag/option created by this method will not be a part of the usage output.  Note that if HIDDEN is non-zero, a DEFAULT must be supplied.
 
@@ -15912,9 +21662,19 @@ LONG_DESC is the long version of the usage message for this output file type.  I
 
 Note, both SHORT_DESC and LONG_DESC have auto-generated formatting which includes whether or not the option is REQUIRED.
 
+FLAGLESS, if non-zero, indicates that arguments without preceding flags are to be assumed to belong to this option.  Note, only 1 option may currently be flagless.
+
 DELIMITER is the character between multiple values supplied to a single FLAG.  Note, if you use a space as your DELIMITER, the arguments must be wrapped in quotes.  Multiple character DELIMITERs are allowed.  Empty values (between multiple instances of contiguous delimiters) are skipped.  A perl regular expression is allowed (e.g. '\s+').  The default is based on TYPE.  There is no default delimiter for addArrayOption() (though there is for add2DArrayOption()).  Without supplying a delimiter, each value must be submitted with a flag.  If you do provide a delimiter, multiple flags are still allowed, but all values are pushed onto the same array from left to right, as they appear in order on the command line.
 
+INTERPOLATE: Deprecated.  Present for backward compatibility.
+
+If ADVANCED is non-zero, this option will only display in the advanced usage (i.e. when --extended is 3).
+
 ACCEPTS takes a reference to an array of scalar values.  If defined/supplied, the list of acceptable values will be shown in the usage message for this option after the default value and before the description.  This parameter is intended for short lists of discrete values (i.e. enumerations) only.  Descriptions of acceptable value ranges should instead be incorporated into the LONG_DESC.
+
+A HEADING string can be supplied to any option to have a section heading appear above the defined option.  Options appear in the usage in the order they are created, but note that required options without default values will appear at the top.
+
+The DISPDEF parameter is the "display default" simply describing the default in the usage message for this parameter.
 
 I<EXAMPLE>
 
@@ -15965,25 +21725,579 @@ There's currently no way to require a minimum, maximum, or exact number of requi
 
 There is not yet a way to pair an array option with input or output files.  This will be addressed when requirement 15 is implemented.
 
-The reference supplied to VARREF must be an array reference.  There is no accommodation for method references, however addOption() can be used to supply a method reference instead.
+If a VARREF array reference is initialized with default values, the value is replaced by supplied values during the processCommandLine call.  However, it is recommended that the prgrammer use the DEFAULT parameter instead of initializing the value supplied to VARREF.
 
-If an array is pre-populated with default values, the default is not replaced, but rather is added to.  In order to set a default value, the prgrammer must set the default after the command line has been processed, if the user did not set a value.
+While VARREF may be a code reference, note that the supplied sub may be called to unset any potentially initialized array values by passing an empty string.  This is done even if no DEFAULT is set in order to satisfy a mutually exclusive option set (see makeMutuallyExclusive()).
 
 I<ADVANCED>
 
 VARREF is the value that is supplied as a value in the hash that is passed to Getopt::Long's GetOptions method.  Note that the VARREF array variable supplied is not populated until processCommandLine() has been called.  Once processCommandLine() has been called, no further calls to addArrayOption() are allowed.
 
+VARREF may be a code reference (i.e. a reference to a subroutine (named or anonymous)) (e.g. `ref($value) eq 'CODE'`).  See the underlying module documentation by running `perldoc Getopt::Long` on the command line for details on the arguments, however the value supplied to the FLAG on the command line is either $_[0] (for FLAGLESS options supplied without a flag) or $_[1] (for options that are not FLAGLESS).
+
+Note that any variable a subroutine (supplied to VARREF) modifies, will not be visible to CommandLineInterface.  CommandLineInterface however calls the subroutine for a number of reasons other than explicit values supplied on the command line in any particular run.  It will be called for the following reasons:
+
+ 1. To set an option supplied on the command line (as many times as it is
+    supplied)
+ 2. To set the supplied DEFAULT value (if appropriate)
+ 3. To set a previously user-supplied default (if appropriate)
+ 4. To clear out a potential value initialized in main (by passing undef) if
+    there is no default and a mutually exclusive partner option is supplied.
+
+A VARREF subroutine is not called to set (or clear out) a default value if no DEFAULT was supplied and a mutually exclusive option was not supplied.
+
+A VARREF subroutine is not called to set the supplied DEFAULT value if a user default for that option exists.
+
 The DELIMITER will be shown in the script's usage in the flags column, inside the argument, between the argument type and an ellipsis, e.g. "--flag <int ...>".  In this case, the delimiter is a space.  If a multi-character delimiter is provided, the flag column will appear as "--flag <int...>" and an addendum will be appended to the LONG_DESC.  If a perl regular expression is used, a representative DELIMITER will be shown in the flags column, if an arbitrary example will be used and an addendum placed in the description.
 
 If REQUIRED is true, but the array reference provided is populated with default values, the option is essentially optional.  Setting REQUIRED to true only forces the user to supply a value if the array reference refers to an empty array.  Note also that if the user provides no options on the command line, a general usage is printed, but if other options are supplied, and error about missing required options is generated.
 
-=item C<addInfileOption> FLAG [, REQUIRED, DEFAULT, PRIMARY, HIDDEN, SHORT_DESC, LONG_DESC, FORMAT, PAIR_WITH, PAIR_RELAT]
+=item C<add*Builtin*Option> [FLAG DEFAULT DISPDEF REQUIRED HIDDEN ADVANCED SHORT_DESC LONG_DESC HEADING]
+
+This method cannot be called directly, but is described here to reduce redundancy.  It is called by the following methods.
+
+    addVerboseOption
+    addQuietOption
+    addOverwriteOption
+    addSkipOption
+    addHeaderOption
+    addVersionOption
+    addExtendedOption
+    addForceOption
+    addDebugOption
+    addSaveArgsOption
+    addPipelineOption
+    addErrorLimitOption
+    addAppendOption
+    addRunOption
+    addDryRunOption
+    addUsageOption
+    addHelpOption
+    addCollisionOption
+
+addBuiltinOption() checks the parameters supplied (via the editBuiltinOption method), fills in default values, and in turn, calls addOption().
+
+Options appear in the usage in the order in which they were added (with the exception of required options without default values, which appear first).  Unless each add___Option() is explicitly called, all builtin options will appear at the end of the usage among the other implicitly added builtin options.  If you wish to edit the parameters, but not change an option's position in the usage output, refer its edit___Option() method.  To only change the position of a builtin option in the usage, call its add___Option() method without any parameters.
+
+Refer to addOption() for a description of the parameters.
+
+I<ADVANCED>
+
+If not explicitly called, this method will be implicitly called for each builtin option the moment before values from the command line are processed.
+
+=item C<addCollisionOption> [FLAG REQUIRED HIDDEN ADVANCED SHORT_DESC LONG_DESC HEADING]
+
+This is a deprecated builtin option of type enum (see addOption() and addBuiltinOption()) that accepts arguments 'merge', 'rename', or 'error'.  It controls what will happen if multiple output files end up with the same file name.  There is no getter method for this option.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+Default parameters values:
+
+    FLAG        => 'collision-mode'
+    REQUIRED    => 0
+    HIDDEN      => 1
+    ADVANCED    => 1
+    SHORT_DESC  => undef
+    LONG_DESC   => "DEPRECATED.  When multiple input files output to the same
+                    output file, this option specifies what to do.  Merge mode
+                    will concatenate output in the common output file.  Rename
+                    mode (valid only if this script accepts multiple types of
+                    input files) will create a unique output file name by
+                    appending a unique combination ofinput file names together
+                    (with a delimiting dot).  Rename mode will throw an error if
+                    a unique file name cannot be constructed (e.g. when 2 input
+                    files of the same name in different directories are
+                    outputting to a common directory).  Error mode causes the
+                    script to quit with an error if multiple input files are
+                    detected to output to the same output file.
+
+                    * The default differs based on whether the output file is
+                    specified by an outfile suffix (in which case the default is
+                    [error]) or by a full output file name (in which case the
+                    default is [merge]).
+
+                    THIS OPTION IS DEPRECATED AND HAS BEEN REPLACED BY
+                    'SUPPLYING COLLISION MODE VIA addOutFileSuffixOption AND
+                    addOutfileOption.  THIS OPTION HOWEVER WILL OVERRIDE THE
+                    COLLISION MODE OF ALL OUTFILE OPTIONS AND APPLY TO FILES
+                    THAT ARE NOT DEFINED BY addOutFileSuffixOption OR
+                    addOutfileOption IF OPENED MULTIPLE TIMES UNLESS SET
+                    EXPLICITLY IN THE openOut CALL."
+
+    HEADING     => ''
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    echo "1" > dir1/in.txt
+    echo "2" > dir2/in.txt
+    example.pl --collision-mode merge -i dir1/in.txt -i dir2/in.txt --outdir outputs --outfile-suffix .out
+
+I<Code>
+
+    addCollisionOption();
+    processCommandLine();
+    while(nextFileCombo())
+      {
+        openIn(*IN,getInfile());
+        openOut(*OUT,getOutfile());
+        print(<IN>);
+        closeOut(*OUT);
+        closeIn(*IN);
+      }
+
+I<Output> (outputs/in.txt.out)
+
+    1
+    2
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+None.
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<addDebugOption> [FLAG DEFAULT DISPDEF REQUIRED HIDDEN ADVANCED SHORT_DESC LONG_DESC HEADING]
+
+This is a builtin option of type count (see addOption() and addBuiltinOption()).  It controls output of the debug() method and its user-supplied (or default) value is retrievable via the isDebug() getter method (after processCommandLine() has been explicitly or implicitly called) which returns the debug level integer value.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+Default parameters values:
+
+    FLAG        => 'debug'
+    DEFAULT     => 0
+    DISPDEF     => undef
+    REQUIRED    => 0
+    HIDDEN      => 0
+    ADVANCED    => 1
+    SHORT_DESC  => undef
+    LONG_DESC   => "Debug mode.  Prepends trace to warning/error messages.
+                    Prints debug() messages based on debug level.  Values less
+                    than 0 debug the CommandLineInterface module used by this
+                    script."
+    HEADING     => ''
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl --debug 2
+
+I<Code>
+
+    addDebugOption(ADVANCED => 0);
+    processCommandLine();
+    debug({LEVEL => 2},"This is level 2 debug output.");
+    debug({LEVEL => 1},"This is level 1 debug output.");
+    debug({LEVEL => 3},"This is level 3 debug output.");
+
+I<Output> (mised stderr & stdout)
+
+    DEBUG1: This is level 2 debug output.
+    DEBUG2: This is level 1 debug output.
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options are affected by this method:
+
+    --debug             Renamable flag.  See debug()
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<addDryRunOption> [FLAG DISPDEF HIDDEN ADVANCED SHORT_DESC LONG_DESC]
+
+This is a builtin option of type bool (see addOption() and addBuiltinOption()).  It controls whether openOut() will actually create files, whether openIn() will actually read files, whether --outdir will create output directories, and whether closeIn and closeOut will close file handles or not.  The value of the option supplied by the user or defaulted via --save-args can be retrieved using the isDryRun() getter method.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+Default parameters values:
+
+    FLAG        => 'dry-run'
+    DISPDEF     => undef
+    REQUIRED    => 0
+    HIDDEN      => dynamically determined
+    ADVANCED    => 0
+    SHORT_DESC  => undef
+    LONG_DESC   => "Run without generating output files."
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl --dry-run --verbose --outfile out.txt
+
+I<Code>
+
+    addDryRunOption(HIDDEN => 0);
+    processCommandLine();
+    openOut(*OUT,getOutfile());
+    unless(isDryRun())
+      {print("Real output.\n")}
+    closeOut(*OUT);
+
+I<Output> (standard error - no out.txt file created)
+
+    Starting dry run.
+    [out.txt] Opened output file.
+    [out.txt] Output file done.  Time taken: [0 Seconds].
+
+    Done.  STATUS: [EXIT-CODE: 0 ERRORS: 0 WARNINGS: 0 TIME: 0s]
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options are affected by this method:
+
+    --run               Renamable flag.
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<addErrorLimitOption> [FLAG DEFAULT DISPDEF REQUIRED HIDDEN ADVANCED SHORT_DESC LONG_DESC HEADING]
+
+This is a builtin option of type integer (see addOption() and addBuiltinOption()).  It controls how many times a specific warning or error is allowed to be printed (identified by the code line number).  There is no getter for this option.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+Default parameters values:
+
+    FLAG        => 'error-limit'
+    DEFAULT     => 0
+    DISPDEF     => undef
+    REQUIRED    => 0
+    HIDDEN      => 0
+    ADVANCED    => 1
+    SHORT_DESC  => undef
+    LONG_DESC   => "Limits each type of error/warning to this number of outputs.
+                    Intended to declutter output.  Note, a summary of warning/
+                    error types is printed when the script finishes, if one
+                    occurred or if in verbose mode.  0 = no limit.  See also
+                    --quiet."
+    HEADING     => ''
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl --error-limit 2
+
+I<Code>
+
+    addErrorLimitOption();
+    processCommandLine();
+    foreach(1..3)
+      {error("Problem in loop.")}
+
+I<Output>
+
+    ERROR1: Problem in loop.
+    ERROR2: Problem in loop.
+    ERROR2: NOTE: Further errors of this type will be suppressed.
+    ERROR2: Set --error-limit to 0 to turn off error suppression
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options are affected by this method:
+
+    --error-limit       Renamable flag.
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<addExtendedOption> [FLAG DEFAULT DISPDEF REQUIRED HIDDEN ADVANCED SHORT_DESC LONG_DESC HEADING]
+
+This is a builtin option of type count (see addOption() and addBuiltinOption()).  It affects a number of options:
+
+    Increases --help detail level
+    Increases warning & error detail level.
+    Increases --version information output.
+    Increases --usage detail level.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+Default parameters values:
+
+    FLAG        => 'extended'
+    REQUIRED    => 0
+    DISPDEF     => undef
+    DEFAULT     => 0
+    HIDDEN      => 0
+    SHORT_DESC  => "Print detailed usage."
+    LONG_DESC   => "Print extended usage/help/version/header (and errors/
+                    warnings where noted).  Supply alone for extended usage.
+                    Includes extended version in output file headers.
+                    Incompatible with --noheader.  See --help & --version."
+    ADVANCED    => 0
+    HEADING     => ''
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl --version --extended
+
+I<Code>
+
+    setScriptInfo(VERSION => '1.0.1');
+    addVersionOption(FLAG => 'v');
+    warning("This is a simple warning.",
+            {DETAIL => "These are further details about the warning."});
+    processCommandLine();
+
+I<Output> (mixed standard error and standard out)
+
+    WARNING1: This is a simple warning.
+              These are further details about the warning.
+    example.pl Version 1.0.1
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options are affected by this method:
+
+    --version           Renamable flag.
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<addForceOption> [FLAG DEFAULT DISPDEF REQUIRED HIDDEN ADVANCED SHORT_DESC LONG_DESC HEADING]
+
+This is a builtin option of type count (see addOption() and addBuiltinOption()).  It controls whether the quit() method will actually exit the script or return and continue running when a fatal error is encountered.  The value of the flag can be retrieved via the isForced() getter method.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+Default parameters values:
+
+    FLAG        => 'force'
+    REQUIRED    => 0
+    DISPDEF     => undef
+    DEFAULT     => 0
+    HIDDEN      => 0
+    SHORT_DESC  => undef
+    LONG_DESC   => "Prevent script-exit upon fatal error.  Use with extreme
+                    caution.  Will not override overwrite protection (see
+                    --overwrite or --skip)."
+    ADVANCED    => 1
+    HEADING     => ''
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl --force
+
+I<Code>
+
+    setScriptInfo(VERSION => '1.0.1');
+    addForceOption(ADVANCED => 0);
+    processCommandLine();
+    error("Something went horribly wrong.");
+    quit(1);
+    print("You will not see this output unless you provided --force.");
+
+I<Output>
+
+    You will not see this output unless you provided --force.
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options are affected by this method:
+
+    --force           Renamable flag.
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<addHeaderOption> [FLAG DEFAULT DISPDEF REQUIRED HIDDEN ADVANCED SHORT_DESC LONG_DESC HEADING]
+
+This is a builtin option of type negbool (see addOption() and addBuiltinOption()).  It controls whether headers will be added to all output files or not.  Its user-supplied (or default) value is retrievable via the headerRequested() getter method (after processCommandLine() has been explicitly or implicitly called) which returns a 0 or 1.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+Default parameter values:
+
+    FLAG        => 'header'
+    REQUIRED    => 0
+    DISPDEF     => undef
+    DEFAULT     => undef
+    HIDDEN      => 0
+    SHORT_DESC  => undef
+    LONG_DESC   => "Outfile header flag.  Headers are commented with '#' and
+                    include script version, date, and command line call at the
+                    top of every output file.  See --extended."
+    ADVANCED    => 0
+    HEADING     => ''
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl --no-header > out.txt
+
+I<Code>
+
+    addHeaderOption(DEFAULT => 1);
+    processCommandLine();
+    print("1");
+
+I<Output> (out.txt)
+
+    1
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options are affected by this method:
+
+    --header            Renamable flag.  See headerRequested()
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<addHelpOption> [FLAG DISPDEF HIDDEN ADVANCED SHORT_DESC LONG_DESC]
+
+This is a builtin option of type bool (see addOption() and addBuiltinOption()).  It controls whether the script will print a help message and exit or not.  The help message contains a description of what the script does and other basic information set via setScriptInfo() and the input and output file formats.  Input and output file formats are set by the FORMAT option of the addInfileOption(), addOutfileOption() and other file methods.  There is no getter method for this option, as the script immediately exits after the --help flag has been processed.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+Default parameters values:
+
+    FLAG        => 'help'
+    DISPDEF     => undef
+    REQUIRED    => 0
+    HIDDEN      => dynamically determined
+    ADVANCED    => 0
+    SHORT_DESC  => "Print general info and file formats."
+    LONG_DESC   => "Print general info and file format descriptions.  Includes
+                    advanced usage examples with --extended."
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl --help
+
+I<Code>
+
+    setScriptInfo(AUTHOR  => "Rob",
+                  CREATED => "11/5/2019",
+                  VERSION => "1.0",
+                  HELP    => "This is an example script.");
+    addInfileOption(FLAG   => "infile",
+                    FORMAT => "Free form ascii text file.");
+    addOutfileOption(FLAG   => "outfile",
+                     FORMAT => "Free form ascii text file.");
+    addHelpOption(FLAG => ['h','help','info']);
+    processCommandLine();
+
+I<Output>
+
+    example.pl version 1.0
+    Created: 11/5/2019
+    Last Modified: Tue Nov  5 16:13:37 2019
+
+    * WHAT IS THIS:   This is an example script.
+
+    * INPUT FORMAT:   Free form ascii text file.
+      ---infile
+
+    * OUTPUT FORMAT:  Free form ascii text file.
+      --outfile
+
+
+    Supply --usage to see usage output.
+
+    Supply `--help --extended` for advanced help.
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options are affected by this method:
+
+    --help              Renamable flag.
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<addInfileOption> FLAG [REQUIRED DEFAULT PRIMARY HIDDEN SHORT_DESC LONG_DESC FORMAT PAIR_WITH PAIR_RELAT FLAGLESS ADVANCED HEADING DISPDEF]
 
 Adds an input file option to the command line interface.
 
 FLAG is the name or names of the flag the user supplies on the command line with file, space-delimited list of files inside quotes, or a glob pattern inside quotes.  You can supply a single FLAG or a reference to an array of FLAGs.  Only alpha-numeric characters, dashes, and underscores are permitted.  Single character flags will be prepended with a single dash '-' and multi-character flags will get a double dash '--'.
 
-The return value is an input file type ID that is later used to obtain the files that the user has supplied on the command line (see getInfile(), getNextFileGroup(), getAllFileGroups()).  Files for each input file type are kept in a 2D array where the outer array is indexed by the number of occurrences of the flag on the command line (e.g. '-i') and the inner array is all the files supplied to that flag instance.  Note, CommandLineInterface globs input files, so to supply multiple files to a single instance of -i, you have to wrap the file names/glob pattern(s) in quotes.
+The return value is an option ID that is later used to obtain the files that the user has supplied on the command line (see getInfile(), getNextFileGroup(), getAllFileGroups()).  It can also be used to supply to makeMutuallyExclusive().  Files for each input file type are kept in a 2D array where the outer array is indexed by the number of occurrences of the flag on the command line (e.g. '-i') and the inner array is all the files supplied to that flag instance.  Note, CommandLineInterface globs input files, so to supply multiple files to a single instance of -i, you have to wrap the file names/glob pattern(s) in quotes.
 
 REQUIRED indicates whether CommandLineInterface should fail with an error if the user does not supply a required file type.  The value can be either 0 (false) or non-zero (e.g. "1") (true).
 
@@ -16003,9 +22317,17 @@ FORMAT is the description of the input file format that is printed when --help i
 
 PAIR_WITH and PAIR_RELAT allow the programmer to require a certain relative relationship with other input (or output) file parameters (already added).  PAIR_WITH takes the input (or output) file type ID (returned by the previous call to addInfileOption() or addOutfileOption()) and PAIR_RELAT takes one of 'ONETOONE', 'ONETOMANY', or 'ONETOONEORMANY'.  For example, if there should be one output file for every group of input files of type $intype1, then PAIR_WITH and PAIR_RELAT should be $intype1 and 'ONETOMANY', respectively.
 
+FLAGLESS, if non-zero, indicates that arguments without preceding flags are to be assumed to belong to this option.  Note, only 1 option may currently be flagless.
+
+If ADVANCED is non-zero, this option will only display in the advanced usage (i.e. when --extended is 3).
+
 All calls to addInfileOption() must occur before any/all calls to processCommandLine(), nextFileCombo(), getInfile, getNextFileGroup(), openOut(), openIn(), and getAllFileGroups().  If you wish to put calls to the add*Option methods at the bottom of the script, you must put them in a BEGIN block.
 
 The returned input file type ID must also be used when calling addOutfileSuffixOption() so that the interface can automatically construct output file names for you and perform overwrite checks.
+
+A HEADING string can be supplied to any option to have a section heading appear above the defined option.  Options appear in the usage in the order they are created, but note that required options without default values will appear at the top.
+
+The DISPDEF parameter is the "display default" simply describing the default in the usage message for this parameter.
 
 I<EXAMPLE>
 
@@ -16065,13 +22387,247 @@ Multiple values supplied to a PRIMARY file type's flag when STDIN is present cau
 
 PAIR_RELAT can be instructed to only allow 1 instance of an input file type (by supplying the string 'ONE') without needing PAIR_WITH to be defined.
 
-=item C<addOption> FLAG, VARREF [, TYPE, REQUIRED, DEFAULT, HIDDEN, SHORT_DESC, LONG_DESC, ACCEPTS]
+=item C<addLogfileOption> [FLAG APPEND REQUIRED DEFAULT SHORT_DESC LONG_DESC HIDDEN ADVANCED HEADING DISPDEF VERBOSE DEBUG WARN ERROR MIRROR HEADER RUNREPORT]
+
+This option and the option created by addLogfileSuffixOption allow logging of all error(), warning(), verbose(), debug(), and printRunReport() messages.  It is added by default (with FLAG=logfile, in APPEND mode, no mirroring, an header, and all output types selected) if not otherwise added.
+
+It is not possible to not add this option, but it can be added as a HIDDEN option.  Only a single logfile option is allowed, but both logfile and logfile suffix options can exist as a tagteam.  If the user supplies a log file or if a default is defined, all output is written to the log file.
+
+An option ID that can be used in makeMutuallyExclusive() is returned.
+
+The log file is managed automatically.  You do not need to open or close it.  Note, it is not the same as redirecting standard error.  Any thing explicitly printed to standard error will not go into the log file.
+
+To only print a message to the log and not to standard error, refer to the LOG hash parameter of verbose().  Supplying LOG to verbose() over-rides the VERBOSE argument to this method.
+
+FLAG is the name or names of the flag the user supplies on the command line with a log file path/name.  You can supply a single FLAG or a reference to an array of FLAGs.  Only alpha-numeric characters, dashes, and underscores are permitted.  Single character flags will be prepended with a single dash '-' and multi-character flags will get a double dash '--'.
+
+APPEND indicates whether the supplied log file will, by default, be appended to on each run, or over-written.
+
+REQUIRED indicates whether the option is required on the command line when the user runs the script.  If true and this option is not supplied, the user will either get an error (if any options were supplied) to indicate the missing required options, or the usage message if no options were supplied at all.
+
+Supplying a file path/name as a DEFAULT value means that logging will be turned on.  If the default file name is long or random, you can use DISPDEF to set the "display default" to be shown in the usage output.
+
+SHORT_DESC is the short version of the description of this option.  If set to undefined or an empty string, this option will not appear in the short usage message.  The short usage message is what the user will see if they run the script with no options.
+
+LONG_DESC is the long version of the description of this option.  If set to undefined or an empty string, this option will be set to a warning that the programmer has not provided a description of this option.  The long usage message is what the user will see if they run the script with only the --extended flag.
+
+If HIDDEN is set to a non-zero value, the option will not be included in the usage message.
+
+If ADVANCED is non-zero (e.g. 1), this option will not be shown in the usage unless --extended is greater than 1 (i.e. supplied more than once or with an integer value).
+
+A HEADING string can be supplied to any option to have a section heading appear above the defined option.  Options appear in the usage in the order they are created, but note that required options without default values will appear at the top.
+
+A non-zero value to MIRROR indicates that the output should also go to standard error when logging.  Default is false/0.  Each output type can be specifically selected to be included in the log via non-zero or zero values to VERBOSE, DEBUG, WARN, ERROR, HEADER, and RUNREPORT.  If not included in the log, those output types will continue to be printed to standard error despite the value of MIRROR.
+
+HEADER and RUNREPORT indicate whether a header containing run information should be the first log output and a footer containing a summary of errors, warnings, and run time should be the last log output.  The HEADER (if non-zero) will be printed each time the script is run with the same log file, despite the value of APPEND and the user's use of the global --header/--noheader option.
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl --logfile ../log.txt
+
+I<Code>
+
+    my $default = $0 . '.' . time() . '.log';
+    addLogfileOption(FLAG       => undef,
+                     APPEND     => 1,
+
+                     MIRROR     => 0,
+                     VERBOSE    => 1,
+                     DEBUG      => 1,
+                     WARN       => 1,
+                     ERROR      => 1,
+                     HEADER     => 1,
+                     RUNREPORT  => 1,
+
+                     REQUIRED   => 0,
+                     DEFAULT    => $default,
+                     DISPDEF    => 'example.pl.<date-time>.log',
+                     HIDDEN     => 0,
+                     SHORT_DESC => 'Log file.',
+                     LONG_DESC  => 'Log file.  Supply an empty string to ' .
+                                   'turn off logging.',
+                     ADVANCED   => 0,
+                     HEADING    => undef);
+    verbose('Test verbose message.');
+
+I<Output>
+
+    >cat ../log.txt
+    #your_version_number
+    #User: your_username
+    #Time: Thu Feb  9 15:43:36 2017
+    #Host: your_hostname
+    #PID: your_process_id
+    #Directory: /where/you/ran/the/script
+    #Command: /usr/bin/perl example.pl -i in.txt
+    Test verbose message.
+
+    Done.  STATUS: [EXIT-CODE: 0 ERRORS: 0 WARNINGS: 0 TIME: 0s]
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+    --verbose         Verbose level is effectively equivalent to log level.
+    --debug           Debug level affects what debug message go into the log.
+    --error-limit     Error limit suppresses repeated error output.
+    --logfile-suffix  This option is mutually exclusive with --logfile.
+
+I<LIMITATIONS>
+
+The logfile is not a redirect of all standard error output.  It only gets output from the verbose(), warning(), error(), and debug() methods.
+
+There is no way to output messages to both standard error and the log file.
+
+Only 1 logfile option can be created and it cannot be removed (though it can be hidden).
+
+Log files are not put in the directory specified by --outdir (because multiple output directories can be specified).
+
+I<ADVANCED>
+
+If a DEFAULT log file is defined, the user can supply an empty string (e.g. --logfile '') to disable logging.
+
+If a --logfile-suffix (see addLogfileSuffixOption()) is added, it is automatically mutually exclusive with this option.
+
+Note, --header and --no-header do not control header output in the log file.  The header will always output to the log file to record run parameters.
+
+A run report will be included in the log file output.
+
+=item C<addLogfileSuffixOption> PAIRID [FLAG VARREF REQUIRED DEFAULT HIDDEN SHORT_DESC LONG_DESC APPEND ADVANCED HEADING DISPDEF VERBOSE DEBUG WARN ERROR MIRROR HEADER RUNREPORT]
+
+This option and the option created by addLogfileOption allow logging of all error(), warning(), verbose(), debug(), and printRunReport() messages.  It is not added by default.
+
+This option, if added, is mutually exclusive with --logfile.  It must be paired with a string option added by addOption().  PAIRID is the value returned by addOption() and when both the paired option and the logfile suffix options have values, a log file is created with a name constructed by concatenating the string option's value and the logfile suffix option's value.
+
+An option ID that can be used in makeMutuallyExclusive() is returned.
+
+The log file is managed automatically.  You do not need to open or close it.  Note, it is not the same as redirecting standard error.  Any thing explicitly printed to standard error will not go into the log file.
+
+To only print a message to the log and not to standard error, refer to the LOG hash parameter of verbose().  Supplying LOG to verbose() over-rides the VERBOSE argument to this method.
+
+The default of APPEND is true (i.e. non-zero).  There can only be a single logfile suffix option.  If the user supplies a string to the paired option and a log file suffix or a default logfile suffix is defined, all error, warning, verbose, and debug output is written to the log file.  A header and run report is also always written to the log file.  The log level is the verbose level (see --verbose).  The debug level also reflects what debug output goes to the log file.  When a log file is supplied, error, warning, verbose, and debug messages will not go to standard error.
+
+FLAG is optional.  If not supplied, the default is "logfile-suffix" and results in a --logfile-suffix option that takes a string to be appended to the paired option's value.  FLAG is the name or names of the flag the user supplies on the command line with a log file path/name.  You can supply a single FLAG or a reference to an array of FLAGs.  Only alpha-numeric characters, dashes, and underscores are permitted.  Single character flags will be prepended with a single dash '-' and multi-character flags will get a double dash '--'.
+
+VARREF is a scalar reference to the supplied argument to the --logfile-suffix option.  If a user supplies --logfile-suffix, the scalar value referred to will have that value.
+
+REQUIRED indicates whether the option is required on the command line when the user runs the script.  If true and this option is not supplied, the user will either get an error (if any options were supplied) to indicate the missing required options, or the usage message if no options were supplied at all.
+
+Supplying a file suffix (e.g. ".log") as a DEFAULT value and supplying a DEFAULT for the paired string option (e.g. "myscript") means that logging will be turned on.  You can use DISPDEF to set the "display default" to be shown in the usage output if the value changes dynamically (e.g. ".<date>").
+
+If HIDDEN is set to a non-zero value, the option will not be included in the usage message.
+
+SHORT_DESC is the short version of the description of this option.  If set to undefined or an empty string, this option will not appear in the short usage message.  The short usage message is what the user will see if they run the script with no options.
+
+LONG_DESC is the long version of the description of this option.  If set to undefined or an empty string, this option will be set to a warning that the programmer has not provided a description of this option.  The long usage message is what the user will see if they run the script with only the --extended flag.
+
+APPEND indicates whether the supplied log file will, by default, be appended to on each run, or over-written.
+
+If ADVANCED is non-zero (e.g. 1), this option will not be shown in the usage unless --extended is greater than 1 (i.e. supplied more than once or with an integer value).
+
+A HEADING string can be supplied to any option to have a section heading appear above the defined option.  Options appear in the usage in the order they are created, but note that required options without default values will appear at the top.
+
+A non-zero value to MIRROR indicates that the output should also go to standard error when logging.  Default is false/0.  Each output type can be specifically selected to be included in the log via non-zero or zero values to VERBOSE, DEBUG, WARN, ERROR, HEADER, and RUNREPORT.  If not included in the log, those output types will continue to be printed to standard error despite the value of MIRROR.
+
+HEADER and RUNREPORT indicate whether a header containing run information should be the first log output and a footer containing a summary of errors, warnings, and run time should be the last log output.  The HEADER header (if non-zero) will be printed each time the script is run with the same log file, despite the value of APPEND and the user's use of the global --header/--noheader option.
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl --run-name attempt1 --logfile-suffix .log
+
+I<Code>
+
+    my($name);
+    my $nid = addOption(FLAG   => 'run-name',
+                        VARREF => \$name,
+                        TYPE   => 'string');
+    my($logsuff);
+    addLogfileSuffixOption(FLAG       => 'exhaustive',
+                           PAIRID     => $nid,
+                           VARREF     => \$logsuff,
+                           APPEND     => 1,
+
+                           MIRROR     => 0,
+                           VERBOSE    => 1,
+                           DEBUG      => 1,
+                           WARN       => 1,
+                           ERROR      => 1,
+                           HEADER     => 1,
+                           RUNREPORT  => 1,
+
+                           REQUIRED   => 0,
+                           DEFAULT    => '.txt',
+                           DISPDEF    => undef,
+                           HIDDEN     => 0,
+                           SHORT_DESC => 'Log file suffix.',
+                           LONG_DESC  => 'Log file suffix appended to the ' .
+                                         'value supplied to --run-name.  ' .
+                                         'Supply an empty string to turn off ' .
+                                         'logging.',
+                           ADVANCED   => 0,
+                           HEADING    => undef);
+    verbose('Test verbose message.');
+
+I<Output>
+
+    >cat attempt1.log
+    #your_version_number
+    #User: your_username
+    #Time: Thu Feb  9 15:43:36 2017
+    #Host: your_hostname
+    #PID: your_process_id
+    #Directory: /where/you/ran/the/script
+    #Command: /usr/bin/perl example.pl -i in.txt
+    Test verbose message.
+
+    Done.  STATUS: [EXIT-CODE: 0 ERRORS: 0 WARNINGS: 0 TIME: 0s]
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+    --verbose         Verbose level is effectively equivalent to log level.
+    --debug           Debug level affects what debug message go into the log.
+    --error-limit     Error limit suppresses repeated error output.
+    --logfile         This option is mutually exclusive with --logfile-suffix.
+
+I<LIMITATIONS>
+
+The logfile is not a redirect of all standard error output.  It only gets output from the verbose(), warning(), error(), and debug() methods.
+
+There is no way to output messages to both standard error and the log file.
+
+Only 1 logfile suffix option can be created and it cannot be removed (though it can be hidden).
+
+Log files are not put in the directory specified by --outdir (because multiple output directories can be specified).
+
+I<ADVANCED>
+
+If a DEFAULT log file is defined, the user can supply an empty string (e.g. --logfile '') to disable logging.
+
+If --logfile-suffix is added, it is automatically mutually exclusive with the --logfile option (see addLogfileOption()).
+
+Note, --header and --no-header do not control header output in the log file.  The header will always output to the log file to record run parameters.
+
+A run report will be included in the log file output.
+
+=item C<addOption> FLAG VARREF [TYPE REQUIRED DISPDEF HIDDEN SHORT_DESC LONG_DESC ACCEPTS ADVANCED HEADING DEFAULT]
 
 This method allows the programmer to create simple options on the command line.  The values of user-supplied options are available after processCommandLine() is called.
 
+It returns an option ID that can be used in makeMutuallyExclusive().
+
 FLAG is the name or names of the flag the user supplies on the command line (with or without an argument as defined by TYPE).  You can supply a single FLAG or a reference to an array of FLAGs.  Only alpha-numeric characters, dashes, and underscores are permitted.  Single character flags will be prepended with a single dash '-' and multi-character flags will get a double dash '--'.
 
-VARREF is a reference to the perl variable where the user's supplied value will be stored (e.g. $variable).
+VARREF is a reference to the variable where the user's supplied value will be stored (e.g. $variable).
 
 TYPE can be any of the following:
 
@@ -16083,9 +22639,11 @@ TYPE can be any of the following:
     enum    - enumeration where the argument can be one of a set of acceptable values defined by ACCEPTS.
     count   - A 'count' FLAG that can either be set with an integer argument or incremented by multiple instances of FLAG without an argument.  Do not mix FLAGs with and without arguments.
 
+If a TYPE is defined and an option takes an argument, values supplied by the user will be automatically subject to validation.  If an argument is invalid, it will cause a fatal error.
+
 REQUIRED indicates whether the option is required on the command line when the user runs the script.  If it is not supplied, the user will either get an error (if other options were supplied) to indicate the missing required options, or the usage message if no options were supplied at all.
 
-Supply a DEFAULT value for automatic inclusion in the usage message for this option.  This only affects the usage message.  The value referenced by VARREF is not altered to get this value.  The value referenced by VARREF should already be set to its default value before processCommandLine is called.  Though it may seem redundant, the programmer may have long or complex defaults that depend on other parameters, thus the displayed default string might be more succinctly described as 'auto' or described in the option description.
+DISPDEF is a "display default" shown in the usage.  Use this when a value is dynamically assigned, random, or long.
 
 If HIDDEN is set to a non-zero value, the option will not be included in the usage message.
 
@@ -16094,6 +22652,12 @@ SHORT_DESC is the short version of the description of this option.  If set to un
 LONG_DESC is the long version of the description of this option.  If set to undefined or an empty string, this option will be set to a warning that the programmer has not provided a description of this option.  The long usage message is what the user will see if they run the script with only the --extended flag.
 
 ACCEPTS takes a reference to an array of scalar values.  If defined/supplied, the list of acceptable values will be shown in the usage message for this option after the default value and before the description.  This parameter is intended for short lists of discrete values (i.e. enumerations) only.  Descriptions of acceptable value ranges should instead be incorporated into the LONG_DESC.
+
+If ADVANCED is non-zero, this option will only display in the advanced usage (i.e. when --extended is 3).
+
+A HEADING string can be supplied to any option to have a section heading appear above the defined option.  Options appear in the usage in the order they are created, but note that required options without default values will appear at the top.
+
+The DEFAULT parameter can be given a value such that when a value is not supplied by the user, the default will be assigned.  If no DEFAULT is set, but the variable referenced by the VARREF scalar reference has a value, the DEFAULT value is automatically set to the value referenced by VARREF.  If both VARREF and DEFAULT have differing values, a fatal error will be generated.
 
 I<EXAMPLE>
 
@@ -16130,23 +22694,42 @@ n/a
 
 I<LIMITATIONS>
 
-None.
+n/a
 
 I<ADVANCED>
 
-VARREF may be a reference to a method.  See `perldoc Getopt::Long` for more information and details.
+VARREF may be a code reference (i.e. a reference to a subroutine (named or anonymous)) (e.g. `ref($value) eq 'CODE'`).  See the underlying module documentation by running `perldoc Getopt::Long` on the command line for details on the arguments, however the value supplied to the FLAG on the command line is either $_[0] (for FLAGLESS options supplied without a flag) or $_[1] (for options that are not FLAGLESS).
+
+Note that any variable a subroutine (supplied to VARREF) modifies, will not be visible to CommandLineInterface.  CommandLineInterface however calls the subroutine for a number of reasons other than explicit values supplied on the command line in any particular run.  It will be called for the following reasons:
+
+ 1. To set an option supplied on the command line (as many times as it is
+    supplied)
+ 2. To set the supplied DEFAULT value (if appropriate)
+ 3. To set a previously user-supplied default (if appropriate)
+ 4. To clear out a potential value initialized in main (by passing undef) if
+    there is no default and a mutually exclusive partner option is supplied.
+
+A VARREF subroutine is not called to set (or clear out) a default value if no DEFAULT was supplied and a mutually exclusive option was not supplied.
+
+A VARREF subroutine is not called to set the supplied DEFAULT value if a user default for that option exists.
 
 If REQUIRED is true, but the reference provided is populated with a default value, the option is essentially optional.  Setting REQUIRED to true only forces the user to supply a value if the reference refers to an undefined or empty variable.  Note also that if the user provides no options on the command line, a general usage is printed, but if other options are supplied, and error about missing required options is generated.
 
-=item C<addOptions> GETOPTHASH [, REQUIRED, OVERWRITE, RENAME]
+=item C<addOptions> GETOPTHASH [REQUIRED OVERWRITE RENAME ADVANCED HEADING]
 
 Add an existing Getopt::Long hash.  This method mainly serves to help facilitate quick conversion of existing scripts which already use Getopt::Long.
+
+It returns a list (or reference to an array) of option IDs that can be used in makeMutuallyExclusive().
 
 GETOPTHASH is a reference to the hash that is supplied to Getopt::Long's GetOptions() method.  See `perldoc Getopt::Long` for details on the structure of the hash.
 
 addOptions can be called multiple times to add to the hash that will be eventually supplied to Getopt::Long's GetOptions() method.
 
 REQUIRED is the value indicating whether all of the options provided in the hash are required on the command line or not.
+
+If ADVANCED is non-zero, these options will only display in the advanced usage (i.e. when --extended is 3).
+
+A HEADING string can be supplied to any option to have a section heading appear above the defined option.  Options appear in the usage in the order they are created, but note that required options without default values will appear at the top.
 
 I<EXAMPLE>
 
@@ -16181,6 +22764,21 @@ This method does not convert input and output file options of existing scripts t
 
 I<ADVANCED>
 
+The GETOPTHASH may contain a code reference value (i.e. a reference to a subroutine (named or anonymous)) (e.g. `ref($value) eq 'CODE'`).  See the underlying module documentation by running `perldoc Getopt::Long` on the command line for details on the arguments, however the value supplied to the FLAG on the command line is either $_[0] (for FLAGLESS options supplied without a flag) or $_[1] (for options that are not FLAGLESS).
+
+Note that any variable a subroutine (supplied via GETOPTHASH) modifies, will not be visible to CommandLineInterface.  CommandLineInterface however calls the subroutine for a number of reasons other than explicit values supplied on the command line in any particular run.  It will be called for the following reasons:
+
+ 1. To set an option supplied on the command line (as many times as it is
+    supplied)
+ 2. To set the supplied DEFAULT value (if appropriate)
+ 3. To set a previously user-supplied default (if appropriate)
+ 4. To clear out a potential value initialized in main (by passing undef) if
+    there is no default and a mutually exclusive partner option is supplied.
+
+A subroutine in GETOPTHASH is not called to set (or clear out) a default value if no DEFAULT was supplied and a mutually exclusive option was not supplied.
+
+A subroutine in GETOPTHASH is not called to set the supplied DEFAULT value if a user default for that option exists.
+
 2 advanced/hidden parameters to this method exist:
 
 OVERWRITE deactivates a default option that you wish to handle yourself.  The key must be an exact match and thus is intended for advanced users only, as it requires looking at the source code of this module.
@@ -16189,13 +22787,13 @@ RENAME: [in development/experimental] If a reference to a value in the GetOption
 
 If REQUIRED is true, but the reference provided is populated with a default value, the option is essentially optional.  Setting REQUIRED to true only forces the user to supply a value if the reference refers to an undefined or empty variable.  Note also that if the user provides no options on the command line, a general usage is printed, but if other options are supplied, and error about missing required options is generated.
 
-=item C<addOutdirOption> FLAG [, REQUIRED, DEFAULT, HIDDEN, SHORT_DESC, LONG_DESC]
+=item C<addOutdirOption> FLAG [REQUIRED DEFAULT HIDDEN SHORT_DESC LONG_DESC FLAGLESS ADVANCED HEADING DISPDEF]
 
 Adds an output directory option to the command line interface.  All output files generated through the addOutfileSuffixOption() and addOutfileOption() methods will be put in the output directory if it is supplied.  The entire path (if any) is replaced with a path to the supplied output directory.  If an outdir is not provided by the user, the supplied path of the outfile or the input file (to which a suffix is added) is where the output file will go.
 
 FLAG is the name or names of the flag the user supplies on the command line with a directory argument.  FLAG can be a single scalar value or a reference to an array of FLAGs.  Only alpha-numeric characters, dashes, and underscores are permitted.  Single character flags will be prepended with a single dash '-' and multi-character flags will get a double dash '--'.
 
-No return value.
+It returns an option ID that can be used in makeMutuallyExclusive().
 
 The output directory(/ies) that the user supplies are stored in a 2 dimensional array and are paired with the other file options in a 1:1 or 1:M relationship.  The file names/paths returned by getOutfile() will include the output directory that was supplied by the user via this option.
 
@@ -16214,6 +22812,14 @@ SHORT_DESC is the short version of the usage message for this output directory o
 LONG_DESC is the long version of the usage message for this output directory option.  If LONG_DESC is not defined/supplied and SHORT_DESC has a non-empty string, SHORT_DESC is copied to LONG_DESC.
 
 Note, both SHORT_DESC and LONG_DESC have auto-generated formatting which includes details on the REQUIRED state as well as the flag(s) parsed from FLAG.
+
+FLAGLESS, if non-zero, indicates that arguments without preceding flags are to be assumed to belong to this option.  Note, only 1 option may currently be flagless.
+
+If ADVANCED is non-zero, this option will only display in the advanced usage (i.e. when --extended is 3).
+
+A HEADING string can be supplied to any option to have a section heading appear above the defined option.  Options appear in the usage in the order they are created, but note that required options without default values will appear at the top.
+
+DISPDEF is a "display default" shown in the usage.  Use this when a value is dynamically assigned, random, or long.
 
 All calls to addOutdirOption() must occur before any/all calls to processCommandLine(), nextFileCombo(), getInfile, getNextFileGroup(), openOut(), openIn(), and getAllFileGroups().  If you wish to put calls to the add*Option methods at the bottom of the script, you must put them in a BEGIN block.
 
@@ -16269,11 +22875,11 @@ An alternative usage is to supply as many directories as match the number of fil
 
 One could also supply an output directory for each and every input file.
 
-=item C<addOutfileOption> FLAG [, COLLISIONMODE, REQUIRED, PRIMARY, DEFAULT, SHORT_DESC, LONG_DESC, FORMAT, HIDDEN, PAIR_WITH, PAIR_RELAT]
+=item C<addOutfileOption> FLAG [COLLISIONMODE REQUIRED PRIMARY DEFAULT SHORT_DESC LONG_DESC FORMAT HIDDEN PAIR_WITH PAIR_RELAT FLAGLESS ADVANCED HEADING DISPDEF]
 
 FLAG is the name or names of the flag the user supplies on the command line with a file argument.  FLAG can be a single scalar value or a reference to an array of FLAGs.  Only alpha-numeric characters, dashes, and underscores are permitted.  Single character flags will be prepended with a single dash '-' and multi-character flags will get a double dash '--'.
 
-The return value is an output file type ID that is later used to obtain the output file names constructed from the output file names and output directory name(s) that the user has supplied on the command line (see getOutfile() and getNextFileGroup()).
+The return value is an option ID that is later used to obtain the output file names constructed from the output file names and output directory name(s) that the user has supplied on the command line (see getOutfile() and getNextFileGroup()).  It can also be used in a call to makeMutuallyExclusive() with IDs from other options.
 
 COLLISIONMODE is an advanced feature that determines how to handle situations where 2 or more combinations of input files end up generating output into the same output file.
 
@@ -16289,8 +22895,6 @@ There may be any number of PRIMARY output file types.  Setting PRIMARY to a non-
 
 A DEFAULT output file can be provided.  If there is no DEFAULT, output will go to STDOUT.  If there is no default desired, do not include the DEFAULT key or supply it as undef (the builtin perl function).  Note, setting a DEFAULT suffix will cause output for this output file type to never be printed to STDOUT.
 
-To construct output file names with an immutable, always-present output file name (e.g. 'output.log') that the user should not see as an option in the usage or help output, set HIDDEN to a non-zero value.  If HIDDEN is unsupplied, the default will be 0 if the file type is not linked to another file type that is itself HIDDEN.  If the linked file is HIDDEN, the default will be HIDDEN for this option as well.
-
 SHORT_DESC is the short version of the usage message for this output file type.  An empty string will cause this option to not be in the short version of the usage message.
 
 LONG_DESC is the long version of the usage message for this output file type.  If LONG_DESC is not defined/supplied and SHORT_DESC has a non-empty string, SHORT_DESC is copied to LONG_DESC.
@@ -16299,7 +22903,17 @@ Note, both SHORT_DESC and LONG_DESC have auto-generated formatting which include
 
 FORMAT is the description of the output file format that is printed when --help is provided by the user.  The auto-generated details for output format descriptions includes the applicable flag(s).
 
+To construct output file names with an immutable, always-present output file name (e.g. 'always_output.txt') that the user should not see as an option in the usage or help output, set HIDDEN to a non-zero value.  If HIDDEN is unsupplied, the default will be 0 if the file type is not linked to another file type that is itself HIDDEN.  If the linked file is HIDDEN, the default will be HIDDEN for this option as well.
+
 PAIR_WITH and PAIR_RELAT allow the programmer to require a certain relative relationship with other input (or output) file parameters (already added).  PAIR_WITH takes the input (or output) file type ID (returned by the previous call to addInfileOption() or addOutfileOption()) and PAIR_RELAT takes one of 'ONETOONE', 'ONETOMANY', or 'ONETOONEORMANY'.  For example, if there should be one output file for every group of input files of type $intype1, then PAIR_WITH and PAIR_RELAT should be $intype1 and 'ONETOMANY', respectively.
+
+FLAGLESS, if non-zero, indicates that arguments without preceding flags are to be assumed to belong to this option.  Note, only 1 option may currently be flagless.
+
+If ADVANCED is non-zero, this option will only display in the advanced usage (i.e. when --extended is 3).
+
+A HEADING string can be supplied to any option to have a section heading appear above the defined option.  Options appear in the usage in the order they are created, but note that required options without default values will appear at the top.
+
+DISPDEF is a "display default" shown in the usage.  Use this when a value is dynamically assigned, random, or long.
 
 All calls to addOutfileOption() must occur before any/all calls to processCommandLine(), nextFileCombo(), getInfile, getNextFileGroup(), openOut(), openIn(), and getAllFileGroups().  If you wish to put calls to the add*Option methods at the bottom of the script, you must put them in a BEGIN block.
 
@@ -16352,17 +22966,33 @@ I<ADVANCED>
 
 A COLLISIONMODE of 'rename' handles conflicting output file names by appending the input file names they are associated with.  All of the files in the file set returned by the nextFileCombo() iterator are evaluated, and the fewest number of input file names are concatenated together with the output file name as is needed to make the output file names unique.
 
-=item C<addOutfileSuffixOption> FLAG, FILETYPEID [, VARREF, COLLISIONMODE, REQUIRED, PRIMARY, DEFAULT, HIDDEN, SHORT_DESC, LONG_DESC, FORMAT]
+=item C<addOutfileSuffixOption> FLAG FILETYPEID [VARREF REQUIRED PRIMARY DEFAULT HIDDEN SHORT_DESC LONG_DESC FORMAT COLLISIONMODE ADVANCED HEADING DISPDEF]
 
 Adds an output file suffix option to the command line interface.
 
 FLAG is the name or names of the flag the user supplies on the command line with a suffix argument.  FLAG can be a single scalar value or a reference to an array of FLAGs.  Only alpha-numeric characters, dashes, and underscores are permitted.  Single character flags will be prepended with a single dash '-' and multi-character flags will get a double dash '--'.
 
-The return value is an output file suffix type ID that is later used to obtain the output file names constructed from the input file names and output directory name(s) that the user has supplied on the command line (see getOutfile() and getNextFileGroup()).  Only one suffix is allowed per flag on the command line.  Note, CommandLineInterface appends only.
+The return value is an option ID that is later used to obtain the output file names constructed from the input file names and output directory name(s) that the user has supplied on the command line (see getOutfile() and getNextFileGroup()).  It can also be used in a call to makeMutuallyExclusive() with IDs from other options.  Only one suffix is allowed per flag on the command line.  Note, CommandLineInterface appends only.
 
 FILETYPEID is the ID of the input file type returned by addInfileOption() indicating the files to which the suffix provided by the user on the command line will be appended.
 
 Since output file names are constructed automatically and retrieved by getOutfile(), the VARREF option is not required (and is in fact discouraged).  But if you want to be able to obtain the suffix to construct custom file names (which note, will not have the full overwrite protection provided by CommandLineInterface), you can provide a reference to a scalar so that after the command line is processed, you will have the suffix provided by the user.  Note also that DEFAULT is what is used as the suffix when the user does not provide one.  The pre-existing value of VARREF is ignored.
+
+REQUIRED indicates whether CommandLineInterface should fail with an error if the user does not supply a required suffix type.  The value can be either 0 (false) or non-zero (e.g. "1") (true).
+
+There may be any number of PRIMARY output file types.  Setting PRIMARY to a non-zero value indicates that if no output file suffix is supplied by the user and there is no default set, output to this output file type should be printed to STDOUT.
+
+A DEFAULT output file suffix can be provided.  If the user does not supply a suffix, the default will be used to construct output file names.  If there is no default desired, do not include the DEFAULT key or supply it as undef (the builtin perl function).  Note, setting a DEFAULT suffix will cause output for this output file type to never be printed to STDOUT.
+
+To construct output file names with an immutable, always-present suffix (e.g. '.out') that the user should not see as an option in the usage or help output, set HIDDEN to a non-zero value.  If HIDDEN is unsupplied, the default will be 0 if the file type is not linked to another file type that is itself HIDDEN.  If the linked file is HIDDEN, the default will be HIDDEN for this option as well.
+
+SHORT_DESC is the short version of the usage message for this output file type.  An empty string will cause this option to not be in the short version of the usage message.
+
+LONG_DESC is the long version of the usage message for this output file type.  If LONG_DESC is not defined/supplied and SHORT_DESC has a non-empty string, SHORT_DESC is copied to LONG_DESC.
+
+Note, both SHORT_DESC and LONG_DESC have auto-generated formatting which includes details on the REQUIRED and PRIMARY states as well as the flag(s) parsed from FLAG.
+
+FORMAT is the description of the output file format that is printed when --help is provided by the user.  The auto-generated details for output format descriptions includes the applicable flag(s).
 
 COLLISIONMODE is an advanced feature that determines how to handle situations where 2 or more combinations of input files end up generating output into the same output file.
 
@@ -16372,21 +23002,11 @@ COLLISIONMODE can be set to 1 of 3 modes/strategies, each represented by a strin
 
 The COLLISIONMODE set here is over-ridden by the COLLISIONMODE set by setDefaults().  This is because the user is intended to use --collision-mode on the command line to change the behavior of the script and setDefaults is supplying a default value for that flag.  This behavior will change when requirement 114 is implemented.
 
-REQUIRED indicates whether CommandLineInterface should fail with an error if the user does not supply a required suffix type.  The value can be either 0 (false) or non-zero (e.g. "1") (true).
+DISPDEF is a "display default" shown in the usage.  Use this when a value is dynamically assigned, random, or long.
 
-There may be any number of PRIMARY output file types.  Setting PRIMARY to a non-zero value indicates that if no output file suffix is supplied by the user and there is no default set, output to this output file type should be printed to STDOUT.
+If ADVANCED is non-zero, this option will only display in the advanced usage (i.e. when --extended is 3).
 
-A DEFAULT output file suffix can be provided.  If the user does not supply a suffix, the default will be used to construct output file names.  If there is no default desired, do not include the DEFAULT key or supply it as undef (the builtin perl function).  Note, setting a DEFAULT suffix will cause output for this output file type to never be printed to STDOUT.
-
-To construct output file names with an immutable, always-present suffix (e.g. '.log') that the user should not see as an option in the usage or help output, set HIDDEN to a non-zero value.  If HIDDEN is unsupplied, the default will be 0 if the file type is not linked to another file type that is itself HIDDEN.  If the linked file is HIDDEN, the default will be HIDDEN for this option as well.
-
-SHORT_DESC is the short version of the usage message for this output file type.  An empty string will cause this option to not be in the short version of the usage message.
-
-LONG_DESC is the long version of the usage message for this output file type.  If LONG_DESC is not defined/supplied and SHORT_DESC has a non-empty string, SHORT_DESC is copied to LONG_DESC.
-
-Note, both SHORT_DESC and LONG_DESC have auto-generated formatting which includes details on the REQUIRED and PRIMARY states as well as the flag(s) parsed from FLAG.
-
-FORMAT is the description of the output file format that is printed when --help is provided by the user.  The auto-generated details for output format descriptions includes the applicable flag(s).
+A HEADING string can be supplied to any option to have a section heading appear above the defined option.  Options appear in the usage in the order they are created, but note that required options without default values will appear at the top.
 
 All calls to addOutfileSuffixOption() must occur before any/all calls to processCommandLine(), nextFileCombo(), getOutfile, getNextFileGroup(), openIn(), openOut(), and getAllFileGroups().  If you wish to put calls to the add*Option methods at the bottom of the script, you must put them in a BEGIN block.
 
@@ -16450,7 +23070,7 @@ Note that addOutfileOption() is a wrapper for a hidden and specially treated cal
 
 A COLLISIONMODE of 'rename' handles conflicting output file names by compounding input file names.  This requires multiple types of input files.  All of the files in the file set advanced to by the nextFileCombo() iterator are evaluated and the fewest number of input file names are concatenated together as is needed to make the output file names unique.
 
-=item C<addOutfileTagteamOption> FLAG_SUFF, FLAG_FILE, FILETYPEID (or PAIR_WITH) [, PAIR_RELAT, VARREF, REQUIRED, PRIMARY, FORMAT, DEFAULT, DEFAULT_IS_FILE, HIDDEN_SUFF, HIDDEN_FILE, SHORT_DESC_SUFF, SHORT_DESC_FILE, LONG_DESC_SUFF, LONG_DESC_FILE, COLLISIONMODE_SUFF, COLLISIONMODE_FILE]
+=item C<addOutfileTagteamOption> FLAG_SUFF FLAG_FILE FILETYPEID|PAIR_WITH [PAIR_RELAT VARREF_SUFF REQUIRED PRIMARY FORMAT DEFAULT DEFAULT_IS_FILE HIDDEN_SUFF HIDDEN_FILE SHORT_DESC_SUFF SHORT_DESC_FILE LONG_DESC_SUFF LONG_DESC_FILE COLLISIONMODE_SUFF COLLISIONMODE_FILE ADVANCED_SUFF ADVANCED_FILE DISPDEF HEADING]
 
 Adds an output file suffix option and an output file option to the command line interface.  The resulting 2 options are mutually exclusive and allow the user to either specify a full output file name or an output file suffix (appended to an input file name) for the same generated output.
 
@@ -16478,6 +23098,8 @@ DEFAULT - See addOutfileSuffixOption's DEFAULT parameter.
 
 DEFAULT_IS_FILE - If this is a non-zero value, the DEFAULT parameter (above) is supplied to addOutfileOption's DEFAULT parameter and addOutfileSuffixOption's DEFAULT parameter is supplied as undefined.  Only one or the other can have a default value, not both.
 
+DISPDEF - See addOutfileSuffixOption's DISPDEF parameter.
+
 HIDDEN_SUFF & HIDDEN_FILE - See addOutfileSuffixOption's & addOutfileOption's HIDDEN parameter (respectively).  Briefly - whether or not the option is hidden in the usage output.
 
 SHORT_DESC_SUFF & SHORT_DESC_FILE - See addOutfileSuffixOption's & addOutfileOption's SHORT_DESC parameter (respectively).
@@ -16487,6 +23109,10 @@ LONG_DESC_SUFF & LONG_DESC_FILE - See addOutfileSuffixOption's & addOutfileOptio
 COLLISIONMODE_SUFF & COLLISIONMODE_FILE - See addOutfileSuffixOption's & addOutfileOption's COLLISIONMODE parameter (respectively).
 
 All calls to addOutfileTagteamOption() must occur before any/all calls to processCommandLine(), nextFileCombo(), getOutfile, getNextFileGroup(), openIn(), openOut(), and getAllFileGroups().  If you wish to put calls to the add*Option methods at the bottom of the script, you must put them in a BEGIN block.
+
+If ADVANCED_FILE & ADVANCED_SUFF are non-zero, thed outfile and outfile suffix options will only display in the advanced usage (i.e. when --extended is 3).
+
+A HEADING string can be supplied to any option to have a section heading appear above the defined option.  Options appear in the usage in the order they are created, but note that required options without default values will appear at the top.
 
 I<EXAMPLE>
 
@@ -16561,6 +23187,514 @@ You can actually call addOutfileTagteamOption() once with no parameters to creat
 
 FILETYPEID can actually be an optional parameter is there has only been 1 call to addInfileOption().  If there have been multiple input file options created, the FILETYPEID is required.
 
+=item C<addOverwriteOption> [FLAG DEFAULT DISPDEF REQUIRED HIDDEN ADVANCED SHORT_DESC LONG_DESC HEADING]
+
+This is a builtin option of type count (see addOption() and addBuiltinOption()).  It affects whether or not pre-existing output files will generate an error or not and its user-supplied (or default) value is retrievable via the isOverwrite() getter method (after processCommandLine() has been explicitly or implicitly called) which returns the overwrite level integer value.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+Default parameter values:
+
+    FLAG        => 'overwrite'
+    REQUIRED    => 0
+    DISPDEF     => undef
+    DEFAULT     => 0
+    HIDDEN      => 0
+    SHORT_DESC  => undef
+    LONG_DESC   => "Overwrite existing output files.  By default, existing
+                    output files will not be over-written.  Supply twice to
+                    safely remove pre-existing output directories (See
+                    --outdir).  This will not remove a directory containing
+                    manually touched files."
+    ADVANCED    => 0
+    HEADING     => ''
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl --overwrite --outfile out.txt
+
+I<Code>
+
+    addOutfileOption();
+    addOverwriteOption();
+    processCommandLine();
+    openOut(*OUT,getOutfile());
+    print("1");
+
+I<Output> (out.txt)
+
+    1
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options are affected by this method:
+
+    --overwrite         Renamable flag.
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<addPipelineOption> [FLAG DEFAULT DISPDEF REQUIRED HIDDEN ADVANCED SHORT_DESC LONG_DESC HEADING]
+
+This is a builtin option of type negbool (see addOption() and addBuiltinOption()).  It controls the inclusion of the script name in errors, warnings, and debug messages in order to know where those prints are coming from when mixed with other output.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+Default parameters values:
+
+    FLAG        => 'pipeline'
+    DEFAULT     => undef
+    DISPDEF     => undef
+    REQUIRED    => 0
+    HIDDEN      => 0
+    ADVANCED    => 1
+    SHORT_DESC  => undef
+    LONG_DESC   => "Supply --pipeline to include the script name in errors,
+                    warnings, and debug messages.  If not supplied (and no
+                    default set), the script will automatically determine if it
+                    is running within a series of piped commands or as a part of
+                    a parent script.  Note, supplying either flag will prevent
+                    that check from happening."
+    HEADING     => 'USER DEFAULTS'
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl --pipeline
+
+I<Code>
+
+    addSaveArgsOption();
+    processCommandLine();
+    warning("Invalid option.");
+
+I<Output>
+
+    WARNING1:example.pl: Invalid option.
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options are affected by this method:
+
+    --debug             Renamable flag.
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<addQuietOption> [FLAG DEFAULT DISPDEF HIDDEN ADVANCED SHORT_DESC LONG_DESC HEADING]
+
+This is a builtin option of type bool (see addOption() and addBuiltinOption()).  It controls output of the verbose(), debug(), warning(), and error() methods and its user-supplied (or default) value is retrievable via the isQuiet() getter method (after processCommandLine() has been explicitly or implicitly called) which returns a 0 or 1.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+Default parameters values:
+
+    FLAG        => 'quiet'
+    DISPDEF     => undef
+    DEFAULT     => 0
+    HIDDEN      => 0
+    SHORT_DESC  => undef
+    LONG_DESC   => "Quiet mode."
+    ADVANCED    => 0
+    HEADING     => ''
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl --silent
+
+I<Code>
+
+    addQuietOption(FLAG => 'silent');
+    processCommandLine();
+    verbose("This is verbose level 1 (the default).");
+    warning("Meh, this is just a warning.");
+    error("Danger Will Robinson!");
+    print(isQuiet());
+
+I<Output> (mised stderr & stdout)
+
+    0
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options are affected by this method:
+
+    --quiet             Renamable flag.  See isQuiet()
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<addRunOption> [FLAG DISPDEF HIDDEN ADVANCED SHORT_DESC LONG_DESC]
+
+This is a builtin option of type bool (see addOption() and addBuiltinOption()).  It explicitly controls whether the script will run or not when the default run mode (set by setDefaults()) is either usage, help, or dry-run.  By default, run mode is determined based on the default run mode and the assortment of options supplied.  The only time the --run option is necessary is when the default run mode is not 'run' and all options are optional or have default values.  There is no getter method for this option.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+Default parameters values:
+
+    FLAG        => 'run'
+    DISPDEF     => undef
+    REQUIRED    => 0
+    HIDDEN      => dynamically determined
+    ADVANCED    => 0
+    SHORT_DESC  => "Run the script."
+    LONG_DESC   => "This option runs the script.  It is only necessary to supply
+                    this option if the script contains no required options or
+                    when all required options have default values that are
+                    either hard-coded, or provided via --save-args."
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl --run
+
+I<Code>
+
+    addRunOption(HIDDEN => 0);
+    processCommandLine();
+    print("Ran.\n");
+
+I<Output>
+
+    Ran.
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options are affected by this method:
+
+    --run               Renamable flag.
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<addSaveArgsOption> [FLAG HIDDEN ADVANCED SHORT_DESC LONG_DESC HEADING]
+
+This is a builtin option of type bool (see addOption() and addBuiltinOption()).  It controls the storage of user defaults and its user-supplied (or default) value is not retrievable since the script exits immediately after processing.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+Options saved as user defaults by --saved-args will be reflected in the default values displayed in the usage.  If saved options exist, the --save-args option will appear in all usage outputs (except the error usage) and will be shown in the command displayed in any output file headers (inside square brackets at the end of the command).
+
+Defaults are stored in ~/.rpst/$0.  Note, if the user adds default flags, it will change the default run mode from --usage to --run and will change the run mode flags shown in the usage (--run, --dry-run, --usage, & --help).
+
+Default parameters values:
+
+    FLAG        => 'save-args'
+    DEFAULT     => 0
+    HIDDEN      => 0
+    ADVANCED    => ($user_defaults_exist ? 0 : 1)
+    SHORT_DESC  => "Save accompanying command line arguments as user defaults."
+    LONG_DESC   => "Save accompanying command line arguments as defaults to be
+                    used in every call of this script.  Replaces previously
+                    saved args.  Supply without other args to removed saved
+                    args.  When there are no user defaults set, this option will
+                    only appear in the advanced usage (--extended 2).  Values
+                    are stored in [/path/to/.rpst]."
+    HEADING     => 'USER DEFAULTS'
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl --save-args --verbose
+
+I<Code>
+
+    addSaveArgsOption(ADVANCED => 0);
+    processCommandLine();
+
+I<Output>
+
+    Old user defaults: [].
+    New user defaults: [--verbose].
+    Changing default run mode to 'run'
+      --dry-run will be added-to/remain-in the usage output.
+      --usage   will be added-to/remain-in the usage output.
+      --help    will be added-to/remain-in the usage output.
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options are affected by this method:
+
+    --run               Renamable flag.
+    --dry-run           Renamable flag.
+    --usage             Renamable flag.
+    --help              Renamable flag.
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<addSkipOption> [FLAG DEFAULT DISPDEF REQUIRED HIDDEN ADVANCED SHORT_DESC LONG_DESC HEADING]
+
+This is a builtin option of type bool (see addOption() and addBuiltinOption()).  It affects whether or not pre-existing output files will be skipped or not by the nextFileCombo() iterator.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+If any output file among multiple output file types already exists when --skip is true, the entire set of files is skipped.  E.g. if input file 1 is processed to create output files 'A' and 'B', and output file 'A' exists and 'B' does not, input file 1 is not processed and output files 'A' and 'B' are not touched/created.  Input file 2 however will proceed to be processed to generate output files of types 'A' and 'B' of its own.
+
+The user-supplied (or default) value of the --skip option is retrievable via the isSkip() getter method (after processCommandLine() has been explicitly or implicitly called) which returns a 0 or 1 value.
+
+Default parameter values:
+
+    FLAG        => 'skip'
+    REQUIRED    => 0
+    DISPDEF     => undef
+    DEFAULT     => 0
+    HIDDEN      => 0
+    SHORT_DESC  => undef
+    LONG_DESC   => "Skip existing output files."
+    ADVANCED    => 0
+    HEADING     => ''
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    echo "test" > out.txt
+    example.pl --skip-existing --outfile out.txt
+
+I<Code>
+
+    addOutfileOption();
+    addOverwriteOption();
+    processCommandLine();
+    if(openOut(*OUT,getOutfile)))
+      {print("1")}
+
+I<Output> (out.txt)
+
+    test
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options are affected by this method:
+
+    --skip              Renamable flag.
+
+I<LIMITATIONS>
+
+There is no way to prevent print statements when openOut does not open a skipped file, so the return of openOut() must be checked before printing.
+
+I<ADVANCED>
+
+n/a
+
+=item C<addUsageOption> [FLAG DISPDEF HIDDEN ADVANCED SHORT_DESC LONG_DESC]
+
+This is a builtin option of type bool (see addOption() and addBuiltinOption()).  It controls whether the script will prin the usage and exit or not.  There is no getter method to retrieve the value of this option, as the script automatically exits when this option is encountered.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+Default parameters values:
+
+    FLAG        => 'usage'
+    DISPDEF     => undef
+    REQUIRED    => 0
+    HIDDEN      => dynamically determined
+    ADVANCED    => 0
+    SHORT_DESC  => undef
+    LONG_DESC   => "Print this usage message."
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl --usage
+
+I<Code>
+
+    addUsageOption(HIDDEN => 0);
+    processCommandLine();
+
+I<Output> (standard error - no out.txt file created)
+
+    example.pl [OPTIONS]
+
+      <file*...>...       Input file(s).
+      -o <sfx>            [STDOUT] Outfile suffix appended to file names
+                          supplied to [-i].
+      --help              Print general info and file formats.
+      --run               Run the script.
+      --extended [<cnt>]  Print detailed usage.
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options are affected by this method:
+
+    --usage             Renamable flag.
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<addVerboseOption> [FLAG DEFAULT DISPDEF REQUIRED HIDDEN ADVANCED SHORT_DESC LONG_DESC HEADING]
+
+This is a builtin option of type count (see addOption() and addBuiltinOption()).  It controls output of the verbose() method and its user-supplied (or default) value is retrievable via the isVerbose() getter method (after processCommandLine() has been explicitly or implicitly called) which returns the verbose level integer value.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+Default parameters values:
+
+    FLAG        => 'verbose'
+    REQUIRED    => 0
+    DISPDEF     => undef
+    DEFAULT     => 0
+    HIDDEN      => 0
+    SHORT_DESC  => undef
+    LONG_DESC   => "Verbose mode."
+    ADVANCED    => 0
+    HEADING     => 'UNIVERSAL BASIC OPTIONS'
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl --verbosity
+
+I<Code>
+
+    addVerboseOption(FLAG => 'verbosity');
+    processCommandLine();
+    verbose("This is verbose level 1 (the default).");
+    verbose({LEVEL => 2},"This is verbose level 2.");
+    print(isVerbose());
+
+I<Output> (mised stderr & stdout)
+
+    This is verbose level 1 (the default).
+    1
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options are affected by this method:
+
+    --verbose           Renamable flag.  See verbose() and verboseOverMe()
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<addVersionOption> [FLAG DISPDEF HIDDEN ADVANCED SHORT_DESC LONG_DESC HEADING]
+
+This is a builtin option of type bool (see addOption() and addBuiltinOption()).  It causes the script to output version information set by setScriptInfo().  There is no getter for this option, as when the flag is provided, the script exits immediately after the flag is encountered during command line processing.
+
+It returns an option ID that can be used in makeMutuallyExclusive().
+
+Default parameters values:
+
+    FLAG        => 'version'
+    DISPDEF     => undef
+    HIDDEN      => 0
+    SHORT_DESC  => undef
+    LONG_DESC   => "Verbose mode."
+    ADVANCED    => 0
+    HEADING     => ''
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl -v
+
+I<Code>
+
+    setScriptInfo(VERSION => '1.0.1');
+    addVersionOption(FLAG => 'v');
+    processCommandLine();
+
+I<Output>
+
+    1.0.1
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options are affected by this method:
+
+    --version           Renamable flag.
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
 =item C<closeIn> HANDLE
 
 Closes and untracks the file connected to HANDLE.
@@ -16591,7 +23725,7 @@ I<ASSOCIATED FLAGS>
 
 The following default options affect the behavior of this method:
 
-    --quiet             Suppress all errors, warnings, & debugs.  See quiet()
+    --quiet             Suppress all errors, warnings, & debugs.  See isQuiet()
     --verbose           Prints status.  See verbose() and verboseOverMe()
     --debug             Prints debug messages.  See debug()
 
@@ -16633,7 +23767,7 @@ I<ASSOCIATED FLAGS>
 
 The following default options affect the behavior of this method:
 
-    --quiet             Suppress all errors, warnings, & debugs.  See quiet()
+    --quiet             Suppress all errors, warnings, & debugs.  See isQuiet()
     --verbose           Prints status.  See verbose() and verboseOverMe()
     --debug             Prints debug messages.  See debug()
 
@@ -16647,13 +23781,17 @@ Generates verbose messages if --verbose is supplied on the command line and QUIE
 
 Will not close STDOUT.
 
-=item C<debug> EXPRs [, {LEVEL}]
+=item C<debug> EXPRs [{LEVEL DETAIL}]
 
 Print messages along with line numbers.  Messages are prepended with 'DEBUG#: ' where # indicated the order in which the debug calls were made.
 
 Multiple instances of --debug (or a value supplied to --debug) increases the debug level.
 
-A debug level greater than 1 also inserts a call trace in front of the debug message (and after the debug number).
+LEVEL (which defaults to 1) indicates the minimum value of --debug (supplied by the user) at which this message will print.  E.g. If the message this prints is assigned level 2 and the user supplies `--debug 2` on the command line (or higher), the message will print.  Any lower, and it will not print.
+
+A debug LEVEL greater than 1 also inserts a call trace in front of the debug message (and after the debug number).
+
+Note that if logging of debug messages is enabled and log output is not being mirrored to standard error (see addLogfileOption() and/or addLogfileSuffixOption()), all debug output to standard error will be suppressed.
 
 I<EXAMPLE>
 
@@ -16680,6 +23818,8 @@ The following default options affect the behavior of this method:
     --debug             Prints debug messages.
     --quiet             Suppress all error, warning, verbose, & debug messages.
     --pipeline          Prepends script name to errors, warnings, & debugs.
+    --logfile           Can redirect verbose output to a log file
+    --logfile-suffix    Can redirect verbose output to a log file
 
 I<LIMITATIONS>
 
@@ -16689,13 +23829,88 @@ I<ADVANCED>
 
 Supplying a negative level to --debug on the command line debugs the CommandLineInterface inner-workings.  The debug level of CommandLineInterface that produces the most debug output is -99.
 
+=item C<editAppendOption>
+
+See C<addAppendOption> for parameters and C<editBuiltinOption> for functionality.
+
+=item C<edit*Builtin*Option>
+
+See C<addOption> for parameters.
+
+This method cannot be called directly.  It is called by the following methods.
+
+    editVerboseOption
+    editQuietOption
+    editOverwriteOption
+    editSkipOption
+    editHeaderOption
+    editVersionOption
+    editExtendedOption
+    editForceOption
+    editDebugOption
+    editSaveArgsOption
+    editPipelineOption
+    editErrorLimitOption
+    editAppendOption
+    editRunOption
+    editDryRunOption
+    editUsageOption
+    editHelpOption
+    editCollisionOption
+
+For each builtin option, it checks a stored global list of editable options (a subset of addOption()'s parameters) to validate the options provided and calls addOption() with the validated parameters.  Using the above "edit" option methods does not change the position of the option in the usage.  To change the order of the builtin options, see the add___Option() methods and the addBuiltinOption() method.
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<editCollisionOption>
+
+=item C<editDebugOption>
+
+=item C<editDryRunOption>
+
+=item C<editErrorLimitOption>
+
+=item C<editExtendedOption>
+
+=item C<editForceOption>
+
+=item C<editHeaderOption>
+
+=item C<editHelpOption>
+
+=item C<editOverwriteOption>
+
+=item C<editPipelineOption>
+
+=item C<editQuietOption>
+
+=item C<editRunOption>
+
+=item C<editSaveArgsOption>
+
+=item C<editSkipOption>
+
+=item C<editUsageOption>
+
+=item C<editVerboseOption>
+
+=item C<editVersionOption>
+
+For all above edit*Option() methods, see C<add*Option> for parameters and C<editBuiltinOption> for functionality.
+
 =item C<error> EXPRs
 
 See C<warning>.
 
 =item C<flushStderrBuffer> [FORCE]
 
-This method flushes any debug, error, warning, or verbose messages that might be in the buffer, if the flags linked to those messages (e.g. --verbose, --debug, --error-limit) have been rpocessed and their associated class variables defined.  This method is called automatically, thus it you never need to call it.  It's only useful when debugging fatal errors that occur before processCommandLine() is called.
+This method flushes any debug, error, warning, or verbose messages that might be in the buffer, if the flags linked to those messages (e.g. --verbose, --debug, --error-limit) have been read from the command line and their associated class variables defined.  This method is called automatically, thus you never need to call it explicitly.  It's only useful when debugging fatal errors that occur before processCommandLine() is called.
 
 Standard error messages only get buffered if they are generated before the command line arguments have been processed.  The reason for this is to wait until flags such as --quiet have been processed so that CommandLineInterface knows whether it should print its buffer or suppress it.  processCommandLine() calls flushStderrBuffer().
 
@@ -16793,17 +24008,17 @@ I<ADVANCED>
 
 n/a
 
-=item C<getCommand> [INCLUDE_PERL_PATH, NO_DEFAULTS, INC_DEFMODE]
+=item C<getCommand> [INCLUDE_PERL_PATH NO_DEFAULTS INC_DEFMODE]
 
-Returns a string containing the command that was issued on the command line (without input or output redirects).  It (by default) incorporates command line parameters that were previously saved using the --save-as-default flag.  Added defaults are commented at the end of the command to denote that they were added by the script.  This method is called automatically to generate output file headers containing the command that generated them and when --verbose is supplied.
+Returns a string containing the command that was issued on the command line (without input or output redirects).  It (by default) incorporates command line parameters that were previously saved using the --save-args flag.  Added defaults are commented at the end of the command to denote that they were added by the script.  This method is called automatically to generate output file headers containing the command that generated them and when --verbose is supplied.
 
 The command returned by getCommand() is what the shell gives it, thus unless glob characters such as '*', '?', etc. are wrapped in quotes, the command returned will be post-shell expansion/interpolation.  You do not have to call processCommandLine() before calling getCommand().
 
 If INCLUDE_PERL_PATH has a non-zero value, the path to the perl executable is placed in front of the script call.  This allows the user to know which of possibly multiple perl installations ran the script.
 
-If NO_DEFAULTS has a non-zero value, the user saved defaults, previously saved using --save-as-default, will be omitted from the returned command.  Note, in string context, the returned command separates user defaults from manually supplied options with '--' and a comment and encapsulates the defaults in square brackets.  To run the command in the same way, the defaults must either be saved and the command omit the defaults or the defaults must be cleared and manually supplied.
+If NO_DEFAULTS has a non-zero value, the user saved defaults, previously saved using --save-args, will be omitted from the returned command.  Note, in string context, the returned command separates user defaults from manually supplied options with '--' and a comment and encapsulates the defaults in square brackets.  To run the command in the same way, the defaults must either be saved and the command omit the defaults or the defaults must be cleared and manually supplied.
 
-Any options such as --run, --dry-run, --usage, and --help that were supplied via saved defaults (see --save-as-default) are not actually used in runs of the script, but they are stored with default options and affect the DEFRUNMODE (see setDefaults()).  One of these 4 options will change the default run mode.
+Any options such as --run, --dry-run, --usage, and --help that were supplied via saved defaults (see --save-args) are not actually used in runs of the script, but they are stored with default options and affect the DEFRUNMODE (see setDefaults()).  One of these 4 options will change the default run mode.
 
 INC_DEFMODE
 
@@ -16816,7 +24031,7 @@ I<EXAMPLE>
 I<Command>
 
     #Previous command to save default arguments:
-    example.pl --verbose 3 --save-as-default
+    example.pl --verbose 3 --save-args
     #Command related to output below:
     example.pl -i '*.txt' file{1,2}.tab
 
@@ -16834,7 +24049,7 @@ I<ASSOCIATED FLAGS>
 
 The following default options affect the behavior of this method:
 
-    --save-as-default   Save current options for inclusion in every run.
+    --save-args        Save current options for inclusion in every run.
 
 I<LIMITATIONS>
 
@@ -16957,44 +24172,7 @@ Note that CommandLineInterface knows if you are redirecting output via a pipe or
 
 To skip headers when reading in a file generated by a script using CommandLineInterface, you must skip the header during file processing, e.g. `next if(/^#/)`.
 
-=item C<getInHandleFileName> HANDLE
-
-Returns the file name (and path as supplied) associated with the input file handle.
-
-I<EXAMPLE>
-
-=over 4
-
-I<Command>
-
-    example.pl -i ../in.txt
-
-I<Code>
-
-    openIn(*INPUT,getInfile());
-    print("Input file: ",getInHandleFileName(*INPUT));
-
-I<Output>
-
-    Input file: ../in.txt
-
-=back
-
-I<ASSOCIATED FLAGS>
-
-Default file options that are added if none defined (which affect the behavior of this method):
-
-    -i                  Input file. see addInfileOption()
-
-I<LIMITATIONS>
-
-None.
-
-I<ADVANCED>
-
-n/a
-
-=item C<getInfile> [FILETYPEID*, ITERATE]
+=item C<getInfile> [FILETYPEID* ITERATE]
 
 Returns the file of type FILETYPEID (the ID returned by addInfileOption) that is among the current combination of files that are being processed together (see nextFileCombo()).
 
@@ -17063,6 +24241,43 @@ What this means is that you cannot as of yet process the ONETOMANY 'one' file ou
 
 =back
 
+=item C<getInHandleFileName> HANDLE
+
+Returns the file name (and path as supplied) associated with the input file handle.
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl -i ../in.txt
+
+I<Code>
+
+    openIn(*INPUT,getInfile());
+    print("Input file: ",getInHandleFileName(*INPUT));
+
+I<Output>
+
+    Input file: ../in.txt
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+Default file options that are added if none defined (which affect the behavior of this method):
+
+    -i                  Input file. see addInfileOption()
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
 =item C<getLine> HANDLE VERBOSELEVEL VERBOSEFREQ
 
 In SCALAR context, returns the next line of the file connected to HANDLE (see openIn()).
@@ -17101,7 +24316,7 @@ I<ASSOCIATED FLAGS>
 
 The following default options affect the behavior of this method:
 
-    --quiet             Suppress all errors, warnings, & debugs.  See quiet()
+    --quiet             Suppress all errors, warnings, & debugs.  See isQuiet()
     --verbose           Prints status.  See verbose() and verboseOverMe()
     --debug             Prints debug messages.  See debug()
 
@@ -17225,7 +24440,7 @@ I<ADVANCED>
 
 n/a
 
-=item C<getOutfile> SUFFIXID [, ITERATE]
+=item C<getOutfile> SUFFIXID [ITERATE]
 
 Returns a file name for the output file type specified by SUFFIXID (the ID returned by addOutfileSuffixOption()) that is in the current file set (see nextFileCombo()).
 
@@ -17354,7 +24569,48 @@ I<ADVANCED>
 
 n/a
 
-=item C<getVersion> [COMMENT, EXTENDED]
+=item C<getUserDefaults> [REMOVE_QUOTES]
+
+In list context, returns an array of saved default arguments.  In scalar context, it returns a reference to said array.
+
+By default, defaults are saved with quotes if the supplied values have white spaces.  The returned array elements will strip off their quotes if REMOVE_QUOTES has a non-zero value.
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl --save-args --verbose --debug 2 -i 'test1.txt test2.txt'
+    example.pl --run
+
+I<Code>
+
+    print("Saved args1: ",join(' ',getUserDefaults()),"\n");
+    print("Saved args2: ",join(';',getUserDefaults(REMOVE_QUOTES => 1)),"\n");
+
+I<Output>
+
+    Saved args1: --save-args --verbose --debug 2 -i 'test1.txt test2.txt'
+    Saved args2: --save-args;--verbose;--debug;2;-i;test1.txt test2.txt
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+Default file options that are added if none defined (which affect the behavior of this method):
+
+    --save-args         Save current options for inclusion in every run.
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
+=item C<getVersion> [COMMENT EXTENDED]
 
 Returns the version number of the script (set by setScriptInfo()) in which CommandLineInterface is being used.  If the script author did not seet a version number, the string 'UNKNOWN' will be returned.
 
@@ -17401,7 +24657,7 @@ n/a
 
 =item C<headerRequested>
 
-This method returns the value of the --header (or --no-header) flag.  The value will be 1 if --header was provided on the command line, 0 if --no-header was supplied once, or 1 if neither was supplied nor saved as a default (see --save-as-default).
+This method returns the value of the --header (or --no-header) flag.  The value will be 1 if --header was provided on the command line, 0 if --no-header was supplied once, or 1 if neither was supplied nor saved as a default (see --save-args).
 
 I<EXAMPLE>
 
@@ -17435,7 +24691,7 @@ I<ADVANCED>
 
 n/a
 
-=item C<help> [ADVANCED, IGNORE_UNSUPPLIED]
+=item C<help> [ADVANCED IGNORE_UNSUPPLIED]
 
 The help() method prints information about the script that is set by setScriptInfo() and the input and output file formats (whose information is set by calls to addInfileOption(), addOutfileOption(), and addOutfileSuffixOption().
 
@@ -17670,11 +24926,9 @@ I<ADVANCED>
 
 n/a
 
-=item C<isThereInputOnSTDIN>
+=item C<isOverwrite>
 
-This method returns true (/non-zero) if input has been piped or redirected into the script.  If input is not present on STDIN, it returns false (/0).
-
-isThereInputOnSTDIN() is not exported by default, thus you must either supply it in your `use CommandLineInterface qw(:DEFAULT isThereInputOnSTDIN);` statement or call it using the package name: `CommandLineInterface::isThereInputOnSTDIN();`.
+This method returns the value of the --overwrite flag.  The value will be 0 if --overwrite was not provided on the command line, 1 if --overwrite was supplied once, 2 if supplied twice, etc..  The --overwrite flag can also take a value (e.g. --overwrite 3) in which case, that is the value that is returned.
 
 I<EXAMPLE>
 
@@ -17682,26 +24936,99 @@ I<EXAMPLE>
 
 I<Command>
 
-    example.pl -i in.txt
+    example.pl -i in.txt --overwrite
 
 I<Code>
 
-    print("Input coming in on standard in?: ",
-          CommandLineInterface::isThereInputOnSTDIN());
+    print("Value of --overwrite: ",isOverwrite());
 
 I<Output>
 
-    Input coming in on standard in?: 0
+    Value of --overwrite: 1
 
 =back
 
 I<ASSOCIATED FLAGS>
 
-n/a
+The following default options affect the behavior of this method:
+
+    --overwrite           Overwrites existing output files.
 
 I<LIMITATIONS>
 
-None.
+isOverwrite() calls processCommandLine() to get the value of the flag if the command line has not yet been processed, thus you cannot call isOverwrite() before you have finished all calls to the add*Options methods.
+
+I<ADVANCED>
+
+n/a
+
+=item C<isQuiet>
+
+This method returns the value of the --quiet flag.  The value will be 0 if --quiet was not provided on the command line, 1 if --quiet was supplied.
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl -i in.txt --quiet
+
+I<Code>
+
+    print("Value of --quiet: ",isQuiet());
+
+I<Output>
+
+    Value of --quiet: 1
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options affect the behavior of this method:
+
+    --quiet               Suppress all errors, warnings, & debugs.
+
+I<LIMITATIONS>
+
+isOverwrite() calls processCommandLine() to get the value of the flag if the command line has not yet been processed, thus you cannot call isOverwrite() before you have finished all calls to the add*Options methods.
+
+I<ADVANCED>
+
+n/a
+
+=item C<isSkip>
+
+This method returns the value of the --skip flag.  The value will be 0 if --skip was not provided on the command line, 1 if --skip was supplied.
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl -i in.txt --skip
+
+I<Code>
+
+    print("Value of --skip: ",isSkip());
+
+I<Output>
+
+    Value of --skip: 1
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+The following default options affect the behavior of this method:
+
+    --skip               Skip file set w/ existing outfiles. See nextFileCombo()
+
+I<LIMITATIONS>
+
+isOverwrite() calls processCommandLine() to get the value of the flag if the command line has not yet been processed, thus you cannot call isOverwrite() before you have finished all calls to the add*Options methods.
 
 I<ADVANCED>
 
@@ -17744,6 +25071,43 @@ I<ADVANCED>
 
 n/a
 
+=item C<isThereInputOnSTDIN>
+
+This method returns true (/non-zero) if input has been piped or redirected into the script.  If input is not present on STDIN, it returns false (/0).
+
+isThereInputOnSTDIN() is not exported by default, thus you must either supply it in your `use CommandLineInterface qw(:DEFAULT isThereInputOnSTDIN);` statement or call it using the package name: `CommandLineInterface::isThereInputOnSTDIN();`.
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl -i in.txt
+
+I<Code>
+
+    print("Input coming in on standard in?: ",
+          CommandLineInterface::isThereInputOnSTDIN());
+
+I<Output>
+
+    Input coming in on standard in?: 0
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+n/a
+
+I<LIMITATIONS>
+
+None.
+
+I<ADVANCED>
+
+n/a
+
 =item C<isVerbose>
 
 This method returns the value of the --verbose flag.  The value will be 0 if --verbose was not provided on the command line, 1 if --verbose was supplied once, 2 if supplied twice, etc..  The --verbose flag can also take a value (e.g. --verbose 3) in which case, that is the value that is returned.  This method is useful if for example, you are making a system call and need to know whether to provide a verbose or quiet flag.
@@ -17775,6 +25139,58 @@ The following default options affect the behavior of this method:
 I<LIMITATIONS>
 
 isVerbose() calls processCommandLine() to get the value of the flag if the command line has not yet been processed, thus you cannot call isVerbose() before you have finished all calls to the add*Options methods.
+
+I<ADVANCED>
+
+n/a
+
+=item C<makeMutuallyExclusive> OPTIONIDS [REQUIRED OVERRIDABLE NAME]
+
+This method enforces mutual exclusivity of options provided by the user on the command line.  It takes a reference to an array of option IDs (as are returned by any of the add*Option() methods, e.g. addOption() or addInfileOption()).  More than 1 option ID is required.  If the user supplies flags on the command line for more than one of the options indicated, the script will automatically exit with an error message indicating that the flags cannot be supplied together.
+
+REQUIRED indicates that one of the options must be supplied.  It will be set automatically if any option supplied among the OPTIONIDS is marked as REQUIRED (as was supplied to the add*Option method that created it).  Such options will automatically be treated as optional, if supplied to makeMutuallyExclusive.
+
+OVERRIDABLE defaults to false/0 and refers to whether DEFAULT values for included options can be over-ridden (or unset/turned-off) by one another in the following ways:
+
+    User default of any option over-rides programmer default (see --save-args)
+    Any option supplied on the command line over-rides both user & programmer defaults
+
+For example.  Let's say --verbose and --quiet were made mutually exclusive and the programmer set a default for --verbose to 2, yet the user supplies --quiet.  If the set of mutually exclusive options were supplied with OVERRIDABLE as true/non-zero, --verbose is set to 0 automatically and the script proceeds.  If OVERRIDABLE was false, the user would get an error, notifying them that --verbose must be explicitly turned off by supplying `--verbose 0` in order to supply --quiet.
+
+OVERRIDABLE is useful when options are incompatible, but allowing them to silently change one another can lead to inexplicable side effects.  Only set OVERRIDABLE to true/non-zero when the options included are obviously linked.
+
+Similarly, if the user tries to save --quiet as a default, by supplying it with --save-args, they will get the same error & suggestion.
+
+NAME is the name of the mutually exclusive set of options used in errors.  It defaults to "custom #", where "#" is a number indicating the set number in the order in which they were created (starting from 1).
+
+I<EXAMPLE>
+
+=over 4
+
+I<Command>
+
+    example.pl -x 1 -y 2
+
+I<Code>
+
+    my($x,$y);
+    my $xid = addOption(FLAG => 'x',VARREF => \$x);
+    my $yid = addOption(FLAG => 'y',VARREF => \$y);
+    makeMutuallyExclusive(OPTIONIDS => [$xid,$yid]);
+
+I<Output>
+
+    ERROR1: The following options (as supplied on the command line) are mutually exclusive: [x,y].  Please provide only one.
+
+=back
+
+I<ASSOCIATED FLAGS>
+
+n/a
+
+I<LIMITATIONS>
+
+The only option types that can currently be explicitly over-ridden (when OVERRIDABLE is false/0) are: negbool and count.  User defaults in those cases can be eliminated by changing the user defaults with --save-args, but programmer defaults cannot be explicitly over-ridden unless the code is changed.  Until a means to unset other option types is designed, the only work-arounds are to either not set DEFAULT values for option types other than negbool and count, or to set OVERRIDABLE to true/1 when the mutually exclusive set is created (this works because the values of over-ridden options are simply left undefined).
 
 I<ADVANCED>
 
@@ -17902,7 +25318,7 @@ Calling nextFileCombo() triggers the processing of the command line options (if 
 
 The iterator will start over the next time it is called after having returned undef.
 
-=item C<openIn> HANDLE, FILE [, QUIET]
+=item C<openIn> HANDLE FILE [QUIET]
 
 Opens FILE for input to be read on HANDLE unless --dry-run was supplied.
 
@@ -17938,7 +25354,7 @@ I<ASSOCIATED FLAGS>
 
 The following default options affect the behavior of this method:
 
-    --quiet             Suppress all errors, warnings, & debugs.  See quiet()
+    --quiet             Suppress all errors, warnings, & debugs.  See isQuiet()
     --error-limit       Suppress some errors & warnings.  See error()/warning()
     --verbose           Prints open message.  See verbose()
     --debug             Prints debug messages.  See debug()
@@ -17959,7 +25375,7 @@ If --dry-run was supplied, the file is opened, but immediately closed (in order 
 
 Opens STDIN if FILE is '-'.
 
-=item C<openOut> HANDLE [, FILE, SELECT, QUIET, HEADER, APPEND, MERGE]
+=item C<openOut> HANDLE [FILE SELECT QUIET HEADER APPEND MERGE]
 
 Opens FILE for writing through HANDLE unless --dry-run was supplied.  Opens STDOUT if FILE is not supplied.
 
@@ -18040,7 +25456,7 @@ I<ASSOCIATED FLAGS>
 
 The following default options affect the behavior of this method:
 
-    --quiet             Suppress all errors, warnings, & debugs.  See quiet()
+    --quiet             Suppress all errors, warnings, & debugs.  See isQuiet()
     --verbose           Print close message.  See verbose() and verboseOverMe()
     --debug             Prints debug messages.  See debug()
     --overwrite         Overwrites existing output files.
@@ -18074,7 +25490,9 @@ Quits with a critical error if FILE is undefined.
 
 =item C<printRunReport> [ERRNO]
 
-Deceptively named, this method will print a run report only if it is deemed that a run report is desireable.  A run report is deemed desireable if --quiet was not supplied and either --verbose was supplied, --debug was supplied, there was at least 1 warning or error, or ERRNO is non-zero.
+This method will print a run report if it is deemed that a run report is desireable.  A run report is deemed desireable if --quiet was not supplied and either --verbose was supplied, --debug was supplied, there was at least 1 warning or error, or ERRNO is non-zero.
+
+printRunReport is automatically called when the script exits if (when in a run mode) there were any errors or warnings.  When the script is in a non-run mode, the report will only print if the number of errors exceeds the error limit (see --error-limit).  Thus you only need to call it yourself if you want a run report in any other case.
 
 ERRNO is assumed to be the exit code that will be used upon exit of the script.
 
@@ -18184,7 +25602,7 @@ The following default options affect the behavior of this method:
     --extended          Print extended usage/help/version/header.
     --version           Print version message and quit.  See getVersion()
     --header            Print commented header to outfiles.  See getHeader()
-    --save-as-default   Save current options for inclusion in every run.
+    --save-args         Save current options for inclusion in every run.
 
 Default file options that are added if none defined (which also affect the behavior of this method):
 
@@ -18205,15 +25623,17 @@ I<ADVANCED>
 
 processCommandLine triggers most of the default functionality, such as overwrite protection.  All anticipated output files are checked up-front for possible overwrite and collision situations.
 
-=item C<quit> ERRNO
+=item C<quit> [ERRNO REPORT]
 
-The quit() method, aside from exiting the script with the given ERRNO exit code, does 3 things:
+The quit() method, aside from exiting the script with the given ERRNO exit code (default: 0), does 3 things:
 
     1. Flushes the standard error buffer (if called before the command line parameters have been processed).
     2. Prints a run report summarizing errors, warnings, etc..
     3. Skips the exit if --force was supplied and ERRNO is non-zero
 
 The run report will print (at a minimum) a summary of the exit status if the conditions upon quitting include a non-zero (or undefined) exit code, any errors or warnings were printed, --verbose was supplied, or if any debug statements were printed.
+
+REPORT can be supplied as 0 or non-zero (e.g. 1) to explicitly control whether a run report will be printed.
 
 I<EXAMPLE>
 
@@ -18301,7 +25721,7 @@ I<ADVANCED>
 
 n/a
 
-=item C<setDefaults> [HEADER, ERRLIMIT, COLLISIONMODE, DEFRUNMODE, DEFSDIR, UNPROCFILEWARN]
+=item C<setDefaults> [HEADER ERRLIMIT COLLISIONMODE DEFRUNMODE DEFSDIR UNPROCFILEWARN REPORT VERBOSE QUIET DEBUG]
 
 Use this method to set default values for some command line flags that CommandLineInterface provides (or doesn't provide).
 
@@ -18330,7 +25750,7 @@ For example, running a script without any arguments provided on the command line
     3. Run the script (e.g. if required options have values*)
     4. Run the script in dry-run mode (e.g. if required options have values*)
 
-* A required option can have either a hard-coded default value (see the various add*Option methods) or a user-saved default value (see --save-as-default).  The above behaviors apply only when no options are supplied on the command line.
+* A required option can have either a hard-coded default value (see the various add*Option methods) or a user-saved default value (see --save-args).  The above behaviors apply only when no options are supplied on the command line.
 
 Possible values of DEFRUNMODE and the resultant script behavior when no arguments are supplied are:
 
@@ -18343,11 +25763,19 @@ Each mode adds flags for the other modes to the command line interface (e.g. --r
 
 A main goal of DEFRUNMODE is to not get in the way.  In any mode, if there are required options, and they all have values defined by any means, execution will not be halted by a usage or help message.
 
-See notes in ADVANCED about how required options with default values or how required options set via --save-as-default can affect script running.
+See notes in ADVANCED about how required options with default values or how required options set via --save-args can affect script running.
 
-DEFSDIR is the user defaults directory (used by all scripts that use CommandLineInterface).  If the user saves some parameters as defaults (e.g. `--verbose --save-as-default`), a file containing the defaults for the specific script is saved in this directory.
+DEFSDIR is the user defaults directory (used by all scripts that use CommandLineInterface).  If the user saves some parameters as defaults (e.g. `--verbose --save-args`), a file containing the defaults for the specific script is saved in this directory.
 
 Set UNPROCFILEWARN to 0 to turn off warnings about unprocessed input/output file sets when your script exits (successfully).  A file set is a group of input files that are processed together (see PAIR_WITH parameter of addInfileOption and addOutfileOption).  A file set is considered processed when the set is iterated (either explicitly by calling nextFileCombo() or implicitly by calling getInfile(), getOutfile(), or getOutdir() (on the same file type ID)).  Warnings about unprocessed file sets can usually be avoided by either looping, like `while(nextFileCombo())` or by calling quit(ERRNO => 1).  The only time you should need to set UNPROCFILEWARN to 0 is when a valid/successful outcome of a script involves not retrieving all files supplied on the command line.
+
+REPORT controls whether a run report will be printed to standard error at the end of a script run.  It can be 0 (for never), 1 (for auto), 2 (for always when in run or dry-run mode).  1 (auto) is the default and determines whether a run report should be printed, in which case, it prints when verbose is non-zero, warnings or errors occurred, or when debug mode is non-zero.
+
+VERBOSE sets the default verbose mode (unless the user explicitly sets it).  Note that if verbose mode is set to non-zero, --quiet cannot be supplied unless `--verbose 0` is explicitly supplied by the user.
+
+QUIET sets the default quiet mode.  Note that if quiet mode is set to 1, --verbose cannot be supplied by the user or they will get an error about being in both verbose and quiet modes at the same time.  It is thus best to not use this unless you know what you're doing.
+
+DEBUG sets the default debug mode (unless the user explicitly sets it).  Note that if debug mode is set to non-zero, --quiet cannot be supplied unless `--debug 0` is explicitly supplied by the user.
 
 I<EXAMPLE>
 
@@ -18374,7 +25802,7 @@ The following default options are affected by the behavior of this method:
 
     --error-limit       Suppress some errors & warnings.  See error()/warning()
     --header            Print commented header to outfiles.  See getHeader()
-    --save-as-default   Save current options for inclusion in every run.
+    --save-args         Save current options for inclusion in every run.
 
 Setting the DEFRUNMODE in this method also affects the visibility and values of these flags:
 
@@ -18389,21 +25817,21 @@ The ERRLIMIT set here is over-ridden by the user supplying --error-limit, but on
 
 I<ADVANCED>
 
-With regard to DEFRUNMODE, note that a required option with a default value is essentially optional because a value has already been supplied.  This can be true if the call to one of the add*Option() methods included a hard-coded default value (there are some exceptions: see documentation for each method) or if the user has used --save-as-default to save a value for a required option.
+With regard to DEFRUNMODE, note that a required option with a default value is essentially optional because a value has already been supplied.  This can be true if the call to one of the add*Option() methods included a hard-coded default value (there are some exceptions: see documentation for each method) or if the user has used --save-args to save a value for a required option.
 
 If all required options have default values (either hard-coded or user-saved), then CommandLineInterface will treat the script as if there are no required options.  For example, if DEFRUNMODE is set to 'usage', the --run flag will be added to the interface.  This means that if a required option without a hard-coded default exists, the user will not see --run in the usage output, but after they add their own saved defaults to the required options, --run will be added to the usage as a required option (alternatively --dry-run in this case will run the script too, albeit without creating output files).
 
 The user will not be allowed to save the --run flag, thus if you want the script to be able to run without the user supplying any options, you must set DEFRUNMODE to 'run'.
 
-=item C<setScriptInfo> [VERSION, CREATED, HELP, AUTHOR, CONTACT, COMPANY, LICENSE, DETAILED_HELP]
+=item C<setScriptInfo> [VERSION HELP CREATED AUTHOR CONTACT COMPANY LICENSE DETAILED_HELP]
 
 This is the first method that should be called and is where you set information that a user can retrieve using the --help and --version flags.  This information is also used when the --header flag is supplied to create a header that includes the script version and creation date.
 
 VERSION is a free-form string you can use to set a version number that will be printed when --version or --help is supplied or included in file headers when --header is supplied.
 
-CREATED is a free-form string you can use to set a creation date that will be printed when --help or --version --extended is supplied.  It is also included in file headers when --header is supplied.
-
 HELP is the text that is included in the --help output after the "WHAT IS THIS" bullet at the top of the help output.
+
+CREATED is a free-form string you can use to set a creation date that will be printed when --help or --version --extended is supplied.  It is also included in file headers when --header is supplied.
 
 AUTHOR is the name or names of the author of the script.
 
@@ -18499,27 +25927,76 @@ I<ADVANCED>
 
 n/a
 
-=item C<usage> [ERROR_MODE, EXTENDED]
+=item C<usage> [ERROR_MODE EXTENDED]
 
-usage() is called automatically when the command line arguments are processed (see processCommandLine(), whose initial call is triggered by numerous methods).  usage() prints a formatted message about available options in the script.
+usage() is called automatically when the command line arguments are processed (see processCommandLine()), whose initial call is triggered by numerous methods, e.g. getInfile().  usage() prints a formatted message about available options in the script.
 
-Descriptions of options printed by usage() are set by the various add*Option methods, such as addOption(), addArrayOption(), add2DArrayOption(), addInfileOption(), addOutfileOption(), addOutfileSuffixOption(), and addOutdirOption().  addOptions() is excluded from this list since it is supplied only as a quick conversion method for existing scripts that already use the Getopt::Long module.  Each of these methods has a FLAG, REQUIRED, DEFAULT, SHORT_DESC, and LONG_DESC argument, along with other case-specific arguments (such as TYPE, PRIMARY, HIDDEN, ACCEPTS, FORMAT, and DELIMITER) that affect the content of the usage message.
+Descriptions of options printed by usage() are set by the various add*Option() methods, such as addOption(), addArrayOption(), add2DArrayOption(), addInfileOption(), addOutfileOption(), addOutfileSuffixOption(), addOutdirOption(), etc..  Each of these methods has a FLAG, REQUIRED, DEFAULT, SHORT_DESC, and LONG_DESC argument, along with other option-type-specific arguments (such as TYPE, PRIMARY, HIDDEN, ACCEPTS, FORMAT, and DELIMITER) that affect the content of the usage message.
 
-usage() outputs a usage message in 3 modes: an error mode, a short summary mode, and an extended/detailed mode.  The default mode is the short summary mode.  Error mode only prints a sample command with a list of acceptable short flags.  The detailed mode is triggered by supplying --extended as the only option supplied on the command line.
+usage() is called implicitly, so you should never need to call it unless you would like the usage to accompany an error.  However, this depends on the default RUNMODE (see setDefaults()).  If the default RUNMODE is anything other than 'usage', then the --usage flag must be supplied to see the usage output.
 
---extended (from the command line) can be explicitly overridden using the EXTENDED argument.
+usage() outputs a usage message in one of the following modes:
+
+    1. error mode, ERROR_MODE=1  - shows the script and options on a single line
+    2. summary mode, EXTENDED=0  - shows succinctly described common options
+    3. detailed mode, EXTENDED=1 - shows more options with long descriptions
+    4. advanced mode, EXTENDED=2 - includes advanced options
+    5. hidden mode, EXTENDED=3+  - shows all options including hidden/deprecated
+
+The default mode is the summary mode.  Error mode only prints a sample command with a list of acceptable short flags and is only shown when the ERROR_MODE parameter is non-zero.  The detailed mode is triggered either by the EXTENDED parameter being 1 or by the user by supplying --extended with no other options (see above) on the command line.  Supplying the EXTENDED argument over-rides the command line --extended option.
 
 ERROR_MODE is specified by a non-zero value and over-rides the EXTENDED mode.
 
-The default short summary mode uses the SHORT_DESC values specified in the add*Option methods.  If the value is undefined or an empty string, the option is not included in the short usage summary.  The first shortest flag specified in the FLAG values supplied to the add*Option methods is what is reported in both the ERROR_MODE and in the short usage summary mode.  The EXTENDED mode reports all flag values specified in the FLAG string supplied to the add*Option methods as well as the LONG_DESC.
+The default behavior is summary mode, which uses the SHORT_DESC values specified in the add*Option methods.  If the value of SHORT_DESC is undefined or an empty string, the option is not included in the short usage summary (with the exception of REQUIRED options, which are always included).  The first shortest flag specified in the FLAG values supplied to the add*Option methods is what is reported in both the ERROR_MODE and in the short usage summary mode.  The EXTENDED mode reports all flag values specified in the FLAG string supplied to the add*Option methods as well as the LONG_DESC.
 
-There are 3 columns in the short summary and extended modes: flags, required/optional, and the description.  These modes also include a sample command and a reporting of whatever user defaults have been set using the --save-as-default option.  The first part of the description contains the default value enclosed in square brackets '[]'.  If an option has an ACCEPTS value set, those values will appear after the default, surrounded by curly braces.  Note, descriptions for input and output files should refer to the --help output for file formats.
+SHORT_DESC and LONG_DESC (see add*Option() methods) are not concatenated together.  They are independent descriptions.  If a description is not supplied, this description will appear in summary mode: "No usage summary provided for this option." or this description will appear in other modes: "No usage provided for this option.".
 
-The EXTENDED usage includes all the default options supplied by CommandLineInterface, but the short summary includes only the default options (if present): -i, -o, --help, and --extended.
+The top of the usage message shows the script name and required options (similar to what you would see with an error).  The bottom of the usage may show a legend or other messages necessary to interpret the usage content.
 
-If PRIMARY is a non-zero value for one of the addInfileOption calls, the flag column in the usage output will contain an asterist and a default message in the description indicating that the flag is not required and that input on STDIN will be assumed the be this type of file as is provided to the indicated flag for this option.
+The body of the usage has 2 columns: flags and description.  If a DEFAULT is defined for an option (either in the add*Option() call or by the user via the --save-args option), the first part of the description contains the default value enclosed in square brackets '[]'.  If an option has an ACCEPTS value set, those values will appear after the default, surrounded by curly braces '{}'.
 
-usage() is not exported by default, thus you must either supply it in your `use CommandLineInterface qw(... usage);` statement or call it using the package name: `CommandLineInterface::usage();`.
+If an option has multiple flag aliases, each flag is displayed on a separate line in the flags column.  The best way to describe how flags and their argument types are displayed is by example:
+
+    <file>                  Takes a single file without a flag (see FLAGLESS)
+    < <file>                Takes a file on standard input (see PRIMARY)
+    -i <stub> < <file>      Takes a file on standard input that can be named by
+                            giving a stub string to the -i flag
+    -i <file*...>...        -i can be supplied multiple times and each arg can
+                            be a glob of multiple files
+    -x <str>                -x takes a single string
+    -x <str>...             -x can be supplied N times and takes a single string
+    -x <str,...>...         -x takes a (,) delimited string, supplied N times
+    -o <sfx>                -o takes a suffix (appended to an input file name)
+    --help                  --help takes no argument (i.e. is a boolean)
+    --no-pipeline           --pipeline is a negatable boolean, defaulted to true
+    --extended [<cnt>]      --extended takes an optional count argument (count
+                            options can be supplied multiple times to increment
+                            the value)
+    --error-limit <int>     --error-limit takes an integer argument
+    --collision-mode        --collision-mode is an enumeration that takes one of
+      <merge,rename,error>  the following arguments: merge, rename, or error
+    --usage                 --usage is a hidden option
+    [HIDDEN-OPTION]
+
+See --help --extended 2 for a more detailed description (e.g. perl -MCommandLineInterface -e '' -- --help --extended 2).
+
+If an option is required, one of the following symbols will appear to the left of the flags:
+
+    * Required
+    ~ Required, but has default (so essentially "not required")
+    ^ One of multiple mutually exclusive options required
+
+These symbols will be described in a legend below the usage if one or more options meets the criteria for it.  Note, when one of a set of mutually exclusive options is required, the option description will get an addendum showing the inter-related options.
+
+Options will have addendums automatically concatenated to their LONG_DESC descriptions in the following cases:
+
+    1. A reference to --help for defined FORMAT descriptions (see add*Option())
+    2. A reference to mutually exclusive options (see makeMutuallyExclusive())
+    3. A mention of when one of a list of mutually exclusive options is REQUIRED
+    4. A full DEFAULT value (for DEFAULTs truncated for length)
+    5. Assorted other cases where an option is affected by other options
+
+usage() is not exported by default, thus you must either supply it in your `use CommandLineInterface qw(:DEFAULT usage);` statement or call it using the package name: `CommandLineInterface::usage();`.
 
 I<EXAMPLE>
 
@@ -18538,12 +26015,12 @@ I<Output>
 
     example.pl -i "input file(s)" [...]
 
-         -i                   OPTIONAL [stdin] Input file(s).
-         -o                   OPTIONAL [none] Outfile suffix (appended to -i).
-         --help               OPTIONAL Print general info and file formats.
-         --extended           OPTIONAL Print extended usage.
-
-    No user defaults set.
+      <file*...>...       Input file(s).
+      -o <sfx>            [STDOUT] Outfile suffix appended to file names
+                          supplied to [-i].
+      --help              Print general info and file formats.
+      --run               Run the script.
+      --extended [<cnt>]  Print detailed usage.
 
 =back
 
@@ -18552,40 +26029,37 @@ I<ASSOCIATED FLAGS>
 The following default options affect the behavior of this method:
 
     --extended          Print extended usage/help/version/header.
-    --save-as-default   Save current options for inclusion in every run.
-
-Default file options that are added if none defined (which also affect the behavior of this method):
-
-    -i                  Input file. see addInfileOption()
-    -o                  Output file suffix. see addOutfileSuffixOption()
-    --outfile           Output file. see addOutfileOption()
-    --outdir            Output directory. see addOutdirOption()
+    --save-args         Save current options for inclusion in every run.
 
 I<LIMITATIONS>
 
-The DEFAULTS and ACCEPTS displayed by usage() are only used in the usage output and not for setting or validating user input.  Validation of values using the ACCEPTS hash will be implemented when requirement 94 is addressed.
-
 usage() is called (and the script exits) when no options are (or only --extended is) provided and by default, when a critical error is ecountered during command line processing.  There is currently no way to not print the usage, but the exit can be skipped in the event of an error by providing --force.  Running without arguments instead of generating a usage message will be addressed when requirement 157 is implemented.
 
-The width of the usage output is static, set at 80 characters.  There is currently no way to change this.  A way to print to the terminal window width will be addressed when requirement 175 is implemented.
+Unless you have the Term::ReadKey module installed & configured and are running this script inside a compatible terminal window, the width of the usage output is static, set at 80 characters.  There is currently no way to set this.
 
 I<ADVANCED>
 
 n/a
 
-=item C<verbose> EXPRs [, {LEVEL, FREQUENCY, OVERME}]
+=item C<verbose> EXPRs [{OVERME LEVEL FREQUENCY COMMENT LOG}]
 
-Prints EXPR to STDERR.  Multiple EXPRs are all printed (similar to print()).
+Prints EXPR to STDERR (unless a log file has been defined (see addLogfileOption() and addLogfileSuffixOption())).  Multiple EXPRs are all printed (similar to print()) except for hash references.
 
 A newline character is added to the end of the message if none was supplied.
 
-A hash reference can be supplied anywhere in the argument list, containing the keys LEVEL and/or FREQUENCY.
+A hash reference can be supplied anywhere in the argument list, containing the keys OVERME, LEVEL, FREQUENCY, COMMENT, and/or, LOG.
+
+For the effect of OVERME, see verboseOverMe().
 
 A verbose message's LEVEL refers to when a it should be printed and depends on the verbose level (i.e. how many times --verbose was supplied on the command line (or what number was supplied to it)).  A message will be printed if the verbose level is greater than or equal to the message LEVEL.  For example, `verbose({LEVEL=>2},"Hello world.");` will print if --verbose is supplied at least 2 times on the command line, but not when supplied only once.
 
 A verbose message's FREQUENCY refers to when a repeated call to verbose (e.g. in a loop) should be printed.  The message will be printed on every FREQUENCY'th call from the same line of code.  E.g. `
 
-For the effect of OVERME, see verboseOverMe().
+If COMMENT is a non-zero integer, each verbose line will be commented with a '#' character.  If it is undefined or 0, no comment character will be prepended.  If a character or string is provided, it will be used as the comment character and prepended to each line.
+
+If LOG is non-zero, the verbose message will only be printed to the log (if logging is enabled), regardless of addLogfileOption or addLogfileSuffixOption's VERBOSE setting and will not print to standard error.  If a log file is not supplied, the message will not print anywhere.
+
+Note that if logging of verbose messages is enabled and log output is not being mirrored to standard error (see addLogfileOption() and/or addLogfileSuffixOption()), all verbose output to standard error will be suppressed.
 
 I<EXAMPLE>
 
@@ -18623,6 +26097,8 @@ The following default options affect the behavior of this method:
     --quiet             Suppress all error, warning, verbose, & debug messages.
     --verbose           Prints status.  See verbose() and verboseOverMe()
     --pipeline          Prepends script name to errors, warnings, & debugs.
+    --logfile           Can redirect verbose output to a log file
+    --logfile-suffix    Can redirect verbose output to a log file
 
 I<LIMITATIONS>
 
@@ -18634,7 +26110,7 @@ I<ADVANCED>
 
 verbose() removes the last newline character at the end of every verbose message (e.g. verbose("...\n")) before appending its default newline character.  Therefore, if you append multiple newline characters at the end of your message, the output will effectively contain all newline characters.
 
-=item C<verboseOverMe> EXPRs [, {LEVEL, FREQUENCY}]
+=item C<verboseOverMe> EXPRs [{LEVEL FREQUENCY}]
 
 Same functionality as verbose().  Prints EXPR to STDERR, but tells the next call of verbose(), verboseOverMe(), debug(), warning(), or error() to print over top of the message printed here.
 
@@ -18693,11 +26169,13 @@ Messages printed via verboseOverMe simply append a carriage return at the end.  
 
 Hint: To not print over the last verboseOverMe message printed, call verbose with a message that starts with a newline character (\n).
 
-=item C<warning> EXPRs
+=item C<warning> EXPRs [{DETAIL}]
 
-=item C<error> EXPRs
+=item C<error> EXPRs [{DETAIL}]
 
 Prints EXPR(s) to STDERR.  Multiple EXPRs are all printed (similar to print()).  Messages are prepended by 'ERROR#: ' or 'WARNING#: ' where '#' is the sequential error/warning number (indicating the order in which the errors/warnings occurred).
+
+Note that if logging of warning/error messages is enabled and log output is not being mirrored to standard error (see addLogfileOption() and/or addLogfileSuffixOption()), all error/warning output to standard error will be suppressed.
 
 I<EXAMPLE>
 
@@ -18727,6 +26205,8 @@ The following default options affect the behavior of this method:
     --error-limit       Suppress some errors & warnings.
     --pipeline          Prepends script name to errors, warnings, & debugs.
     --debug             Prepends call trace.  See debug()
+    --logfile           Can redirect verbose output to a log file
+    --logfile-suffix    Can redirect verbose output to a log file
 
 I<LIMITATIONS>
 

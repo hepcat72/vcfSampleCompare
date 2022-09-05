@@ -232,7 +232,7 @@ my $sample_groups = [];
 add2DArrayOption(GETOPTKEY   => 's|sample-group',
 		 TYPE        => 'string',
 		 GETOPTVAL   => $sample_groups,
-		 DEFAULT     => 'any^',
+		 DISPDEF     => 'any^',
 		 SMRY_DESC   => ('A group of sample names for difference ' .
 				 'comparisons.  ^ See --extended usage.'),
 		 DETAIL_DESC => << 'END_DETAIL'
@@ -251,7 +251,7 @@ addArrayOption(GETOPTKEY   => 'd|min-group-size',
 	       GETOPTVAL   => $group_diff_mins,
 	       TYPE        => 'integer',
 	       DELIMITER   => '\D+',
-	       DEFAULT     => 'all*',
+	       DISPDEF     => 'all*',
 	       SMRY_DESC   => ('Minimum number of samples to use in a group ' .
 			       'to determine difference with its partner.'),
 	       DETAIL_DESC => << 'END_DETAIL'
